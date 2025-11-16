@@ -28,6 +28,8 @@ public struct HLSRewriteConfiguration: Sendable {
         }
     }
 
+    public typealias KeyURLResolver = @Sendable (HLSKey) -> URL?
+
     public let proxyBaseURL: URL
     public let playlistFilename: String
     public let segmentPathPrefix: String
@@ -35,6 +37,7 @@ public struct HLSRewriteConfiguration: Sendable {
     public let artificialBandwidth: Int?
     public let qualityPolicy: QualityPolicy
     public let lowLatencyOptions: LowLatencyOptions?
+    public let keyURLResolver: KeyURLResolver?
 
     public init(
         proxyBaseURL: URL,
@@ -43,7 +46,8 @@ public struct HLSRewriteConfiguration: Sendable {
         hideUntilBuffered: Bool = false,
         artificialBandwidth: Int? = nil,
         qualityPolicy: QualityPolicy = .automatic,
-        lowLatencyOptions: LowLatencyOptions? = nil
+        lowLatencyOptions: LowLatencyOptions? = nil,
+        keyURLResolver: KeyURLResolver? = nil
     ) {
         self.proxyBaseURL = proxyBaseURL
         self.playlistFilename = playlistFilename
@@ -52,14 +56,15 @@ public struct HLSRewriteConfiguration: Sendable {
         self.artificialBandwidth = artificialBandwidth
         self.qualityPolicy = qualityPolicy
         self.lowLatencyOptions = lowLatencyOptions
+        self.keyURLResolver = keyURLResolver
     }
 
     public var playlistURL: URL {
         proxyBaseURL.appendingPathComponent(playlistFilename)
     }
 
-    public func segmentURL(for sequence: Int) -> URL {
-        let key = SegmentIdentity.key(forSequence: sequence)
+    public func segmentURL(for sequence: Int, namespace: String? = nil) -> URL {
+        let key = SegmentIdentity.key(forSequence: sequence, namespace: namespace)
         return proxyBaseURL
             .appendingPathComponent(segmentPathPrefix)
             .appendingPathComponent(key)
@@ -99,7 +104,8 @@ public final class HLSRewriter: @unchecked Sendable {
     public func rewrite(
         mediaPlaylist: MediaPlaylist,
         config: HLSRewriteConfiguration,
-        bufferState: BufferState
+        bufferState: BufferState,
+        namespace: String? = nil
     ) -> String {
         var lines: [String] = ["#EXTM3U"]
         lines.append(config.lowLatencyOptions == nil ? "#EXT-X-VERSION:3" : "#EXT-X-VERSION:7")
@@ -132,6 +138,19 @@ public final class HLSRewriter: @unchecked Sendable {
 
         lines.append("#EXT-X-MEDIA-SEQUENCE:\(lowestVisibleSequence)")
 
+        if !mediaPlaylist.sessionKeys.isEmpty {
+            for key in mediaPlaylist.sessionKeys {
+                if let keyLine = renderKeyLine(
+                    prefix: "#EXT-X-SESSION-KEY",
+                    key: key,
+                    initializationVector: nil,
+                    resolver: config.keyURLResolver
+                ) {
+                    lines.append(keyLine)
+                }
+            }
+        }
+
         var visibleSegments: [HLSSegment] = []
         var pendingSegments: [HLSSegment] = []
 
@@ -158,10 +177,20 @@ public final class HLSRewriter: @unchecked Sendable {
             lines.append("#EXT-X-SKIP:SKIPPED-SEGMENTS=\(pendingSegments.count)")
         }
 
+        var lastMap: MediaInitializationMap?
+        var lastEncryption: SegmentEncryption?
+
         for segment in visibleSegments {
             let durationString = String(format: "%.3f", segment.duration)
+            appendMetadataIfNeeded(
+                for: segment,
+                lines: &lines,
+                lastMap: &lastMap,
+                lastEncryption: &lastEncryption,
+                resolver: config.keyURLResolver
+            )
             lines.append("#EXTINF:\(durationString),")
-            lines.append(config.segmentURL(for: segment.sequence).absoluteString)
+            lines.append(config.segmentURL(for: segment.sequence, namespace: namespace).absoluteString)
         }
 
         if
@@ -169,7 +198,14 @@ public final class HLSRewriter: @unchecked Sendable {
             lowLatency.prefetchHintCount > 0
         {
             for segment in pendingSegments.prefix(lowLatency.prefetchHintCount) {
-                lines.append("#EXT-X-PREFETCH:\(config.segmentURL(for: segment.sequence).absoluteString)")
+                appendMetadataIfNeeded(
+                    for: segment,
+                    lines: &lines,
+                    lastMap: &lastMap,
+                    lastEncryption: &lastEncryption,
+                    resolver: config.keyURLResolver
+                )
+                lines.append("#EXT-X-PREFETCH:\(config.segmentURL(for: segment.sequence, namespace: namespace).absoluteString)")
             }
         }
 
@@ -193,5 +229,88 @@ public final class HLSRewriter: @unchecked Sendable {
             attributes.append("CAN-PREFETCH=YES")
         }
         return attributes
+    }
+
+    private func appendMetadataIfNeeded(
+        for segment: HLSSegment,
+        lines: inout [String],
+        lastMap: inout MediaInitializationMap?,
+        lastEncryption: inout SegmentEncryption?,
+        resolver: HLSRewriteConfiguration.KeyURLResolver?
+    ) {
+        if segment.initializationMap != lastMap {
+            if let map = segment.initializationMap {
+                lines.append(renderMapLine(for: map))
+            }
+            lastMap = segment.initializationMap
+        }
+
+        if segment.encryption != lastEncryption {
+            if let encryption = segment.encryption,
+               let keyLine = renderKeyLine(
+                    prefix: "#EXT-X-KEY",
+                    key: encryption.key,
+                    initializationVector: encryption.initializationVector,
+                    resolver: resolver
+                ) {
+                lines.append(keyLine)
+            }
+            lastEncryption = segment.encryption
+        }
+    }
+
+    private func renderKeyLine(
+        prefix: String,
+        key: HLSKey,
+        initializationVector: String?,
+        resolver: HLSRewriteConfiguration.KeyURLResolver?
+    ) -> String? {
+        var attributes: [String] = []
+        attributes.append("METHOD=\(key.method.rawValue)")
+
+        if let uri = resolvedKeyURI(for: key, resolver: resolver) {
+            attributes.append("URI=\"\(uri.absoluteString)\"")
+        }
+
+        if let keyFormat = key.keyFormat {
+            attributes.append("KEYFORMAT=\"\(keyFormat)\"")
+        }
+
+        if !key.keyFormatVersions.isEmpty {
+            let joined = key.keyFormatVersions.joined(separator: "/")
+            attributes.append("KEYFORMATVERSIONS=\"\(joined)\"")
+        }
+
+        if let initializationVector {
+            attributes.append("IV=\(initializationVector)")
+        }
+
+        return "\(prefix):\(attributes.joined(separator: ","))"
+    }
+
+    private func renderMapLine(for map: MediaInitializationMap) -> String {
+        var attributes: [String] = []
+        attributes.append("URI=\"\(map.uri.absoluteString)\"")
+        if let range = map.byteRange {
+            attributes.append("BYTERANGE=\(byteRangeString(for: range))")
+        }
+        return "#EXT-X-MAP:\(attributes.joined(separator: ","))"
+    }
+
+    private func resolvedKeyURI(
+        for key: HLSKey,
+        resolver: HLSRewriteConfiguration.KeyURLResolver?
+    ) -> URL? {
+        guard key.method != .none else { return nil }
+        guard let currentURI = key.uri else { return nil }
+        if let resolver, let rewritten = resolver(key) {
+            return rewritten
+        }
+        return currentURI
+    }
+
+    private func byteRangeString(for range: ClosedRange<Int>) -> String {
+        let length = range.upperBound - range.lowerBound + 1
+        return "\(length)@\(range.lowerBound)"
     }
 }

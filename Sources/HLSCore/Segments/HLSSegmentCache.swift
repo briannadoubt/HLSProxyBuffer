@@ -91,6 +91,15 @@ public actor HLSSegmentCache: Caching {
         )
     }
 
+    public func clear() {
+        storage.removeAll()
+        order.removeAll()
+        if let directory = diskDirectory {
+            try? fileManager.removeItem(at: directory)
+            ensureDiskDirectory()
+        }
+    }
+
     private func moveKeyToFront(_ key: String) {
         order.removeAll(where: { $0 == key })
         order.insert(key, at: 0)

@@ -30,18 +30,23 @@ public struct SegmentHandler: Sendable {
             let key = String(identifier)
 
             if let data = await cache.get(key) {
-                return await successResponse(with: data, key: key)
+                let entry = await catalog.segmentEntry(forKey: key)
+                return await successResponse(with: data, key: key, entry: entry)
             }
 
-            if let data = await fetchAndCache(key: key) {
-                return await successResponse(with: data, key: key)
+            guard let entry = await catalog.segmentEntry(forKey: key) else {
+                return HTTPResponse(status: .serviceUnavailable)
+            }
+
+            if let data = await fetchAndCache(entry: entry, key: key) {
+                return await successResponse(with: data, key: key, entry: entry)
             }
 
             return HTTPResponse(status: .serviceUnavailable)
         }
     }
 
-    private func successResponse(with data: Data, key: String) async -> HTTPResponse {
+    private func successResponse(with data: Data, key: String, entry: SegmentCatalog.Entry?) async -> HTTPResponse {
         let response = HTTPResponse(
             status: .ok,
             headers: [
@@ -50,25 +55,21 @@ public struct SegmentHandler: Sendable {
             ],
             body: data
         )
-        if let sequence = SegmentIdentity.sequence(from: key) {
+        if entry?.namespace == SegmentCatalog.Namespace.primary,
+           let sequence = SegmentIdentity.sequence(from: key) {
             onSegmentServed?(sequence)
             await scheduler.consume(sequence: sequence)
         }
         return response
     }
 
-    private func fetchAndCache(key: String) async -> Data? {
-        guard
-            let sequence = SegmentIdentity.sequence(from: key),
-            let segment = await catalog.segment(forSequence: sequence)
-        else {
-            return nil
-        }
-
+    private func fetchAndCache(entry: SegmentCatalog.Entry, key: String) async -> Data? {
         do {
-            let data = try await fetcher.fetchSegment(segment)
+            let data = try await fetcher.fetchSegment(entry.segment)
             await cache.put(data, for: key)
-            await scheduler.registerReadySegment(segment)
+            if entry.namespace == SegmentCatalog.Namespace.primary {
+                await scheduler.registerReadySegment(entry.segment)
+            }
             return data
         } catch {
             return nil

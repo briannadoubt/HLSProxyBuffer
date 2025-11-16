@@ -17,4 +17,16 @@ final class SegmentIdentityTests: XCTestCase {
     func testReturnsNilWhenDigitsMissing() {
         XCTAssertNil(SegmentIdentity.sequence(from: "segment-"))
     }
+
+    func testHandlesNamespacedKeys() {
+        let key = SegmentIdentity.key(forSequence: 7, namespace: "audio-main")
+        XCTAssertEqual(key, "audio-main-segment-7")
+        XCTAssertEqual(SegmentIdentity.sequence(from: key), 7)
+        XCTAssertEqual(SegmentIdentity.namespace(from: key), "audio-main")
+    }
+
+    func testSanitizesNamespaceCharacters() {
+        let key = SegmentIdentity.key(forSequence: 3, namespace: "Audio Main!?")
+        XCTAssertEqual(key, "audio-main-segment-3")
+    }
 }

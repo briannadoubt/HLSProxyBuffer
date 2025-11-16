@@ -87,6 +87,12 @@ public actor SegmentPrefetchScheduler {
         notifyBufferChange()
     }
 
+    public func updatePlaylist(_ playlist: MediaPlaylist) {
+        activePlaylist = playlist
+        combinedSegments = makeCombinedSegments(base: playlist)
+        schedulePrefetchIfNeeded()
+    }
+
     public func bufferState() -> BufferState { bufferStateSnapshot() }
 
     public func registerReadySegment(_ segment: HLSSegment) { updateReady(segment) }

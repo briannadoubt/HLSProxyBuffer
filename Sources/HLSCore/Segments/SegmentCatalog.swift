@@ -1,23 +1,59 @@
 import Foundation
 
 public actor SegmentCatalog {
-    private var segments: [Int: HLSSegment] = [:]
-    private var playlist: MediaPlaylist?
+    public enum Namespace {
+        public static let primary = "primary"
+    }
 
-    public init() {}
+    public struct Entry: Sendable {
+        public let segment: HLSSegment
+        public let namespace: String
 
-    public func update(with playlist: MediaPlaylist) {
-        self.playlist = playlist
-        segments = playlist.segments.reduce(into: [:]) { result, segment in
-            result[segment.sequence] = segment
+        public init(segment: HLSSegment, namespace: String) {
+            self.segment = segment
+            self.namespace = namespace
         }
     }
 
-    public func segment(forSequence sequence: Int) -> HLSSegment? {
-        segments[sequence]
+    private var playlists: [String: MediaPlaylist] = [:]
+    private var segmentsByKey: [String: Entry] = [:]
+    private var keysByNamespace: [String: Set<String>] = [:]
+
+    public init() {}
+
+    public func update(with playlist: MediaPlaylist, namespace: String = Namespace.primary) {
+        playlists[namespace] = playlist
+        if let existingKeys = keysByNamespace[namespace] {
+            for key in existingKeys {
+                segmentsByKey.removeValue(forKey: key)
+            }
+        }
+
+        var keys: Set<String> = []
+        for segment in playlist.segments {
+            let key = SegmentIdentity.key(
+                for: segment,
+                namespace: namespace == Namespace.primary ? nil : namespace
+            )
+            segmentsByKey[key] = Entry(segment: segment, namespace: namespace)
+            keys.insert(key)
+        }
+        keysByNamespace[namespace] = keys
     }
 
-    public func currentPlaylist() -> MediaPlaylist? {
-        playlist
+    public func segmentEntry(forKey key: String) -> Entry? {
+        segmentsByKey[key]
+    }
+
+    public func playlist(for namespace: String = Namespace.primary) -> MediaPlaylist? {
+        playlists[namespace]
+    }
+
+    public func removeEntries(for namespace: String) {
+        playlists.removeValue(forKey: namespace)
+        guard let keys = keysByNamespace.removeValue(forKey: namespace) else { return }
+        for key in keys {
+            segmentsByKey.removeValue(forKey: key)
+        }
     }
 }

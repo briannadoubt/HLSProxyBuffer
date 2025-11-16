@@ -43,8 +43,8 @@ public struct ProxyVideoView: View {
         VideoPlayer(player: player.player)
             .task(id: remoteURL) {
                 let quality = qualityOverride ?? configuration.qualityPolicy
-                await player.load(from: remoteURL, quality: quality)
                 didAutoPlay = false
+                await player.load(from: remoteURL, quality: quality)
             }
             .onChange(of: player.state.status) { status in
                 guard autoplay, status == .ready, !didAutoPlay else { return }
@@ -121,5 +121,4 @@ private struct PreviewTickLogger: ViewModifier {
 }
 #endif
 #endif
- 
- 
+

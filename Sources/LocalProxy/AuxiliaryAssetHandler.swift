@@ -23,7 +23,7 @@ public struct AuxiliaryAssetHandler: Sendable {
                     status: .ok,
                     headers: [
                         "Content-Type": contentType(for: type),
-                        "Cache-Control": "public, max-age=60"
+                        "Cache-Control": cacheControl(for: type)
                     ],
                     body: data
                 )
@@ -41,6 +41,15 @@ public struct AuxiliaryAssetHandler: Sendable {
             return "text/vtt"
         case .keys:
             return "application/octet-stream"
+        }
+    }
+
+    private func cacheControl(for type: AuxiliaryAssetType) -> String {
+        switch type {
+        case .keys:
+            return "private, max-age=0, no-store"
+        case .audio, .subtitles:
+            return "public, max-age=60"
         }
     }
 }
