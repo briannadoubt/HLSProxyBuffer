@@ -1,0 +1,17 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: SwiftPM tests
+        run: swift test
+      - name: Run CI script
+        run: bash Scripts/run-ci.sh

@@ -1,0 +1,193 @@
+swift test
+Test Suite 'All tests' started at 2025-11-14 21:25:53.459.
+Test Suite 'HLSProxyBufferPackageTests.xctest' started at 2025-11-14 21:25:53.460.
+Test Suite 'HLSManifestFetcherTests' started at 2025-11-14 21:25:53.460.
+Test Case '-[HLSCoreTests.HLSManifestFetcherTests testInvalidUTF8Throws]' started.
+Test Case '-[HLSCoreTests.HLSManifestFetcherTests testInvalidUTF8Throws]' passed (0.009 seconds).
+Test Case '-[HLSCoreTests.HLSManifestFetcherTests testRetriesOnFailureThenSucceeds]' started.
+Test Case '-[HLSCoreTests.HLSManifestFetcherTests testRetriesOnFailureThenSucceeds]' passed (0.001 seconds).
+Test Case '-[HLSCoreTests.HLSManifestFetcherTests testSuccessfulFetchReturnsString]' started.
+Test Case '-[HLSCoreTests.HLSManifestFetcherTests testSuccessfulFetchReturnsString]' passed (0.000 seconds).
+Test Suite 'HLSManifestFetcherTests' passed at 2025-11-14 21:25:53.471.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.010 (0.011) seconds
+Test Suite 'HLSParserTests' started at 2025-11-14 21:25:53.471.
+Test Case '-[HLSCoreTests.HLSParserTests testParsesLowLatencyPlaylist]' started.
+Test Case '-[HLSCoreTests.HLSParserTests testParsesLowLatencyPlaylist]' passed (0.000 seconds).
+Test Case '-[HLSCoreTests.HLSParserTests testParsesMasterVariants]' started.
+Test Case '-[HLSCoreTests.HLSParserTests testParsesMasterVariants]' passed (0.000 seconds).
+Test Case '-[HLSCoreTests.HLSParserTests testParsesMediaPlaylist]' started.
+Test Case '-[HLSCoreTests.HLSParserTests testParsesMediaPlaylist]' passed (0.000 seconds).
+Test Suite 'HLSParserTests' passed at 2025-11-14 21:25:53.472.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'HLSRewriterTests' started at 2025-11-14 21:25:53.472.
+Test Case '-[HLSCoreTests.HLSRewriterTests testArtificialBandwidthInjection]' started.
+Test Case '-[HLSCoreTests.HLSRewriterTests testArtificialBandwidthInjection]' passed (0.000 seconds).
+Test Case '-[HLSCoreTests.HLSRewriterTests testHideUntilBufferedSkipsSegments]' started.
+Test Case '-[HLSCoreTests.HLSRewriterTests testHideUntilBufferedSkipsSegments]' passed (0.000 seconds).
+Test Case '-[HLSCoreTests.HLSRewriterTests testLowLatencyOptionsEmitServerControlAndPrefetch]' started.
+Test Case '-[HLSCoreTests.HLSRewriterTests testLowLatencyOptionsEmitServerControlAndPrefetch]' passed (0.000 seconds).
+Test Suite 'HLSRewriterTests' passed at 2025-11-14 21:25:53.472.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+Test Suite 'HLSSegmentCacheTests' started at 2025-11-14 21:25:53.472.
+Test Case '-[HLSCoreTests.HLSSegmentCacheTests testDiskCachePersistsEvictedEntries]' started.
+Test Case '-[HLSCoreTests.HLSSegmentCacheTests testDiskCachePersistsEvictedEntries]' passed (0.007 seconds).
+Test Case '-[HLSCoreTests.HLSSegmentCacheTests testLRUEviction]' started.
+Test Case '-[HLSCoreTests.HLSSegmentCacheTests testLRUEviction]' passed (0.000 seconds).
+Test Case '-[HLSCoreTests.HLSSegmentCacheTests testMetricsReportDiskBytes]' started.
+Test Case '-[HLSCoreTests.HLSSegmentCacheTests testMetricsReportDiskBytes]' passed (0.001 seconds).
+Test Suite 'HLSSegmentCacheTests' passed at 2025-11-14 21:25:53.481.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.009 (0.009) seconds
+Test Suite 'HLSSegmentFetcherTests' started at 2025-11-14 21:25:53.481.
+Test Case '-[HLSCoreTests.HLSSegmentFetcherTests testChecksumValidation]' started.
+Test Case '-[HLSCoreTests.HLSSegmentFetcherTests testChecksumValidation]' passed (0.001 seconds).
+Test Case '-[HLSCoreTests.HLSSegmentFetcherTests testEnforcesByteRangeLength]' started.
+Test Case '-[HLSCoreTests.HLSSegmentFetcherTests testEnforcesByteRangeLength]' passed (0.000 seconds).
+Test Case '-[HLSCoreTests.HLSSegmentFetcherTests testMetricsCaptured]' started.
+Test Case '-[HLSCoreTests.HLSSegmentFetcherTests testMetricsCaptured]' passed (0.001 seconds).
+Test Suite 'HLSSegmentFetcherTests' passed at 2025-11-14 21:25:53.483.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
+Test Suite 'PerformanceTests' started at 2025-11-14 21:25:53.483.
+Test Case '-[HLSCoreTests.PerformanceTests testSegmentSchedulerPerformance]' started.
+/Users/bri/dev/HLSProxyBuffer/Tests/HLSCoreTests/PerformanceTests.swift:14: Test Case '-[HLSCoreTests.PerformanceTests testSegmentSchedulerPerformance]' measured [Clock Monotonic Time, s] average: 0.000, relative standard deviation: 12.121%, values: [0.000025, 0.000031, 0.000026, 0.000024, 0.000032], performanceMetricID:com.apple.dt.XCTMetric_Clock.time.monotonic, baselineName: "", baselineAverage: , polarity: prefers smaller, maxPercentRegression: 10.000%, maxPercentRelativeStandardDeviation: 10.000%, maxRegression: 0.000, maxStandardDeviation: 0.000
+Test Case '-[HLSCoreTests.PerformanceTests testSegmentSchedulerPerformance]' passed (0.463 seconds).
+Test Suite 'PerformanceTests' passed at 2025-11-14 21:25:53.946.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.463 (0.463) seconds
+Test Suite 'ProxyPlayerKitAVIntegrationTests' started at 2025-11-14 21:25:53.946.
+Test Case '-[ProxyPlayerKitTests.ProxyPlayerKitAVIntegrationTests testAVPlayerHitsProxyPlaylistAndSegments]' started.
+Test Case '-[ProxyPlayerKitTests.ProxyPlayerKitAVIntegrationTests testAVPlayerHitsProxyPlaylistAndSegments]' passed (0.137 seconds).
+Test Suite 'ProxyPlayerKitAVIntegrationTests' passed at 2025-11-14 21:25:54.083.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.137 (0.137) seconds
+Test Suite 'ProxyServerIntegrationTests' started at 2025-11-14 21:25:54.083.
+Test Case '-[LocalProxyTests.ProxyServerIntegrationTests testOnDemandFetchServesSegmentAndRefreshesPlaylist]' started.
+Test Case '-[LocalProxyTests.ProxyServerIntegrationTests testOnDemandFetchServesSegmentAndRefreshesPlaylist]' passed (0.242 seconds).
+Test Suite 'ProxyServerIntegrationTests' passed at 2025-11-14 21:25:54.325.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.242 (0.242) seconds
+Test Suite 'SegmentPrefetchSchedulerTests' started at 2025-11-14 21:25:54.325.
+Test Case '-[HLSCoreTests.SegmentPrefetchSchedulerTests testTelemetryReportsFailures]' started.
+Test Case '-[HLSCoreTests.SegmentPrefetchSchedulerTests testTelemetryReportsFailures]' passed (0.000 seconds).
+Test Case '-[HLSCoreTests.SegmentPrefetchSchedulerTests testUpcomingPlaylistsArePrefetched]' started.
+Test Case '-[HLSCoreTests.SegmentPrefetchSchedulerTests testUpcomingPlaylistsArePrefetched]' passed (0.201 seconds).
+Test Suite 'SegmentPrefetchSchedulerTests' passed at 2025-11-14 21:25:54.527.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.201 (0.201) seconds
+Test Suite 'HLSProxyBufferPackageTests.xctest' passed at 2025-11-14 21:25:54.527.
+	 Executed 20 tests, with 0 failures (0 unexpected) in 1.065 (1.067) seconds
+Test Suite 'All tests' passed at 2025-11-14 21:25:54.527.
+	 Executed 20 tests, with 0 failures (0 unexpected) in 1.065 (1.068) seconds
+[HLSCore][MANIFEST] Manifest fetch failed (attempt 1): HTTP error 500.
+[HLSCore][PARSER] Parsed manifest – kind: media, variants: 0, segments: 2
+[HLSCore][PARSER] Parsed manifest – kind: master, variants: 2, segments: 0
+[HLSCore][PARSER] Parsed manifest – kind: media, variants: 0, segments: 2
+[HLSCore][REWRITER] Deferring segment 2 until buffered.
+[HLSCore][REWRITER] Deferring segment 1 until buffered.
+[HLSCore][REWRITER] Deferring segment 2 until buffered.
+[HLSCore][PARSER] Parsed manifest – kind: media, variants: 0, segments: 1
+[ProxyPlayerKit][SCHEDULER] scheduled=[1] ready=1 failures=0
+[HLSCore][REWRITER] Deferring segment 1 until buffered.
+[HLSCore][REWRITER] Deferring segment 2 until buffered.
+[HLSCore][REWRITER] Deferring segment 2 until buffered.
+[HLSCore][SCHEDULER] Prefetch failed for 1: Error Domain=NSURLErrorDomain Code=-1011 "(null)"
+􀟈  Test run started.
+􀄵  Testing Library Version: 1400
+􀄵  Target Platform: arm64e-apple-macos14.0
+􁁛  Test run with 0 tests in 0 suites passed after 0.001 seconds.
+./Scripts/run-ci.sh
+Running SwiftPM tests on host...
+Test Suite 'All tests' started at 2025-11-14 21:25:55.311.
+Test Suite 'HLSProxyBufferPackageTests.xctest' started at 2025-11-14 21:25:55.312.
+Test Suite 'HLSManifestFetcherTests' started at 2025-11-14 21:25:55.312.
+Test Case '-[HLSCoreTests.HLSManifestFetcherTests testInvalidUTF8Throws]' started.
+Test Case '-[HLSCoreTests.HLSManifestFetcherTests testInvalidUTF8Throws]' passed (0.005 seconds).
+Test Case '-[HLSCoreTests.HLSManifestFetcherTests testRetriesOnFailureThenSucceeds]' started.
+Test Case '-[HLSCoreTests.HLSManifestFetcherTests testRetriesOnFailureThenSucceeds]' passed (0.001 seconds).
+Test Case '-[HLSCoreTests.HLSManifestFetcherTests testSuccessfulFetchReturnsString]' started.
+Test Case '-[HLSCoreTests.HLSManifestFetcherTests testSuccessfulFetchReturnsString]' passed (0.000 seconds).
+Test Suite 'HLSManifestFetcherTests' passed at 2025-11-14 21:25:55.319.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.006 (0.007) seconds
+Test Suite 'HLSParserTests' started at 2025-11-14 21:25:55.319.
+Test Case '-[HLSCoreTests.HLSParserTests testParsesLowLatencyPlaylist]' started.
+Test Case '-[HLSCoreTests.HLSParserTests testParsesLowLatencyPlaylist]' passed (0.000 seconds).
+Test Case '-[HLSCoreTests.HLSParserTests testParsesMasterVariants]' started.
+Test Case '-[HLSCoreTests.HLSParserTests testParsesMasterVariants]' passed (0.000 seconds).
+Test Case '-[HLSCoreTests.HLSParserTests testParsesMediaPlaylist]' started.
+Test Case '-[HLSCoreTests.HLSParserTests testParsesMediaPlaylist]' passed (0.000 seconds).
+Test Suite 'HLSParserTests' passed at 2025-11-14 21:25:55.320.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'HLSRewriterTests' started at 2025-11-14 21:25:55.320.
+Test Case '-[HLSCoreTests.HLSRewriterTests testArtificialBandwidthInjection]' started.
+Test Case '-[HLSCoreTests.HLSRewriterTests testArtificialBandwidthInjection]' passed (0.000 seconds).
+Test Case '-[HLSCoreTests.HLSRewriterTests testHideUntilBufferedSkipsSegments]' started.
+Test Case '-[HLSCoreTests.HLSRewriterTests testHideUntilBufferedSkipsSegments]' passed (0.000 seconds).
+Test Case '-[HLSCoreTests.HLSRewriterTests testLowLatencyOptionsEmitServerControlAndPrefetch]' started.
+Test Case '-[HLSCoreTests.HLSRewriterTests testLowLatencyOptionsEmitServerControlAndPrefetch]' passed (0.000 seconds).
+Test Suite 'HLSRewriterTests' passed at 2025-11-14 21:25:55.321.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+Test Suite 'HLSSegmentCacheTests' started at 2025-11-14 21:25:55.321.
+Test Case '-[HLSCoreTests.HLSSegmentCacheTests testDiskCachePersistsEvictedEntries]' started.
+Test Case '-[HLSCoreTests.HLSSegmentCacheTests testDiskCachePersistsEvictedEntries]' passed (0.002 seconds).
+Test Case '-[HLSCoreTests.HLSSegmentCacheTests testLRUEviction]' started.
+Test Case '-[HLSCoreTests.HLSSegmentCacheTests testLRUEviction]' passed (0.000 seconds).
+Test Case '-[HLSCoreTests.HLSSegmentCacheTests testMetricsReportDiskBytes]' started.
+Test Case '-[HLSCoreTests.HLSSegmentCacheTests testMetricsReportDiskBytes]' passed (0.001 seconds).
+Test Suite 'HLSSegmentCacheTests' passed at 2025-11-14 21:25:55.324.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.003 (0.004) seconds
+Test Suite 'HLSSegmentFetcherTests' started at 2025-11-14 21:25:55.324.
+Test Case '-[HLSCoreTests.HLSSegmentFetcherTests testChecksumValidation]' started.
+Test Case '-[HLSCoreTests.HLSSegmentFetcherTests testChecksumValidation]' passed (0.001 seconds).
+Test Case '-[HLSCoreTests.HLSSegmentFetcherTests testEnforcesByteRangeLength]' started.
+Test Case '-[HLSCoreTests.HLSSegmentFetcherTests testEnforcesByteRangeLength]' passed (0.000 seconds).
+Test Case '-[HLSCoreTests.HLSSegmentFetcherTests testMetricsCaptured]' started.
+Test Case '-[HLSCoreTests.HLSSegmentFetcherTests testMetricsCaptured]' passed (0.001 seconds).
+Test Suite 'HLSSegmentFetcherTests' passed at 2025-11-14 21:25:55.326.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
+Test Suite 'PerformanceTests' started at 2025-11-14 21:25:55.326.
+Test Case '-[HLSCoreTests.PerformanceTests testSegmentSchedulerPerformance]' started.
+/Users/bri/dev/HLSProxyBuffer/Tests/HLSCoreTests/PerformanceTests.swift:14: Test Case '-[HLSCoreTests.PerformanceTests testSegmentSchedulerPerformance]' measured [Clock Monotonic Time, s] average: 0.000, relative standard deviation: 16.475%, values: [0.000031, 0.000023, 0.000033, 0.000023, 0.000023], performanceMetricID:com.apple.dt.XCTMetric_Clock.time.monotonic, baselineName: "", baselineAverage: , polarity: prefers smaller, maxPercentRegression: 10.000%, maxPercentRelativeStandardDeviation: 10.000%, maxRegression: 0.000, maxStandardDeviation: 0.000
+Test Case '-[HLSCoreTests.PerformanceTests testSegmentSchedulerPerformance]' passed (0.027 seconds).
+Test Suite 'PerformanceTests' passed at 2025-11-14 21:25:55.353.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.027 (0.027) seconds
+Test Suite 'ProxyPlayerKitAVIntegrationTests' started at 2025-11-14 21:25:55.353.
+Test Case '-[ProxyPlayerKitTests.ProxyPlayerKitAVIntegrationTests testAVPlayerHitsProxyPlaylistAndSegments]' started.
+Test Case '-[ProxyPlayerKitTests.ProxyPlayerKitAVIntegrationTests testAVPlayerHitsProxyPlaylistAndSegments]' passed (0.037 seconds).
+Test Suite 'ProxyPlayerKitAVIntegrationTests' passed at 2025-11-14 21:25:55.390.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.037 (0.037) seconds
+Test Suite 'ProxyServerIntegrationTests' started at 2025-11-14 21:25:55.390.
+Test Case '-[LocalProxyTests.ProxyServerIntegrationTests testOnDemandFetchServesSegmentAndRefreshesPlaylist]' started.
+Test Case '-[LocalProxyTests.ProxyServerIntegrationTests testOnDemandFetchServesSegmentAndRefreshesPlaylist]' passed (0.240 seconds).
+Test Suite 'ProxyServerIntegrationTests' passed at 2025-11-14 21:25:55.630.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.240 (0.240) seconds
+Test Suite 'SegmentPrefetchSchedulerTests' started at 2025-11-14 21:25:55.630.
+Test Case '-[HLSCoreTests.SegmentPrefetchSchedulerTests testTelemetryReportsFailures]' started.
+Test Case '-[HLSCoreTests.SegmentPrefetchSchedulerTests testTelemetryReportsFailures]' passed (0.000 seconds).
+Test Case '-[HLSCoreTests.SegmentPrefetchSchedulerTests testUpcomingPlaylistsArePrefetched]' started.
+Test Case '-[HLSCoreTests.SegmentPrefetchSchedulerTests testUpcomingPlaylistsArePrefetched]' passed (0.202 seconds).
+Test Suite 'SegmentPrefetchSchedulerTests' passed at 2025-11-14 21:25:55.832.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.202 (0.202) seconds
+Test Suite 'HLSProxyBufferPackageTests.xctest' passed at 2025-11-14 21:25:55.832.
+	 Executed 20 tests, with 0 failures (0 unexpected) in 0.518 (0.520) seconds
+Test Suite 'All tests' passed at 2025-11-14 21:25:55.832.
+	 Executed 20 tests, with 0 failures (0 unexpected) in 0.518 (0.521) seconds
+[HLSCore][MANIFEST] Manifest fetch failed (attempt 1): HTTP error 500.
+[HLSCore][PARSER] Parsed manifest – kind: media, variants: 0, segments: 2
+[HLSCore][PARSER] Parsed manifest – kind: master, variants: 2, segments: 0
+[HLSCore][PARSER] Parsed manifest – kind: media, variants: 0, segments: 2
+[HLSCore][REWRITER] Deferring segment 2 until buffered.
+[HLSCore][REWRITER] Deferring segment 1 until buffered.
+[HLSCore][REWRITER] Deferring segment 2 until buffered.
+[HLSCore][PARSER] Parsed manifest – kind: media, variants: 0, segments: 1
+[ProxyPlayerKit][SCHEDULER] scheduled=[1] ready=1 failures=0
+[HLSCore][REWRITER] Deferring segment 1 until buffered.
+[HLSCore][REWRITER] Deferring segment 2 until buffered.
+[HLSCore][REWRITER] Deferring segment 2 until buffered.
+[HLSCore][SCHEDULER] Prefetch failed for 1: Error Domain=NSURLErrorDomain Code=-1011 "(null)"
+􀟈  Test run started.
+􀄵  Testing Library Version: 1400
+􀄵  Target Platform: arm64e-apple-macos14.0
+􁁛  Test run with 0 tests in 0 suites passed after 0.001 seconds.
+Booting iPhone Air simulator (64977720-F5E5-4F53-A1AC-44FF17ED0657)...
+Building HLSProxyBuffer for iPhone Air (iOS 26.1)...
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -scheme HLSProxyBuffer -destination "platform=iOS Simulator,name=iPhone Air,OS=26.1" -sdk iphonesimulator build
+
+Build settings from command line:
+    SDKROOT = iphonesimulator26.1
+
