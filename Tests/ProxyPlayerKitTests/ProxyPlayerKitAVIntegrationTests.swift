@@ -9,6 +9,13 @@ import Network
 
 @MainActor
 final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        if shouldSkipIntegrationTests {
+            throw XCTSkip("ProxyPlayerKit AV integration tests are disabled on CI agents (set RUN_PROXY_AV_TESTS=1 to force-enable).")
+        }
+    }
+
     func testAVPlayerHitsProxyPlaylistAndSegments() async throws {
         let origin = try MockOriginServer()
         try await origin.start()
@@ -290,5 +297,10 @@ private func waitForOriginReachability(_ url: URL, timeout: TimeInterval = 5) as
     }
     XCTFail("Origin server at \(url) not reachable within \(timeout)s")
     throw URLError(.cannotConnectToHost)
+}
+
+private var shouldSkipIntegrationTests: Bool {
+    let env = ProcessInfo.processInfo.environment
+    return env["CI"] != nil && env["RUN_PROXY_AV_TESTS"] == nil
 }
 #endif
