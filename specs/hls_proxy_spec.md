@@ -194,8 +194,8 @@ High-level manager that coordinates the entire pipeline.
 
 **API:**
 
-* `class ProxyHLSPlayer: ObservableObject`
-* `@Published var player: AVPlayer?`
+* `@Observable @MainActor final class ProxyHLSPlayer`
+* `var player: AVPlayer? { get }`
 * `func load(url: URL, quality: QualityProfile) async`
 * `func play()`
 * `func pause()`
@@ -401,7 +401,7 @@ protocol Caching {
 ### PlayerKit
 
 * High-level controller for initializing playback.
-* Expose AVPlayer via ObservableObject.
+* Expose AVPlayer via the Observation framework.
 * Provide SwiftUI view wrapper.
 * Provide buffer + quality reporting.
 

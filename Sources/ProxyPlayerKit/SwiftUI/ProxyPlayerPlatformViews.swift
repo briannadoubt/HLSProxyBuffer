@@ -3,10 +3,11 @@ import Foundation
 import SwiftUI
 import AVKit
 import AVFoundation
+import Observation
 
 #if canImport(UIKit)
 public struct ProxyPlayerViewController: UIViewRepresentable {
-    private let player: ProxyHLSPlayer
+    @Bindable private var player: ProxyHLSPlayer
     private let configuration: ProxyPlayerConfiguration
     private let url: URL
     private let autoplay: Bool
@@ -17,7 +18,7 @@ public struct ProxyPlayerViewController: UIViewRepresentable {
         configuration: ProxyPlayerConfiguration,
         autoplay: Bool = false
     ) {
-        self.player = player
+        self._player = Bindable(wrappedValue: player)
         self.configuration = configuration
         self.url = url
         self.autoplay = autoplay
@@ -56,7 +57,7 @@ public struct ProxyPlayerViewController: UIViewRepresentable {
 
 #if canImport(AppKit)
 public struct ProxyPlayerNSView: NSViewRepresentable {
-    private let player: ProxyHLSPlayer
+    @Bindable private var player: ProxyHLSPlayer
     private let configuration: ProxyPlayerConfiguration
     private let url: URL
     private let autoplay: Bool
@@ -67,7 +68,7 @@ public struct ProxyPlayerNSView: NSViewRepresentable {
         configuration: ProxyPlayerConfiguration,
         autoplay: Bool = false
     ) {
-        self.player = player
+        self._player = Bindable(wrappedValue: player)
         self.configuration = configuration
         self.url = url
         self.autoplay = autoplay

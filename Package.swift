@@ -5,9 +5,9 @@ import PackageDescription
 let package = Package(
     name: "HLSProxyBuffer",
     platforms: [
-        .iOS(.v15),
-        .macOS(.v12),
-        .tvOS(.v15),
+        .iOS(.v17),
+        .macOS(.v14),
+        .tvOS(.v17),
         .visionOS(.v1),
     ],
     products: [

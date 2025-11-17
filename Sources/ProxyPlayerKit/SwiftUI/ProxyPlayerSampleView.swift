@@ -2,15 +2,18 @@ import Foundation
 #if canImport(SwiftUI) && canImport(AVKit)
 import SwiftUI
 import AVKit
+import Observation
 
 public struct ProxyPlayerSampleView: View {
-    @StateObject private var player = ProxyHLSPlayer()
+    @State private var player = ProxyHLSPlayer()
     @State private var urlString = "https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_ts/master.m3u8"
     @State private var configuration = ProxyPlayerConfiguration()
 
     public init() {}
 
     public var body: some View {
+        @Bindable var bindablePlayer = player
+
         VStack(spacing: 16) {
             TextField("Remote HLS URL", text: $urlString)
 #if os(tvOS)
@@ -26,22 +29,22 @@ public struct ProxyPlayerSampleView: View {
                     get: { configuration.bufferPolicy.hideUntilBuffered },
                     set: { newValue in
                         configuration.bufferPolicy.hideUntilBuffered = newValue
-                        Task { await player.updateConfiguration(configuration) }
+                        Task { await bindablePlayer.updateConfiguration(configuration) }
                     }
                 )
             )
 
-            VideoPlayer(player: player.player)
+            VideoPlayer(player: bindablePlayer.player)
                 .frame(minHeight: 220)
                 .task(id: urlString) {
                     guard let url = URL(string: urlString) else { return }
-                    await player.load(from: url, quality: configuration.qualityPolicy)
+                    await bindablePlayer.load(from: url, quality: configuration.qualityPolicy)
                 }
 
             HStack {
-                Text("Buffer Depth: \(String(format: "%.1f", player.state.bufferDepthSeconds))s")
+                Text("Buffer Depth: \(String(format: "%.1f", bindablePlayer.state.bufferDepthSeconds))s")
                 Spacer()
-                Text("Status: \(player.state.statusDescription)")
+                Text("Status: \(bindablePlayer.state.statusDescription)")
             }
             .font(.caption)
         }
