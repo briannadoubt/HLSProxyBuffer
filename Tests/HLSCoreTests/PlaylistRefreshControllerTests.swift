@@ -2,16 +2,12 @@ import XCTest
 @testable import HLSCore
 
 final class PlaylistRefreshControllerTests: XCTestCase {
-    override func setUp() {
-        super.setUp()
-        PlaylistRefreshMockURLProtocol.reset()
-    }
-
     func testDeliversUpdatesAndMetrics() async throws {
-        PlaylistRefreshMockURLProtocol.enqueue(string: samplePlaylist(sequence: 0))
-        PlaylistRefreshMockURLProtocol.enqueue(string: samplePlaylist(sequence: 2))
+        let loader = PlaylistRefreshMockLoader()
+        await loader.enqueue(string: samplePlaylist(sequence: 0))
+        await loader.enqueue(string: samplePlaylist(sequence: 2))
 
-        let controller = makeController(interval: 0.05)
+        let controller = makeController(interval: 0.05, loader: loader)
         let url = URL(string: "https://example.com/live.m3u8")!
         let expectation = expectation(description: "playlist refresh")
         expectation.expectedFulfillmentCount = 2
@@ -39,8 +35,9 @@ final class PlaylistRefreshControllerTests: XCTestCase {
     }
 
     func testStopsAfterEndlist() async throws {
-        PlaylistRefreshMockURLProtocol.enqueue(string: samplePlaylist(sequence: 5, endList: true))
-        let controller = makeController(interval: 0.01)
+        let loader = PlaylistRefreshMockLoader()
+        await loader.enqueue(string: samplePlaylist(sequence: 5, endList: true))
+        let controller = makeController(interval: 0.01, loader: loader)
         let url = URL(string: "https://example.com/vod.m3u8")!
         let expectation = expectation(description: "single refresh")
 
@@ -58,15 +55,17 @@ final class PlaylistRefreshControllerTests: XCTestCase {
 
         await fulfillment(of: [expectation], timeout: 1)
         try await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertEqual(PlaylistRefreshMockURLProtocol.requestCount, 1)
+        let requestsServed = await loader.requestCount()
+        XCTAssertEqual(requestsServed, 1)
         await controller.stop()
     }
 
     func testBlockingReloadAddsQueryParametersWhenEnabled() async throws {
-        PlaylistRefreshMockURLProtocol.enqueue(string: lowLatencyPlaylist(sequence: 10))
-        PlaylistRefreshMockURLProtocol.enqueue(string: lowLatencyPlaylist(sequence: 11))
+        let loader = PlaylistRefreshMockLoader()
+        await loader.enqueue(string: lowLatencyPlaylist(sequence: 10))
+        await loader.enqueue(string: lowLatencyPlaylist(sequence: 11))
 
-        let controller = makeController(interval: 0.01)
+        let controller = makeController(interval: 0.01, loader: loader)
         await controller.updateLowLatencyConfiguration(.init(isEnabled: true, blockingRequestTimeout: 0.2, enableDeltaUpdates: true))
         let url = URL(string: "https://example.com/live.m3u8")!
         let expectation = expectation(description: "blocking refresh")
@@ -82,24 +81,23 @@ final class PlaylistRefreshControllerTests: XCTestCase {
         await fulfillment(of: [expectation], timeout: 2)
         await controller.stop()
 
-        let requests = PlaylistRefreshMockURLProtocol.recordedRequests()
+        let requests = await loader.recordedRequests()
         XCTAssertGreaterThanOrEqual(requests.count, 2)
         let blockingRequest = try XCTUnwrap(requests.dropFirst().first)
-        let components = try XCTUnwrap(URLComponents(url: blockingRequest.url!, resolvingAgainstBaseURL: false))
+        let components = try XCTUnwrap(URLComponents(url: blockingRequest, resolvingAgainstBaseURL: false))
         let queryItems = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
         XCTAssertEqual(queryItems["_HLS_msn"], "11")
         XCTAssertEqual(queryItems["_HLS_part"], "1")
         XCTAssertEqual(queryItems["_HLS_skip"], "YES")
     }
 
-    private func makeController(interval: TimeInterval) -> PlaylistRefreshController {
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [PlaylistRefreshMockURLProtocol.self]
-        let session = URLSession(configuration: config)
-        return PlaylistRefreshController(
+    private func makeController(interval: TimeInterval, loader: PlaylistRefreshMockLoader) -> PlaylistRefreshController {
+        PlaylistRefreshController(
             configuration: .init(refreshInterval: interval, maxBackoffInterval: interval * 2),
-            session: session,
-            logger: TestLogger()
+            logger: TestLogger(),
+            manifestLoader: { url, _, _ in
+                try await loader.next(for: url)
+            }
         )
     }
 
@@ -131,98 +129,43 @@ final class PlaylistRefreshControllerTests: XCTestCase {
     }
 }
 
-private final class PlaylistRefreshMockURLProtocol: URLProtocol {
-    struct Stub {
-        let data: Data
-        let response: URLResponse
-        let error: Error?
+private actor PlaylistRefreshMockLoader {
+    private enum Stub {
+        case success(String)
+        case failure(Error)
     }
 
-    private static let storage = Storage()
+    private var stubs: [Stub] = []
+    private var requests: [URL] = []
 
-    static var requestCount: Int {
-        storage.requestCount
+    func enqueue(string: String) {
+        stubs.append(.success(string))
     }
 
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    func enqueue(error: Error) {
+        stubs.append(.failure(error))
+    }
 
-    override func startLoading() {
-        Self.storage.record(request)
-        guard let stub = Self.storage.nextStub() else {
-            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
-            return
+    func next(for url: URL) throws -> String {
+        requests.append(url)
+        guard !stubs.isEmpty else {
+            throw URLError(.badServerResponse)
         }
-
-        if let error = stub.error {
-            client?.urlProtocol(self, didFailWithError: error)
-        } else {
-            client?.urlProtocol(self, didReceive: stub.response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: stub.data)
-            client?.urlProtocolDidFinishLoading(self)
+        let stub = stubs.removeFirst()
+        switch stub {
+        case .success(let string):
+            return string
+        case .failure(let error):
+            throw error
         }
     }
 
-    override func stopLoading() {}
-
-    static func enqueue(string: String, statusCode: Int = 200) {
-        let response = HTTPURLResponse(
-            url: URL(string: "https://example.com/live.m3u8")!,
-            statusCode: statusCode,
-            httpVersion: nil,
-            headerFields: nil
-        )!
-        let stub = Stub(data: Data(string.utf8), response: response, error: nil)
-        storage.enqueue(stub)
+    func requestCount() -> Int {
+        requests.count
     }
 
-    static func reset() {
-        storage.reset()
-    }
-
-    static func recordedRequests() -> [URLRequest] {
-        storage.requests
-    }
-
-    private final class Storage: @unchecked Sendable {
-        private var stubs: [Stub] = []
-        private var internalRequestCount = 0
-        private var recorded: [URLRequest] = []
-        private let lock = NSLock()
-
-        var requestCount: Int {
-            lock.withLock { internalRequestCount }
-        }
-
-        func enqueue(_ stub: Stub) {
-            lock.withLock { stubs.append(stub) }
-        }
-
-        func nextStub() -> Stub? {
-            lock.withLock {
-                guard !stubs.isEmpty else { return nil }
-                internalRequestCount += 1
-                return stubs.removeFirst()
-            }
-        }
-
-        func record(_ request: URLRequest) {
-            lock.withLock {
-                recorded.append(request)
-            }
-        }
-
-        var requests: [URLRequest] {
-            lock.withLock { recorded }
-        }
-
-        func reset() {
-            lock.withLock {
-                stubs.removeAll()
-                internalRequestCount = 0
-                recorded.removeAll()
-            }
-        }
+    func recordedRequests() -> [URL] {
+        requests
     }
 }
 

@@ -81,6 +81,7 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         let player = ProxyHLSPlayer(configuration: configuration, diagnostics: diagnostics)
 
         await player.load(from: origin.manifestURL, quality: .automatic)
+        player.play()
         await fulfillment(of: [switchedExpectation], timeout: 10)
 
         guard let playlistURL = player.playlistURL() else {

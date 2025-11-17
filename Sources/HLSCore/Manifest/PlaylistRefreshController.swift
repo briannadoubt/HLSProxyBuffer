@@ -1,6 +1,7 @@
 import Foundation
 
 public actor PlaylistRefreshController {
+    public typealias ManifestLoader = @Sendable (_ url: URL, _ allowInsecure: Bool, _ requestTimeout: TimeInterval?) async throws -> String
     public struct Configuration: Sendable, Equatable {
         public var refreshInterval: TimeInterval
         public var maxBackoffInterval: TimeInterval
@@ -57,6 +58,7 @@ public actor PlaylistRefreshController {
     private var configuration: Configuration
     private let session: URLSession
     private let logger: Logger
+    private let manifestLoader: ManifestLoader?
 
     private var task: Task<Void, Never>?
     private var sourceURL: URL?
@@ -82,11 +84,13 @@ public actor PlaylistRefreshController {
     public init(
         configuration: Configuration = .init(),
         session: URLSession = .shared,
-        logger: Logger = DefaultLogger()
+        logger: Logger = DefaultLogger(),
+        manifestLoader: ManifestLoader? = nil
     ) {
         self.configuration = configuration
         self.session = session
         self.logger = logger
+        self.manifestLoader = manifestLoader
     }
 
     public func updateConfiguration(_ configuration: Configuration) {
@@ -178,13 +182,18 @@ public actor PlaylistRefreshController {
     }
 
     private func fetchPlaylist(from url: URL, requestTimeout: TimeInterval?) async throws -> MediaPlaylist {
-        let fetcher = HLSManifestFetcher(
-            url: url,
-            session: session,
-            retryPolicy: retryPolicy,
-            logger: logger
-        )
-        let text = try await fetcher.fetchManifest(from: url, allowInsecure: allowInsecure, requestTimeout: requestTimeout)
+        let text: String
+        if let manifestLoader {
+            text = try await manifestLoader(url, allowInsecure, requestTimeout)
+        } else {
+            let fetcher = HLSManifestFetcher(
+                url: url,
+                session: session,
+                retryPolicy: retryPolicy,
+                logger: logger
+            )
+            text = try await fetcher.fetchManifest(from: url, allowInsecure: allowInsecure, requestTimeout: requestTimeout)
+        }
         let manifest = try parser.parse(text, baseURL: url)
         guard let playlist = manifest.mediaPlaylist else {
             throw RefreshError.mediaPlaylistUnavailable
