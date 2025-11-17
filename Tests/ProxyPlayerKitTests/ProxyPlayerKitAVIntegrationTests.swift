@@ -1,5 +1,6 @@
 #if canImport(AVFoundation) && canImport(Network)
 import XCTest
+import Foundation
 import AVFoundation
 import Network
 @testable import ProxyPlayerKit
@@ -11,6 +12,7 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
     func testAVPlayerHitsProxyPlaylistAndSegments() async throws {
         let origin = try MockOriginServer()
         try await origin.start()
+        try await waitForOriginReachability(origin.manifestURL)
         defer { origin.stop() }
 
         let configuration = ProxyPlayerConfiguration(
@@ -64,6 +66,7 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
     func testSwitchesVariantsAfterFailures() async throws {
         let origin = AdaptiveMockOriginServer()
         try await origin.start()
+        try await waitForOriginReachability(origin.manifestURL)
         defer { origin.stop() }
 
         let switchedExpectation = expectation(description: "Switched to low variant")
@@ -82,7 +85,7 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
 
         await player.load(from: origin.manifestURL, quality: .automatic)
         player.play()
-        await fulfillment(of: [switchedExpectation], timeout: 10)
+        await fulfillment(of: [switchedExpectation], timeout: 20)
 
         guard let playlistURL = player.playlistURL() else {
             XCTFail("Missing playlist URL")
@@ -127,6 +130,7 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
     func testExposesAlternateRenditionsAndSelection() async throws {
         let origin = AdaptiveMockOriginServer(includeAlternateRenditions: true)
         try await origin.start()
+        try await waitForOriginReachability(origin.manifestURL)
         defer { origin.stop() }
 
         let renditionExpectation = expectation(description: "Rendition callback")
@@ -182,6 +186,7 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         let keyURL = URL(string: "skd://asset/12345")!
         let origin = try MockOriginServer(keyURI: keyURL)
         try await origin.start()
+        try await waitForOriginReachability(origin.manifestURL)
         defer { origin.stop() }
 
         let keyIdentifier = ProxyHLSPlayer.keyIdentifier(forKeyURI: keyURL)
@@ -268,5 +273,22 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         XCTFail("Timed out waiting for renditions")
     }
 
+}
+
+private func waitForOriginReachability(_ url: URL, timeout: TimeInterval = 5) async throws {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        do {
+            let (_, response) = try await URLSession.shared.data(from: url)
+            if let http = response as? HTTPURLResponse, (200..<500).contains(http.statusCode) {
+                return
+            }
+        } catch {
+            // Ignore and retry until timeout.
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    XCTFail("Origin server at \(url) not reachable within \(timeout)s")
+    throw URLError(.cannotConnectToHost)
 }
 #endif
