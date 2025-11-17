@@ -2,16 +2,16 @@ import Foundation
 #if canImport(SwiftUI) && canImport(AVKit)
 import SwiftUI
 import AVKit
-import Combine
+import Observation
 import HLSCore
 
 public struct ProxyVideoView: View {
-    @StateObject private var player: ProxyHLSPlayer
+    @State private var player: ProxyHLSPlayer
+    @State private var autoplayController = ProxyVideoAutoplayController()
     private let remoteURL: URL
     private let configuration: ProxyPlayerConfiguration
     private let qualityOverride: HLSRewriteConfiguration.QualityPolicy?
     private let autoplay: Bool
-    @State private var didAutoPlay = false
 
     public init(
         url: URL,
@@ -19,7 +19,7 @@ public struct ProxyVideoView: View {
         qualityOverride: HLSRewriteConfiguration.QualityPolicy? = nil,
         autoplay: Bool = false
     ) {
-        _player = StateObject(wrappedValue: ProxyHLSPlayer(configuration: configuration))
+        _player = State(initialValue: ProxyHLSPlayer(configuration: configuration))
         self.remoteURL = url
         self.configuration = configuration
         self.qualityOverride = qualityOverride
@@ -32,7 +32,7 @@ public struct ProxyVideoView: View {
         qualityOverride: HLSRewriteConfiguration.QualityPolicy? = nil,
         autoplay: Bool = false
     ) {
-        _player = StateObject(wrappedValue: player)
+        _player = State(initialValue: player)
         self.remoteURL = url
         self.configuration = player.configuration
         self.qualityOverride = qualityOverride
@@ -40,25 +40,30 @@ public struct ProxyVideoView: View {
     }
 
     public var body: some View {
-        VideoPlayer(player: player.player)
+        @Bindable var bindablePlayer = player
+        let statusLabel = statusText(for: bindablePlayer.state)
+
+        VideoPlayer(player: bindablePlayer.player)
             .task(id: remoteURL) {
                 let quality = qualityOverride ?? configuration.qualityPolicy
-                didAutoPlay = false
-                await player.load(from: remoteURL, quality: quality)
+                autoplayController.reset()
+                await bindablePlayer.load(from: remoteURL, quality: quality)
             }
-            .onChange(of: player.state.status) { status in
-                guard autoplay, status == .ready, !didAutoPlay else { return }
-                didAutoPlay = true
-                player.play()
+            .onChange(of: bindablePlayer.state.status, initial: false) { _, status in
+                autoplayController.handleTransition(
+                    to: status,
+                    autoplay: autoplay,
+                    player: bindablePlayer
+                )
             }
 #if os(tvOS)
             .focusable(true)
             .onPlayPauseCommand {
-                if player.state.status == .ready {
-                    if player.player?.timeControlStatus == .playing {
-                        player.pause()
+                if bindablePlayer.state.status == .ready {
+                    if bindablePlayer.player?.timeControlStatus == .playing {
+                        bindablePlayer.pause()
                     } else {
-                        player.play()
+                        bindablePlayer.play()
                     }
                 }
             }
@@ -67,7 +72,7 @@ public struct ProxyVideoView: View {
             .glassBackgroundEffect()
 #endif
             .overlay(alignment: .topLeading) {
-                Text(statusText)
+                Text(statusLabel)
                     .font(.caption)
                     .padding(6)
                     .background(.ultraThinMaterial, in: Capsule())
@@ -76,11 +81,11 @@ public struct ProxyVideoView: View {
     }
 
 
-    private var statusText: String {
-        switch player.state.status {
+    private func statusText(for state: PlayerState) -> String {
+        switch state.status {
         case .idle: return "Idle"
         case .buffering: return "Buffering"
-        case .ready: return "Ready (\(String(format: "%.1fs", player.state.bufferDepthSeconds)))"
+        case .ready: return "Ready (\(String(format: "%.1fs", state.bufferDepthSeconds)))"
         case .failed(let reason): return "Failed: \(reason)"
         }
     }
@@ -103,22 +108,8 @@ public struct ProxyVideoView: View {
         ),
         autoplay: true
     )
-//    .modifier(PreviewTickLogger())
     .frame(height: 240)
     .padding()
 }
-
-private struct PreviewTickLogger: ViewModifier {
-    private let startDate = Date()
-    private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
-
-    func body(content: Content) -> some View {
-        content.onReceive(timer) { now in
-            let elapsed = now.timeIntervalSince(startDate)
-            print("[ProxyPlayerKit][PREVIEW] tick +\(String(format: "%.1f", elapsed))s")
-        }
-    }
-}
 #endif
 #endif
-

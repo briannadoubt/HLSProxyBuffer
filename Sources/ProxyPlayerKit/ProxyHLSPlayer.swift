@@ -4,14 +4,14 @@ import LocalProxy
 #if canImport(AVFoundation)
 import AVFoundation
 #endif
-#if canImport(Combine)
-import Combine
+#if canImport(Observation)
+import Observation
 #endif
 #if canImport(CryptoKit)
 import CryptoKit
 #endif
 
-#if canImport(Combine) && canImport(AVFoundation)
+#if canImport(Observation) && canImport(AVFoundation)
 
 public struct AuxiliaryRenditionRegistration: Sendable, Equatable {
     public let kind: HLSManifest.Rendition.Kind
@@ -44,8 +44,10 @@ public struct AuxiliaryRenditionRegistration: Sendable, Equatable {
     }
 }
 
+/// Orchestrates the LL-HLS proxy pipeline and exposes observable playback state for UI surfaces.
+@Observable
 @MainActor
-public final class ProxyHLSPlayer: ObservableObject {
+public final class ProxyHLSPlayer {
     public nonisolated static func keyIdentifier(forKeyURI uri: URL) -> String {
         digest(for: uri.absoluteString)
     }
@@ -96,43 +98,43 @@ public final class ProxyHLSPlayer: ObservableObject {
         static let variant = "variants/main.m3u8"
     }
 
-    @Published public private(set) var player: AVPlayer?
-    @Published public private(set) var state = PlayerState()
-    @Published public private(set) var configuration: ProxyPlayerConfiguration
-    @Published public private(set) var variants: [VariantPlaylist] = []
-    @Published public private(set) var audioRenditions: [HLSManifest.Rendition] = []
-    @Published public private(set) var subtitleRenditions: [HLSManifest.Rendition] = []
-    @Published public private(set) var activeAudioRendition: HLSManifest.Rendition?
-    @Published public private(set) var activeSubtitleRendition: HLSManifest.Rendition?
+    public private(set) var player: AVPlayer?
+    public private(set) var state = PlayerState()
+    public private(set) var configuration: ProxyPlayerConfiguration
+    public private(set) var variants: [VariantPlaylist] = []
+    public private(set) var audioRenditions: [HLSManifest.Rendition] = []
+    public private(set) var subtitleRenditions: [HLSManifest.Rendition] = []
+    public private(set) var activeAudioRendition: HLSManifest.Rendition?
+    public private(set) var activeSubtitleRendition: HLSManifest.Rendition?
 
-    private let logger: Logger
-    private let parser = HLSParser()
-    private let rewriter = HLSRewriter()
-    private let cache: HLSSegmentCache
-    private let scheduler: SegmentPrefetchScheduler
-    private let playlistRefresher: PlaylistRefreshController
-    private let playlistStore = PlaylistStore()
-    private let auxiliaryStore = AuxiliaryAssetStore()
-    private let router = ProxyRouter()
-    private let segmentCatalog = SegmentCatalog()
-    private let segmentFetcher: HLSSegmentFetcher
-    private var currentPlaylist: MediaPlaylist?
-    private var currentRewriteConfiguration: HLSRewriteConfiguration?
-    private var didPreparePlayerForCurrentLoad = false
-    private lazy var server = ProxyServer(router: router)
-    private let diagnostics: ProxyPlayerDiagnostics
-    private let throughputEstimator: ThroughputEstimator
-    private let adaptiveController: AdaptiveVariantController
-    private var activeVariant: VariantPlaylist?
-    private var abrSwitchInProgress = false
-    private var latestBufferState: BufferState?
-    private var resolvedRenditions: [String: ResolvedRenditionInfo] = [:]
-    private var orderedRenditionInfos: [ResolvedRenditionInfo] = []
-    private var renditionPlaylists: [String: MediaPlaylist] = [:]
-    private var auxiliaryRegistrations: [AuxiliaryRegistration] = []
-    private var latestManifestRenditions: [HLSManifest.Rendition] = []
-    private var latestKeyStatuses: [ProxyPlayerDiagnostics.KeyStatus] = []
-    private var shouldPlayWhenReady = false
+    @ObservationIgnored private let logger: Logger
+    @ObservationIgnored private let parser = HLSParser()
+    @ObservationIgnored private let rewriter = HLSRewriter()
+    @ObservationIgnored private let cache: HLSSegmentCache
+    @ObservationIgnored private let scheduler: SegmentPrefetchScheduler
+    @ObservationIgnored private let playlistRefresher: PlaylistRefreshController
+    @ObservationIgnored private let playlistStore = PlaylistStore()
+    @ObservationIgnored private let auxiliaryStore = AuxiliaryAssetStore()
+    @ObservationIgnored private let router = ProxyRouter()
+    @ObservationIgnored private let segmentCatalog = SegmentCatalog()
+    @ObservationIgnored private let segmentFetcher: HLSSegmentFetcher
+    @ObservationIgnored private var currentPlaylist: MediaPlaylist?
+    @ObservationIgnored private var currentRewriteConfiguration: HLSRewriteConfiguration?
+    @ObservationIgnored private var didPreparePlayerForCurrentLoad = false
+    @ObservationIgnored private lazy var server = ProxyServer(router: router)
+    @ObservationIgnored private let diagnostics: ProxyPlayerDiagnostics
+    @ObservationIgnored private let throughputEstimator: ThroughputEstimator
+    @ObservationIgnored private let adaptiveController: AdaptiveVariantController
+    @ObservationIgnored private var activeVariant: VariantPlaylist?
+    @ObservationIgnored private var abrSwitchInProgress = false
+    @ObservationIgnored private var latestBufferState: BufferState?
+    @ObservationIgnored private var resolvedRenditions: [String: ResolvedRenditionInfo] = [:]
+    @ObservationIgnored private var orderedRenditionInfos: [ResolvedRenditionInfo] = []
+    @ObservationIgnored private var renditionPlaylists: [String: MediaPlaylist] = [:]
+    @ObservationIgnored private var auxiliaryRegistrations: [AuxiliaryRegistration] = []
+    @ObservationIgnored private var latestManifestRenditions: [HLSManifest.Rendition] = []
+    @ObservationIgnored private var latestKeyStatuses: [ProxyPlayerDiagnostics.KeyStatus] = []
+    @ObservationIgnored private var shouldPlayWhenReady = false
 
     public init(
         configuration: ProxyPlayerConfiguration = .init(),
@@ -1155,7 +1157,7 @@ public final class ProxyHLSPlayer {
     }
 }
 #endif
-#if canImport(Combine) && canImport(AVFoundation)
+#if canImport(Observation) && canImport(AVFoundation)
 private extension HLSManifest.Rendition.Kind {
     var supportedAssetType: AuxiliaryAssetType? {
         switch self {

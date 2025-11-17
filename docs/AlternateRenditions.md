@@ -14,7 +14,7 @@ The proxy now understands `#EXT-X-MEDIA` declarations for audio, subtitle, and c
 
 ## ProxyHLSPlayer API
 
-`ProxyHLSPlayer` exposes new `@Published` collections:
+`ProxyHLSPlayer` exposes new observable collections (via `@Observable`):
 
 - `audioRenditions` / `subtitleRenditions`: Parsed `HLSManifest.Rendition` values whose `uri` points at proxy endpoints.
 - `activeAudioRendition` / `activeSubtitleRendition`: Currently selected tracks.

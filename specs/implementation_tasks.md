@@ -63,7 +63,7 @@ Guiding focus: keep AVPlayer reading exclusively from the local proxy, guarantee
 ## 4. ProxyPlayerKit Target
 
 ### 4.1 Player Orchestration
-- [x] Implement `ProxyHLSPlayer` (ObservableObject) that bootstraps proxy server, manifest pipeline, scheduler, and exposes `AVPlayer`. _(Implemented with playlist refresh + cache miss healing.)_
+- [x] Implement `ProxyHLSPlayer` (`@Observable`) that bootstraps proxy server, manifest pipeline, scheduler, and exposes `AVPlayer`. _(Implemented with playlist refresh + cache miss healing.)_
 - [x] Provide lifecycle controls (`load`, `play`, `pause`, `stop`) and ensure proper teardown (stop server, cancel schedulers, clear caches). _(Lifecycle methods in place.)_
 - [x] Surface buffering/quality state via `PlayerState` and metrics publishers for UI consumption. _(State updates tied to scheduler buffer changes.)_
 
