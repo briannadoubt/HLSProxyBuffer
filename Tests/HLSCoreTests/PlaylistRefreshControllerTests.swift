@@ -62,6 +62,36 @@ final class PlaylistRefreshControllerTests: XCTestCase {
         await controller.stop()
     }
 
+    func testBlockingReloadAddsQueryParametersWhenEnabled() async throws {
+        PlaylistRefreshMockURLProtocol.enqueue(string: lowLatencyPlaylist(sequence: 10))
+        PlaylistRefreshMockURLProtocol.enqueue(string: lowLatencyPlaylist(sequence: 11))
+
+        let controller = makeController(interval: 0.01)
+        await controller.updateLowLatencyConfiguration(.init(isEnabled: true, blockingRequestTimeout: 0.2, enableDeltaUpdates: true))
+        let url = URL(string: "https://example.com/live.m3u8")!
+        let expectation = expectation(description: "blocking refresh")
+        expectation.expectedFulfillmentCount = 2
+
+        await controller.start(
+            url: url,
+            allowInsecure: false,
+            retryPolicy: .init(maxAttempts: 1, retryDelay: 0),
+            onUpdate: { _ in await MainActor.run { expectation.fulfill() } }
+        )
+
+        await fulfillment(of: [expectation], timeout: 2)
+        await controller.stop()
+
+        let requests = PlaylistRefreshMockURLProtocol.recordedRequests()
+        XCTAssertGreaterThanOrEqual(requests.count, 2)
+        let blockingRequest = try XCTUnwrap(requests.dropFirst().first)
+        let components = try XCTUnwrap(URLComponents(url: blockingRequest.url!, resolvingAgainstBaseURL: false))
+        let queryItems = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        XCTAssertEqual(queryItems["_HLS_msn"], "11")
+        XCTAssertEqual(queryItems["_HLS_part"], "1")
+        XCTAssertEqual(queryItems["_HLS_skip"], "YES")
+    }
+
     private func makeController(interval: TimeInterval) -> PlaylistRefreshController {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [PlaylistRefreshMockURLProtocol.self]
@@ -80,6 +110,24 @@ final class PlaylistRefreshControllerTests: XCTestCase {
             lines.append("#EXT-X-ENDLIST")
         }
         return lines.joined(separator: "\n")
+    }
+
+    private func lowLatencyPlaylist(sequence: Int) -> String {
+        let next = sequence + 1
+        return [
+            "#EXTM3U",
+            "#EXT-X-VERSION:7",
+            "#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.5",
+            "#EXT-X-PART-INF:PART-TARGET=0.5",
+            "#EXT-X-TARGETDURATION:4",
+            "#EXT-X-MEDIA-SEQUENCE:\(sequence)",
+            "#EXTINF:4.0,",
+            "seg-\(sequence).ts",
+            "#EXT-X-PART:DURATION=0.5,URI=\"seg-\(next)-part0.ts\"",
+            "#EXT-X-PART:DURATION=0.5,URI=\"seg-\(next)-part1.ts\"",
+            "#EXTINF:4.0,",
+            "seg-\(next).ts"
+        ].joined(separator: "\n")
     }
 }
 
@@ -100,6 +148,7 @@ private final class PlaylistRefreshMockURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        Self.storage.record(request)
         guard let stub = Self.storage.nextStub() else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
@@ -131,9 +180,14 @@ private final class PlaylistRefreshMockURLProtocol: URLProtocol {
         storage.reset()
     }
 
+    static func recordedRequests() -> [URLRequest] {
+        storage.requests
+    }
+
     private final class Storage: @unchecked Sendable {
         private var stubs: [Stub] = []
         private var internalRequestCount = 0
+        private var recorded: [URLRequest] = []
         private let lock = NSLock()
 
         var requestCount: Int {
@@ -152,10 +206,21 @@ private final class PlaylistRefreshMockURLProtocol: URLProtocol {
             }
         }
 
+        func record(_ request: URLRequest) {
+            lock.withLock {
+                recorded.append(request)
+            }
+        }
+
+        var requests: [URLRequest] {
+            lock.withLock { recorded }
+        }
+
         func reset() {
             lock.withLock {
                 stubs.removeAll()
                 internalRequestCount = 0
+                recorded.removeAll()
             }
         }
     }

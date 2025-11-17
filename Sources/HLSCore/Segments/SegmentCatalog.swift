@@ -6,12 +6,27 @@ public actor SegmentCatalog {
     }
 
     public struct Entry: Sendable {
-        public let segment: HLSSegment
+        public enum Payload: Sendable {
+            case segment(HLSSegment)
+            case part(HLSPartialSegment)
+        }
+
+        public let payload: Payload
         public let namespace: String
 
-        public init(segment: HLSSegment, namespace: String) {
-            self.segment = segment
+        public init(payload: Payload, namespace: String) {
+            self.payload = payload
             self.namespace = namespace
+        }
+
+        public var segment: HLSSegment? {
+            if case .segment(let value) = payload { return value }
+            return nil
+        }
+
+        public var part: HLSPartialSegment? {
+            if case .part(let value) = payload { return value }
+            return nil
         }
     }
 
@@ -35,8 +50,17 @@ public actor SegmentCatalog {
                 for: segment,
                 namespace: namespace == Namespace.primary ? nil : namespace
             )
-            segmentsByKey[key] = Entry(segment: segment, namespace: namespace)
+            segmentsByKey[key] = Entry(payload: .segment(segment), namespace: namespace)
             keys.insert(key)
+
+            for part in segment.parts {
+                let partKey = SegmentIdentity.key(
+                    for: part,
+                    namespace: namespace == Namespace.primary ? nil : namespace
+                )
+                segmentsByKey[partKey] = Entry(payload: .part(part), namespace: namespace)
+                keys.insert(partKey)
+            }
         }
         keysByNamespace[namespace] = keys
     }

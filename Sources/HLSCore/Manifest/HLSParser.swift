@@ -12,6 +12,9 @@ public struct HLSParser: Sendable {
         case missingKeyAttribute(String)
         case malformedKeyAttribute(String)
         case missingMapAttribute(String)
+        case missingPartAttribute(String)
+        case missingHintAttribute(String)
+        case missingRenditionReportAttribute(String)
 
         public var description: String {
             switch self {
@@ -35,6 +38,12 @@ public struct HLSParser: Sendable {
                 return "EXT-X-KEY attribute has unsupported value: \(attribute)."
             case .missingMapAttribute(let attribute):
                 return "EXT-X-MAP tag is missing required attribute \(attribute)."
+            case .missingPartAttribute(let attribute):
+                return "EXT-X-PART tag is missing required attribute \(attribute)."
+            case .missingHintAttribute(let attribute):
+                return "EXT-X-PRELOAD-HINT tag is missing required attribute \(attribute)."
+            case .missingRenditionReportAttribute(let attribute):
+                return "EXT-X-RENDITION-REPORT tag is missing required attribute \(attribute)."
             }
         }
     }
@@ -66,6 +75,12 @@ public struct HLSParser: Sendable {
         var currentEncryption: SegmentEncryption?
         var currentMap: MediaInitializationMap?
         var sessionKeys: [HLSKey] = []
+        var pendingParts: [HLSPartialSegment] = []
+        var partTargetDuration: TimeInterval?
+        var serverControl: HLSServerControl?
+        var preloadHints: [HLSPreloadHint] = []
+        var renditionReports: [HLSRenditionReport] = []
+        var skippedSegmentCount: Int?
 
         for line in lines {
             guard !line.isEmpty else { continue }
@@ -89,6 +104,12 @@ public struct HLSParser: Sendable {
             } else if line.hasPrefix("#EXT-X-TARGETDURATION:") {
                 let value = line.replacingOccurrences(of: "#EXT-X-TARGETDURATION:", with: "")
                 targetDuration = TimeInterval(value)
+            } else if line.hasPrefix("#EXT-X-PART-INF:") {
+                let value = line.replacingOccurrences(of: "#EXT-X-PART-INF:", with: "")
+                let attributes = attributeDictionary(from: value)
+                if let targetValue = attributes["PART-TARGET"], let parsed = TimeInterval(targetValue) {
+                    partTargetDuration = parsed
+                }
             } else if line.hasPrefix("#EXT-X-BYTERANGE:") {
                 let value = line.replacingOccurrences(of: "#EXT-X-BYTERANGE:", with: "")
                 pendingByteRange = parseByteRange(from: value)
@@ -107,6 +128,41 @@ public struct HLSParser: Sendable {
             } else if line.hasPrefix("#EXT-X-MAP:") {
                 let value = String(line.dropFirst("#EXT-X-MAP:".count))
                 currentMap = try parseInitializationMap(from: value, baseURL: baseURL)
+            } else if line.hasPrefix("#EXT-X-PART:") {
+                let value = String(line.dropFirst("#EXT-X-PART:".count))
+                let part = try parsePartialSegment(
+                    from: value,
+                    sequence: currentSequence,
+                    partIndex: pendingParts.count,
+                    encryption: currentEncryption,
+                    map: currentMap,
+                    baseURL: baseURL
+                )
+                pendingParts.append(part)
+            } else if line.hasPrefix("#EXT-X-PRELOAD-HINT:") {
+                let value = String(line.dropFirst("#EXT-X-PRELOAD-HINT:".count))
+                if let hint = try parsePreloadHint(
+                    from: value,
+                    sequence: currentSequence,
+                    partIndex: pendingParts.count,
+                    baseURL: baseURL
+                ) {
+                    preloadHints.append(hint)
+                }
+            } else if line.hasPrefix("#EXT-X-RENDITION-REPORT:") {
+                let value = String(line.dropFirst("#EXT-X-RENDITION-REPORT:".count))
+                if let report = try parseRenditionReport(from: value, baseURL: baseURL) {
+                    renditionReports.append(report)
+                }
+            } else if line.hasPrefix("#EXT-X-SERVER-CONTROL:") {
+                let value = String(line.dropFirst("#EXT-X-SERVER-CONTROL:".count))
+                serverControl = parseServerControl(from: value)
+            } else if line.hasPrefix("#EXT-X-SKIP:") {
+                let value = String(line.dropFirst("#EXT-X-SKIP:".count))
+                let attributes = attributeDictionary(from: value)
+                if let skippedValue = attributes["SKIPPED-SEGMENTS"], let count = Int(skippedValue) {
+                    skippedSegmentCount = count
+                }
             } else if line.hasPrefix("#") {
                 continue
             } else {
@@ -125,11 +181,13 @@ public struct HLSParser: Sendable {
                             sequence: currentSequence,
                             byteRange: pendingByteRange,
                             encryption: currentEncryption,
-                            initializationMap: currentMap
+                            initializationMap: currentMap,
+                            parts: pendingParts
                         )
                     )
                     pendingDuration = nil
                     pendingByteRange = nil
+                    pendingParts.removeAll()
                     currentSequence += 1
                 }
             }
@@ -140,7 +198,12 @@ public struct HLSParser: Sendable {
             mediaSequence: segments.first?.sequence ?? 0,
             segments: segments,
             isEndlist: isEndlist,
-            sessionKeys: sessionKeys
+            sessionKeys: sessionKeys,
+            partTargetDuration: partTargetDuration,
+            serverControl: serverControl,
+            preloadHints: preloadHints,
+            renditionReports: renditionReports,
+            skippedSegmentCount: skippedSegmentCount
         )
 
         let kind: HLSManifestKind = (variants.isEmpty && renditions.isEmpty) ? .media : .master
@@ -219,6 +282,108 @@ public struct HLSParser: Sendable {
         }
 
         return 0...(length - 1)
+    }
+
+    private func parsePartialSegment(
+        from string: String,
+        sequence: Int,
+        partIndex: Int,
+        encryption: SegmentEncryption?,
+        map: MediaInitializationMap?,
+        baseURL: URL?
+    ) throws -> HLSPartialSegment {
+        let attributes = attributeDictionary(from: string)
+        guard let durationValue = attributes["DURATION"], let duration = TimeInterval(durationValue) else {
+            throw ParserError.missingPartAttribute("DURATION")
+        }
+        guard let uriValue = attributes["URI"], !uriValue.isEmpty else {
+            throw ParserError.missingPartAttribute("URI")
+        }
+        let url = try resolveURL(uriValue, baseURL: baseURL)
+        let range = attributes["BYTERANGE"].flatMap(parseByteRange(from:))
+        let isIndependent = parseBoolean(attributes["INDEPENDENT"]) ?? false
+        let isGap = parseBoolean(attributes["GAP"]) ?? false
+        return HLSPartialSegment(
+            parentSequence: sequence,
+            partIndex: partIndex,
+            duration: duration,
+            url: url,
+            byteRange: range,
+            isIndependent: isIndependent,
+            isGap: isGap,
+            encryption: encryption,
+            initializationMap: map
+        )
+    }
+
+    private func parsePreloadHint(
+        from string: String,
+        sequence: Int,
+        partIndex: Int,
+        baseURL: URL?
+    ) throws -> HLSPreloadHint? {
+        let attributes = attributeDictionary(from: string)
+        guard let typeValue = attributes["TYPE"], !typeValue.isEmpty else {
+            throw ParserError.missingHintAttribute("TYPE")
+        }
+        guard let type = HLSPreloadHint.HintType(rawValue: typeValue.uppercased()) else {
+            return nil
+        }
+        guard let uriValue = attributes["URI"], !uriValue.isEmpty else {
+            throw ParserError.missingHintAttribute("URI")
+        }
+        let url = try resolveURL(uriValue, baseURL: baseURL)
+        let start = attributes["BYTERANGE-START"].flatMap(Int.init)
+        let length = attributes["BYTERANGE-LENGTH"].flatMap(Int.init)
+        let hintPartIndex = type == .part ? partIndex : nil
+        return HLSPreloadHint(
+            type: type,
+            uri: url,
+            byteRangeStart: start,
+            byteRangeLength: length,
+            sequence: sequence,
+            partIndex: hintPartIndex
+        )
+    }
+
+    private func parseRenditionReport(from string: String, baseURL: URL?) throws -> HLSRenditionReport? {
+        let attributes = attributeDictionary(from: string)
+        guard let uriValue = attributes["URI"], !uriValue.isEmpty else {
+            throw ParserError.missingRenditionReportAttribute("URI")
+        }
+        let uri = try resolveURL(uriValue, baseURL: baseURL)
+        let lastMSN = attributes["LAST-MSN"].flatMap(Int.init)
+        let lastPart = attributes["LAST-PART"].flatMap(Int.init)
+        let bandwidth = attributes["AVERAGE-BANDWIDTH"].flatMap(Int.init)
+        return HLSRenditionReport(
+            uri: uri,
+            lastMediaSequence: lastMSN,
+            lastPartIndex: lastPart,
+            averageBandwidth: bandwidth
+        )
+    }
+
+    private func parseServerControl(from string: String) -> HLSServerControl? {
+        let attributes = attributeDictionary(from: string)
+        let canSkipUntil = attributes["CAN-SKIP-UNTIL"].flatMap(TimeInterval.init)
+        let canBlock = parseBoolean(attributes["CAN-BLOCK-RELOAD"]) ?? false
+        let canPrefetch = parseBoolean(attributes["CAN-PREFETCH"]) ?? false
+        let canSkipDateRanges = parseBoolean(attributes["CAN-SKIP-DATERANGES"]) ?? false
+        let holdBack = attributes["HOLD-BACK"].flatMap(TimeInterval.init)
+        let partHoldBack = attributes["PART-HOLD-BACK"].flatMap(TimeInterval.init)
+        let partTarget = attributes["PART-TARGET"].flatMap(TimeInterval.init)
+        if canSkipUntil == nil && !canBlock && !canPrefetch && !canSkipDateRanges && holdBack == nil && partHoldBack == nil && partTarget == nil {
+            return nil
+        }
+        return HLSServerControl(
+            canSkipUntil: canSkipUntil,
+            canBlockReload: canBlock,
+            canSkipDateRanges: canSkipDateRanges,
+            canPrefetch: canPrefetch,
+            holdBack: holdBack,
+            partHoldBack: partHoldBack,
+            partTarget: partTarget
+        )
     }
 
     private func splitAttributes(_ string: String) -> [String] {

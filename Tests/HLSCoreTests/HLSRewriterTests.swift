@@ -76,7 +76,14 @@ final class HLSRewriterTests: XCTestCase {
             )
         )
 
-        let output = rewriter.rewrite(mediaPlaylist: playlist, config: config, bufferState: bufferState)
+        let llPlaylist = MediaPlaylist(
+            targetDuration: playlist.targetDuration,
+            mediaSequence: playlist.mediaSequence,
+            segments: playlist.segments,
+            partTargetDuration: 0.5
+        )
+
+        let output = rewriter.rewrite(mediaPlaylist: llPlaylist, config: config, bufferState: bufferState)
         XCTAssertTrue(output.contains("#EXT-X-SERVER-CONTROL"))
         XCTAssertTrue(output.contains("#EXT-X-PART-INF"))
         XCTAssertTrue(output.contains("#EXT-X-PREFETCH"))
@@ -163,5 +170,50 @@ final class HLSRewriterTests: XCTestCase {
 
         let output = rewriter.rewrite(mediaPlaylist: encryptedPlaylist, config: config, bufferState: bufferState)
         XCTAssertTrue(output.contains("#EXT-X-MAP:URI=\"https://cdn.test/init.mp4\",BYTERANGE=128@0"))
+    }
+
+    func testEmitsPartsPreloadHintsAndReports() {
+        let rewriter = HLSRewriter()
+        let part0 = HLSPartialSegment(
+            parentSequence: 1,
+            partIndex: 0,
+            duration: 0.5,
+            url: URL(string: "https://cdn.test/part0.ts")!,
+            isIndependent: true
+        )
+        let part1 = HLSPartialSegment(
+            parentSequence: 1,
+            partIndex: 1,
+            duration: 0.5,
+            url: URL(string: "https://cdn.test/part1.ts")!
+        )
+        let playlist = MediaPlaylist(
+            targetDuration: 4,
+            mediaSequence: 1,
+            segments: [
+                HLSSegment(url: URL(string: "https://cdn.test/1.ts")!, duration: 4, sequence: 1, parts: [part0, part1]),
+                HLSSegment(url: URL(string: "https://cdn.test/2.ts")!, duration: 4, sequence: 2)
+            ],
+            partTargetDuration: 0.5,
+            serverControl: HLSServerControl(canSkipUntil: nil, canBlockReload: true, canSkipDateRanges: false, canPrefetch: false, holdBack: nil, partHoldBack: 1.5, partTarget: nil),
+            preloadHints: [HLSPreloadHint(type: .part, uri: URL(string: "https://cdn.test/part2.ts")!, sequence: 2, partIndex: 2)],
+            renditionReports: [HLSRenditionReport(uri: URL(string: "https://cdn.test/alt.m3u8")!, lastMediaSequence: 2, lastPartIndex: 1)]
+        )
+
+        let bufferState = BufferState(readySequences: [1], readyPartCounts: [1: 1], prefetchDepthSeconds: 1, partPrefetchDepthSeconds: 0.5)
+        let config = HLSRewriteConfiguration(
+            proxyBaseURL: URL(string: "http://127.0.0.1:8080")!,
+            hideUntilBuffered: true,
+            lowLatencyOptions: .init(canSkipUntil: 6, partHoldBack: 0.5, allowBlockingReload: true, prefetchHintCount: 1, enableDeltaUpdates: true)
+        )
+
+        let output = rewriter.rewrite(mediaPlaylist: playlist, config: config, bufferState: bufferState)
+        XCTAssertTrue(output.contains("#EXT-X-PART-INF:PART-TARGET=0.500"))
+        XCTAssertTrue(output.contains("CAN-BLOCK-RELOAD=YES"))
+        XCTAssertTrue(output.contains("PART-HOLD-BACK=1.500"))
+        XCTAssertTrue(output.contains("#EXT-X-PART:DURATION=0.500,URI=http://127.0.0.1:8080/segments/part-1-0,INDEPENDENT=YES"))
+        XCTAssertFalse(output.contains("part-1-1"), "Second part should be hidden until buffered")
+        XCTAssertTrue(output.contains("#EXT-X-PRELOAD-HINT:TYPE=PART,URI=http://127.0.0.1:8080/segments/part-2-2"))
+        XCTAssertTrue(output.contains("#EXT-X-RENDITION-REPORT:URI=https://cdn.test/alt.m3u8"))
     }
 }

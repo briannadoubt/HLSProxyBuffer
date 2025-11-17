@@ -125,6 +125,49 @@ final class SegmentPrefetchSchedulerTests: XCTestCase {
         let state = await scheduler.bufferState()
         XCTAssertEqual(state.playedThroughSequence, 10)
     }
+
+    func testPrefetchesPartsAndTracksReadyCount() async throws {
+        let scheduler = SegmentPrefetchScheduler(configuration: .init(targetBufferSeconds: 2, maxSegments: 1, targetPartCount: 2))
+        let cache = HLSSegmentCache(capacity: 2)
+        let fetcher = MockSegmentSource()
+
+        let part0 = HLSPartialSegment(
+            parentSequence: 1,
+            partIndex: 0,
+            duration: 0.5,
+            url: URL(string: "https://cdn.test/1-part0.ts")!
+        )
+        let part1 = HLSPartialSegment(
+            parentSequence: 1,
+            partIndex: 1,
+            duration: 0.5,
+            url: URL(string: "https://cdn.test/1-part1.ts")!
+        )
+
+        let playlist = MediaPlaylist(
+            targetDuration: 4,
+            mediaSequence: 1,
+            segments: [
+                HLSSegment(
+                    url: URL(string: "https://cdn.test/1.ts")!,
+                    duration: 4,
+                    sequence: 1,
+                    parts: [part0, part1]
+                )
+            ]
+        )
+
+        await scheduler.start(playlist: playlist, fetcher: fetcher, cache: cache)
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        var state = await scheduler.bufferState()
+        XCTAssertEqual(state.readyPartCounts[1], 2)
+        XCTAssertGreaterThanOrEqual(state.partPrefetchDepthSeconds, 1.0)
+
+        await scheduler.consumePart(sequence: 1, partIndex: 0)
+        state = await scheduler.bufferState()
+        XCTAssertEqual(state.readyPartCounts[1], 1)
+    }
 }
 
 private actor MockSegmentSource: SegmentSource {

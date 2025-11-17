@@ -151,7 +151,8 @@ public final class ProxyHLSPlayer: ObservableObject {
         )
         self.scheduler = SegmentPrefetchScheduler(configuration: .init(
             targetBufferSeconds: configuration.bufferPolicy.targetBufferSeconds,
-            maxSegments: configuration.bufferPolicy.maxPrefetchSegments
+            maxSegments: configuration.bufferPolicy.maxPrefetchSegments,
+            targetPartCount: configuration.lowLatencyPolicy.isEnabled ? configuration.lowLatencyPolicy.targetPartBufferCount : 0
         ))
         self.playlistRefresher = PlaylistRefreshController(
             configuration: .init(
@@ -314,15 +315,29 @@ public final class ProxyHLSPlayer: ObservableObject {
         await scheduler.start(playlist: playlist, fetcher: segmentFetcher, cache: cache)
         logger.log("Proxy base URL: \(baseURL.absoluteString)", category: .player)
 
+        let lowLatencyOptions: HLSRewriteConfiguration.LowLatencyOptions?
+        if configuration.lowLatencyPolicy.isEnabled {
+            lowLatencyOptions = configuration.lowLatencyOptions
+        } else {
+            lowLatencyOptions = nil
+        }
+
         let rewriteConfiguration = HLSRewriteConfiguration(
             proxyBaseURL: baseURL,
             hideUntilBuffered: configuration.bufferPolicy.hideUntilBuffered,
-            artificialBandwidth: configuration.lowLatencyOptions?.canSkipUntil.map { Int($0 * 1_000_000) },
+            artificialBandwidth: lowLatencyOptions?.canSkipUntil.map { Int($0 * 1_000_000) },
             qualityPolicy: quality,
-            lowLatencyOptions: configuration.lowLatencyOptions,
+            lowLatencyOptions: lowLatencyOptions,
             keyURLResolver: keyURLResolver(for: baseURL)
         )
         currentRewriteConfiguration = rewriteConfiguration
+
+        if configuration.lowLatencyPolicy.isEnabled {
+            logger.log(
+                "LL-HLS enabled (parts target=\(configuration.lowLatencyPolicy.targetPartBufferCount), blocking=\(configuration.lowLatencyPolicy.enableBlockingReloads))",
+                category: .player
+            )
+        }
 
         let bufferState = await scheduler.bufferState()
         latestBufferState = bufferState
@@ -427,6 +442,11 @@ public final class ProxyHLSPlayer: ObservableObject {
                 return (variant.url.absoluteString, bitrate)
             }
 
+            let partHoldBack = await MainActor.run { [weak self] () -> Double? in
+                guard let playlist = self?.currentPlaylist else { return nil }
+                return playlist.serverControl?.partHoldBack
+            }
+
             let dateFormatter = ISO8601DateFormatter()
             dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             let refreshDate: Any = {
@@ -456,10 +476,16 @@ public final class ProxyHLSPlayer: ObservableObject {
                 ]
             }
 
+            let lowLatencyEnabled = await MainActor.run { [weak self] () -> Bool in
+                self?.configuration.lowLatencyPolicy.isEnabled ?? false
+            }
+
             let payload: [String: Any] = [
                 "buffered_segments": bufferState.readySequences.count,
                 "prefetch_depth_seconds": bufferState.prefetchDepthSeconds,
+                "part_prefetch_depth_seconds": bufferState.partPrefetchDepthSeconds,
                 "played_through_sequence": bufferState.playedThroughSequence ?? NSNull(),
+                "ready_part_sequences": Dictionary(uniqueKeysWithValues: bufferState.readyPartCounts.map { ("\($0.key)", $0.value) }),
                 "cache_hits": metrics.hitCount,
                 "cache_misses": metrics.missCount,
                 "cached_bytes": metrics.totalBytes,
@@ -467,13 +493,16 @@ public final class ProxyHLSPlayer: ObservableObject {
                 "playlist_refresh_failures": refresh.consecutiveFailures,
                 "playlist_refresh_error": refreshError,
                 "remote_media_sequence": remoteSequence,
+                "blocking_reload_active": refresh.blockingReloadEngaged,
                 "active_variant_name": variantMetadata.0 ?? NSNull(),
                 "variant_bitrate": variantMetadata.1 ?? NSNull(),
                 "throughput_bps": throughput?.bitsPerSecond ?? NSNull(),
                 "abr_last_reason": decision.map { String(describing: $0.reason) } ?? NSNull(),
                 "active_audio_rendition": renditionMetadata.0 ?? NSNull(),
                 "active_subtitle_rendition": renditionMetadata.1 ?? NSNull(),
-                "keys": keyMetadata
+                "keys": keyMetadata,
+                "part_hold_back_seconds": partHoldBack ?? NSNull(),
+                "low_latency_mode": lowLatencyEnabled
             ]
             return HTTPResponse.json(payload)
         }
@@ -869,14 +898,25 @@ public final class ProxyHLSPlayer: ObservableObject {
             diskDirectory: ProxyHLSPlayer.diskDirectory(for: configuration.cachePolicy)
         )
         await segmentFetcher.updateValidationPolicy(configuration.segmentValidation)
+        let partBufferCount = configuration.lowLatencyPolicy.isEnabled ? configuration.lowLatencyPolicy.targetPartBufferCount : 0
         await scheduler.updateConfiguration(.init(
             targetBufferSeconds: configuration.bufferPolicy.targetBufferSeconds,
-            maxSegments: configuration.bufferPolicy.maxPrefetchSegments
+            maxSegments: configuration.bufferPolicy.maxPrefetchSegments,
+            targetPartCount: partBufferCount
         ))
         await playlistRefresher.updateConfiguration(.init(
             refreshInterval: configuration.bufferPolicy.refreshInterval,
             maxBackoffInterval: configuration.bufferPolicy.maxRefreshBackoff
         ))
+        if configuration.lowLatencyPolicy.isEnabled {
+            await playlistRefresher.updateLowLatencyConfiguration(.init(
+                isEnabled: true,
+                blockingRequestTimeout: configuration.lowLatencyPolicy.blockingRequestTimeout,
+                enableDeltaUpdates: configuration.lowLatencyOptions?.enableDeltaUpdates ?? false
+            ))
+        } else {
+            await playlistRefresher.updateLowLatencyConfiguration(nil)
+        }
         await scheduler.enqueueUpcomingPlaylists(configuration.upcomingPlaylists)
         await scheduler.onTelemetry(makeTelemetryHandler())
         await throughputEstimator.updateConfiguration(.init(window: configuration.abrPolicy.estimatorWindow))
@@ -935,7 +975,7 @@ public final class ProxyHLSPlayer: ObservableObject {
         let controller = adaptiveController
         return { [weak self, logger, controller] telemetry in
             logger.log(
-                "scheduled=\(telemetry.scheduledSequences) ready=\(telemetry.readyCount) failures=\(telemetry.failureCount)",
+                "scheduled=\(telemetry.scheduledSequences) ready=\(telemetry.readyCount) parts=\(telemetry.readyPartCount) failures=\(telemetry.failureCount)",
                 category: .scheduler
             )
             guard telemetry.failureCount > 0 else { return }

@@ -73,11 +73,31 @@ public struct ProxyPlayerConfiguration: Sendable, Equatable {
         }
     }
 
+    public struct LowLatencyPolicy: Sendable, Equatable {
+        public var isEnabled: Bool
+        public var targetPartBufferCount: Int
+        public var enableBlockingReloads: Bool
+        public var blockingRequestTimeout: TimeInterval
+
+        public init(
+            isEnabled: Bool = false,
+            targetPartBufferCount: Int = 0,
+            enableBlockingReloads: Bool = false,
+            blockingRequestTimeout: TimeInterval = 6
+        ) {
+            self.isEnabled = isEnabled
+            self.targetPartBufferCount = targetPartBufferCount
+            self.enableBlockingReloads = enableBlockingReloads
+            self.blockingRequestTimeout = blockingRequestTimeout
+        }
+    }
+
     public var qualityPolicy: HLSRewriteConfiguration.QualityPolicy
     public var bufferPolicy: BufferPolicy
     public var cachePolicy: CachePolicy
     public var abrPolicy: ABRPolicy
     public var lowLatencyOptions: HLSRewriteConfiguration.LowLatencyOptions?
+    public var lowLatencyPolicy: LowLatencyPolicy
     public var manifestRetryPolicy: HLSManifestFetcher.RetryPolicy
     public var segmentValidation: HLSSegmentFetcher.ValidationPolicy
     public var upcomingPlaylists: [MediaPlaylist]
@@ -90,6 +110,7 @@ public struct ProxyPlayerConfiguration: Sendable, Equatable {
         cachePolicy: CachePolicy = .init(),
         abrPolicy: ABRPolicy = .init(),
         lowLatencyOptions: HLSRewriteConfiguration.LowLatencyOptions? = nil,
+        lowLatencyPolicy: LowLatencyPolicy = .init(),
         manifestRetryPolicy: HLSManifestFetcher.RetryPolicy = .default,
         segmentValidation: HLSSegmentFetcher.ValidationPolicy = .init(),
         upcomingPlaylists: [MediaPlaylist] = [],
@@ -101,6 +122,7 @@ public struct ProxyPlayerConfiguration: Sendable, Equatable {
         self.cachePolicy = cachePolicy
         self.abrPolicy = abrPolicy
         self.lowLatencyOptions = lowLatencyOptions
+        self.lowLatencyPolicy = lowLatencyPolicy
         self.manifestRetryPolicy = manifestRetryPolicy
         self.segmentValidation = segmentValidation
         self.upcomingPlaylists = upcomingPlaylists

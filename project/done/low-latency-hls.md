@@ -22,14 +22,14 @@ The current low-latency options only toggle server-control flags and prefetch hi
 8. **Testing** – Add fixtures for LL-HLS playlists to parser/rewriter tests. Update scheduler tests for part scheduling. Consider integration test ensuring AVPlayer consumes part playlists.
 
 ## Tasks
-- [ ] Define `HLSPartialSegment`/hint/rendition-report models and attach them to `MediaPlaylist` + `HLSSegment`.
-- [ ] Upgrade `HLSParser` to recognize LL-HLS tags (`PART`, `PRELOAD-HINT`, `RENDITION-REPORT`, `SKIP`, blocking reload attrs) with fixtures validating mixed playlists.
-- [ ] Enhance `SegmentIdentity`, `HLSSegmentCache`, and `SegmentHandler` to store/fetch individual parts with stable identifiers.
-- [ ] Extend `SegmentPrefetchScheduler` to plan/fetch parts, maintain part-level buffer depth, and drop consumed parts.
-- [ ] Update `HLSRewriter` to emit part tags, preload hints, and skip metadata pointing to proxy URLs.
-- [ ] Teach the playlist refresher to support blocking reload requests and respect hold-back/prefetch settings when LL-HLS is enabled.
-- [ ] Add diagnostics fields for part readiness/hold-back along with logging to confirm LL-HLS mode status.
-- [ ] Implement parser/rewriter/scheduler tests plus integration coverage ensuring AVPlayer consumes LL-HLS playlists via the proxy.
+- [x] Define `HLSPartialSegment`/hint/rendition-report models and attach them to `MediaPlaylist` + `HLSSegment`.
+- [x] Upgrade `HLSParser` to recognize LL-HLS tags (`PART`, `PRELOAD-HINT`, `RENDITION-REPORT`, `SKIP`, blocking reload attrs) with fixtures validating mixed playlists.
+- [x] Enhance `SegmentIdentity`, `HLSSegmentCache`, and `SegmentHandler` to store/fetch individual parts with stable identifiers.
+- [x] Extend `SegmentPrefetchScheduler` to plan/fetch parts, maintain part-level buffer depth, and drop consumed parts.
+- [x] Update `HLSRewriter` to emit part tags, preload hints, and skip metadata pointing to proxy URLs.
+- [x] Teach the playlist refresher to support blocking reload requests and respect hold-back/prefetch settings when LL-HLS is enabled.
+- [x] Add diagnostics fields for part readiness/hold-back along with logging to confirm LL-HLS mode status.
+- [x] Implement parser/rewriter/scheduler tests plus integration coverage ensuring AVPlayer consumes LL-HLS playlists via the proxy.
 
 ## Acceptance Criteria
 - Proxy can ingest an LL-HLS stream containing partial segments and continue serving them locally with latency comparable to the origin.

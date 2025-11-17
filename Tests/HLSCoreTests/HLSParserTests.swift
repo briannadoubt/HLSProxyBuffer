@@ -215,4 +215,37 @@ final class HLSParserTests: XCTestCase {
         XCTAssertEqual(map.uri.absoluteString, "https://cdn.example.com/init.mp4")
         XCTAssertEqual(map.byteRange, 0...719)
     }
+
+    func testParsesPartialSegmentsAndHints() throws {
+        let text = """
+        #EXTM3U
+        #EXT-X-VERSION:7
+        #EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.5
+        #EXT-X-PART-INF:PART-TARGET=0.5
+        #EXT-X-TARGETDURATION:4
+        #EXT-X-MEDIA-SEQUENCE:100
+        #EXTINF:4.0,
+        seg100.ts
+        #EXT-X-PART:DURATION=0.5,URI="seg101.part0.ts",INDEPENDENT=YES
+        #EXT-X-PART:DURATION=0.5,URI="seg101.part1.ts"
+        #EXT-X-PRELOAD-HINT:TYPE=PART,URI="seg101.part2.ts",BYTERANGE-START=0,BYTERANGE-LENGTH=500
+        #EXTINF:4.0,
+        seg101.ts
+        #EXT-X-RENDITION-REPORT:URI="alt.m3u8",LAST-MSN=100,LAST-PART=1
+        #EXT-X-SKIP:SKIPPED-SEGMENTS=3
+        """
+
+        let manifest = try HLSParser().parse(text, baseURL: URL(string: "https://cdn.example.com/master.m3u8"))
+        let playlist = try XCTUnwrap(manifest.mediaPlaylist)
+        XCTAssertEqual(playlist.partTargetDuration, 0.5)
+        XCTAssertEqual(playlist.serverControl?.canBlockReload, true)
+        XCTAssertEqual(playlist.serverControl?.partHoldBack, 1.5)
+        XCTAssertEqual(playlist.skippedSegmentCount, 3)
+        XCTAssertEqual(playlist.preloadHints.first?.partIndex, 2)
+        XCTAssertEqual(playlist.preloadHints.first?.byteRangeLength, 500)
+        XCTAssertEqual(playlist.renditionReports.first?.lastMediaSequence, 100)
+        let lastSegment = try XCTUnwrap(playlist.segments.last)
+        XCTAssertEqual(lastSegment.parts.count, 2)
+        XCTAssertTrue(lastSegment.parts.first?.isIndependent ?? false)
+    }
 }

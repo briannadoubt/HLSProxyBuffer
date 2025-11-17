@@ -33,6 +33,12 @@ public struct MetricsHandler: Sendable {
             # HELP hlsproxy_buffer_ready_segments Ready segment count
             # TYPE hlsproxy_buffer_ready_segments gauge
             hlsproxy_buffer_ready_segments \(buffer.readySequences.count)
+            # HELP hlsproxy_buffer_ready_parts Ready part count
+            # TYPE hlsproxy_buffer_ready_parts gauge
+            hlsproxy_buffer_ready_parts \(buffer.readyPartCounts.values.reduce(0, +))
+            # HELP hlsproxy_part_buffer_depth_seconds Part-prefetch depth in seconds
+            # TYPE hlsproxy_part_buffer_depth_seconds gauge
+            hlsproxy_part_buffer_depth_seconds \(buffer.partPrefetchDepthSeconds)
             """
 
             return HTTPResponse(

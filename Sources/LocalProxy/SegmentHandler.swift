@@ -55,20 +55,41 @@ public struct SegmentHandler: Sendable {
             ],
             body: data
         )
-        if entry?.namespace == SegmentCatalog.Namespace.primary,
-           let sequence = SegmentIdentity.sequence(from: key) {
-            onSegmentServed?(sequence)
-            await scheduler.consume(sequence: sequence)
+        if entry?.namespace == SegmentCatalog.Namespace.primary {
+            if let payload = entry?.payload {
+                switch payload {
+                case .segment:
+                    if let sequence = SegmentIdentity.sequence(from: key) {
+                        onSegmentServed?(sequence)
+                        await scheduler.consume(sequence: sequence)
+                    }
+                case .part:
+                    if let info = SegmentIdentity.partInfo(from: key) {
+                        await scheduler.consumePart(sequence: info.sequence, partIndex: info.partIndex)
+                    }
+                }
+            }
         }
         return response
     }
 
     private func fetchAndCache(entry: SegmentCatalog.Entry, key: String) async -> Data? {
         do {
-            let data = try await fetcher.fetchSegment(entry.segment)
+            let data: Data
+            switch entry.payload {
+            case .segment(let segment):
+                data = try await fetcher.fetchSegment(segment)
+            case .part(let part):
+                data = try await fetcher.fetchPartialSegment(part)
+            }
             await cache.put(data, for: key)
             if entry.namespace == SegmentCatalog.Namespace.primary {
-                await scheduler.registerReadySegment(entry.segment)
+                switch entry.payload {
+                case .segment(let segment):
+                    await scheduler.registerReadySegment(segment)
+                case .part(let part):
+                    await scheduler.registerReadyPart(part)
+                }
             }
             return data
         } catch {

@@ -73,7 +73,7 @@ public struct HLSManifestFetcher: Sendable, HLSManifestSource {
         try await fetchManifest(from: url, allowInsecure: false)
     }
 
-    public func fetchManifest(from url: URL, allowInsecure: Bool) async throws -> String {
+    public func fetchManifest(from url: URL, allowInsecure: Bool, requestTimeout: TimeInterval? = nil) async throws -> String {
         guard allowInsecure || url.scheme?.lowercased() == "https" else {
             throw FetchError.insecureScheme
         }
@@ -82,7 +82,7 @@ public struct HLSManifestFetcher: Sendable, HLSManifestSource {
         for attempt in 1...retryPolicy.maxAttempts {
             do {
                 try Task.checkCancellation()
-                return try await fetchOnce(from: url)
+                return try await fetchOnce(from: url, requestTimeout: requestTimeout)
             } catch let fetchError as FetchError where !fetchError.isRetryable {
                 throw fetchError
             } catch {
@@ -97,9 +97,9 @@ public struct HLSManifestFetcher: Sendable, HLSManifestSource {
         throw FetchError.retryExhausted(lastError ?? FetchError.emptyBody)
     }
 
-    private func fetchOnce(from url: URL) async throws -> String {
+    private func fetchOnce(from url: URL, requestTimeout: TimeInterval?) async throws -> String {
         var request = URLRequest(url: url)
-        request.timeoutInterval = 15
+        request.timeoutInterval = requestTimeout ?? 15
         request.cachePolicy = .reloadIgnoringLocalCacheData
 
         let (data, response) = try await session.data(for: request)

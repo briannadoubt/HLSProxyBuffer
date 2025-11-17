@@ -54,6 +54,135 @@ public struct MediaInitializationMap: Sendable, Hashable, Codable {
     }
 }
 
+public struct HLSPartialSegment: Sendable, Hashable, Identifiable, Codable {
+    public var id: String { "part-\(parentSequence)-\(partIndex)" }
+    public let parentSequence: Int
+    public let partIndex: Int
+    public let duration: TimeInterval
+    public let url: URL
+    public let byteRange: ClosedRange<Int>?
+    public let isIndependent: Bool
+    public let isGap: Bool
+    public let encryption: SegmentEncryption?
+    public let initializationMap: MediaInitializationMap?
+
+    public init(
+        parentSequence: Int,
+        partIndex: Int,
+        duration: TimeInterval,
+        url: URL,
+        byteRange: ClosedRange<Int>? = nil,
+        isIndependent: Bool = false,
+        isGap: Bool = false,
+        encryption: SegmentEncryption? = nil,
+        initializationMap: MediaInitializationMap? = nil
+    ) {
+        self.parentSequence = parentSequence
+        self.partIndex = partIndex
+        self.duration = duration
+        self.url = url
+        self.byteRange = byteRange
+        self.isIndependent = isIndependent
+        self.isGap = isGap
+        self.encryption = encryption
+        self.initializationMap = initializationMap
+    }
+
+    public func asSegment() -> HLSSegment {
+        HLSSegment(
+            url: url,
+            duration: duration,
+            sequence: parentSequence,
+            byteRange: byteRange,
+            encryption: encryption,
+            initializationMap: initializationMap,
+            parts: []
+        )
+    }
+}
+
+public struct HLSPreloadHint: Sendable, Hashable, Codable {
+    public enum HintType: String, Sendable, Codable {
+        case part = "PART"
+        case map = "MAP"
+    }
+
+    public let type: HintType
+    public let uri: URL
+    public let byteRangeStart: Int?
+    public let byteRangeLength: Int?
+    public let sequence: Int
+    public let partIndex: Int?
+
+    public init(
+        type: HintType,
+        uri: URL,
+        byteRangeStart: Int? = nil,
+        byteRangeLength: Int? = nil,
+        sequence: Int,
+        partIndex: Int? = nil
+    ) {
+        self.type = type
+        self.uri = uri
+        self.byteRangeStart = byteRangeStart
+        self.byteRangeLength = byteRangeLength
+        self.sequence = sequence
+        self.partIndex = partIndex
+    }
+
+    public var byteRange: ClosedRange<Int>? {
+        guard let start = byteRangeStart, let length = byteRangeLength else { return nil }
+        return start...(start + length - 1)
+    }
+}
+
+public struct HLSRenditionReport: Sendable, Hashable, Codable {
+    public let uri: URL
+    public let lastMediaSequence: Int?
+    public let lastPartIndex: Int?
+    public let averageBandwidth: Int?
+
+    public init(
+        uri: URL,
+        lastMediaSequence: Int? = nil,
+        lastPartIndex: Int? = nil,
+        averageBandwidth: Int? = nil
+    ) {
+        self.uri = uri
+        self.lastMediaSequence = lastMediaSequence
+        self.lastPartIndex = lastPartIndex
+        self.averageBandwidth = averageBandwidth
+    }
+}
+
+public struct HLSServerControl: Sendable, Hashable, Codable {
+    public let canSkipUntil: TimeInterval?
+    public let canBlockReload: Bool
+    public let canSkipDateRanges: Bool
+    public let canPrefetch: Bool
+    public let holdBack: TimeInterval?
+    public let partHoldBack: TimeInterval?
+    public let partTarget: TimeInterval?
+
+    public init(
+        canSkipUntil: TimeInterval? = nil,
+        canBlockReload: Bool = false,
+        canSkipDateRanges: Bool = false,
+        canPrefetch: Bool = false,
+        holdBack: TimeInterval? = nil,
+        partHoldBack: TimeInterval? = nil,
+        partTarget: TimeInterval? = nil
+    ) {
+        self.canSkipUntil = canSkipUntil
+        self.canBlockReload = canBlockReload
+        self.canSkipDateRanges = canSkipDateRanges
+        self.canPrefetch = canPrefetch
+        self.holdBack = holdBack
+        self.partHoldBack = partHoldBack
+        self.partTarget = partTarget
+    }
+}
+
 public struct HLSSegment: Sendable, Hashable, Identifiable, Codable {
     public var id: String { url.absoluteString }
     public let url: URL
@@ -62,6 +191,7 @@ public struct HLSSegment: Sendable, Hashable, Identifiable, Codable {
     public let byteRange: ClosedRange<Int>?
     public let encryption: SegmentEncryption?
     public let initializationMap: MediaInitializationMap?
+    public let parts: [HLSPartialSegment]
 
     public init(
         url: URL,
@@ -69,7 +199,8 @@ public struct HLSSegment: Sendable, Hashable, Identifiable, Codable {
         sequence: Int,
         byteRange: ClosedRange<Int>? = nil,
         encryption: SegmentEncryption? = nil,
-        initializationMap: MediaInitializationMap? = nil
+        initializationMap: MediaInitializationMap? = nil,
+        parts: [HLSPartialSegment] = []
     ) {
         self.url = url
         self.duration = duration
@@ -77,6 +208,7 @@ public struct HLSSegment: Sendable, Hashable, Identifiable, Codable {
         self.byteRange = byteRange
         self.encryption = encryption
         self.initializationMap = initializationMap
+        self.parts = parts
     }
 }
 
@@ -138,19 +270,34 @@ public struct MediaPlaylist: Sendable, Hashable {
     public let segments: [HLSSegment]
     public let isEndlist: Bool
     public let sessionKeys: [HLSKey]
+    public let partTargetDuration: TimeInterval?
+    public let serverControl: HLSServerControl?
+    public let preloadHints: [HLSPreloadHint]
+    public let renditionReports: [HLSRenditionReport]
+    public let skippedSegmentCount: Int?
 
     public init(
         targetDuration: TimeInterval?,
         mediaSequence: Int = 0,
         segments: [HLSSegment],
         isEndlist: Bool = false,
-        sessionKeys: [HLSKey] = []
+        sessionKeys: [HLSKey] = [],
+        partTargetDuration: TimeInterval? = nil,
+        serverControl: HLSServerControl? = nil,
+        preloadHints: [HLSPreloadHint] = [],
+        renditionReports: [HLSRenditionReport] = [],
+        skippedSegmentCount: Int? = nil
     ) {
         self.targetDuration = targetDuration
         self.mediaSequence = mediaSequence
         self.segments = segments
         self.isEndlist = isEndlist
         self.sessionKeys = sessionKeys
+        self.partTargetDuration = partTargetDuration
+        self.serverControl = serverControl
+        self.preloadHints = preloadHints
+        self.renditionReports = renditionReports
+        self.skippedSegmentCount = skippedSegmentCount
     }
 }
 

@@ -11,22 +11,41 @@ public actor PlaylistRefreshController {
         }
     }
 
+    public struct LowLatencyConfiguration: Sendable, Equatable {
+        public var isEnabled: Bool
+        public var blockingRequestTimeout: TimeInterval
+        public var enableDeltaUpdates: Bool
+
+        public init(
+            isEnabled: Bool = false,
+            blockingRequestTimeout: TimeInterval = 6,
+            enableDeltaUpdates: Bool = false
+        ) {
+            self.isEnabled = isEnabled
+            self.blockingRequestTimeout = blockingRequestTimeout
+            self.enableDeltaUpdates = enableDeltaUpdates
+        }
+    }
+
     public struct Metrics: Sendable, Equatable {
         public let lastRefreshDate: Date?
         public let consecutiveFailures: Int
         public let lastErrorDescription: String?
         public let remoteMediaSequence: Int?
+        public let blockingReloadEngaged: Bool
 
         public init(
             lastRefreshDate: Date? = nil,
             consecutiveFailures: Int = 0,
             lastErrorDescription: String? = nil,
-            remoteMediaSequence: Int? = nil
+            remoteMediaSequence: Int? = nil,
+            blockingReloadEngaged: Bool = false
         ) {
             self.lastRefreshDate = lastRefreshDate
             self.consecutiveFailures = consecutiveFailures
             self.lastErrorDescription = lastErrorDescription
             self.remoteMediaSequence = remoteMediaSequence
+            self.blockingReloadEngaged = blockingReloadEngaged
         }
     }
 
@@ -46,11 +65,19 @@ public actor PlaylistRefreshController {
     private var parser = HLSParser()
     private var onUpdate: (@Sendable (MediaPlaylist) async -> Void)?
     private var isEnded = false
+    private var lowLatencyConfiguration: LowLatencyConfiguration?
+    private var lastBlockingReference: BlockingReference?
+    private var lastServerControl: HLSServerControl?
 
     private var lastRefreshDate: Date?
     private var consecutiveFailures = 0
     private var lastErrorDescription: String?
     private var remoteMediaSequence: Int?
+
+    private struct BlockingReference {
+        let sequence: Int
+        let partIndex: Int?
+    }
 
     public init(
         configuration: Configuration = .init(),
@@ -64,6 +91,10 @@ public actor PlaylistRefreshController {
 
     public func updateConfiguration(_ configuration: Configuration) {
         self.configuration = configuration
+    }
+
+    public func updateLowLatencyConfiguration(_ configuration: LowLatencyConfiguration?) {
+        lowLatencyConfiguration = configuration
     }
 
     public func start(
@@ -80,6 +111,8 @@ public actor PlaylistRefreshController {
         isEnded = false
         consecutiveFailures = 0
         lastErrorDescription = nil
+        lastBlockingReference = nil
+        lastServerControl = nil
         task = Task { [weak self] in
             await self?.runLoop()
         }
@@ -90,6 +123,8 @@ public actor PlaylistRefreshController {
         sourceURL = nil
         onUpdate = nil
         isEnded = false
+        lastBlockingReference = nil
+        lastServerControl = nil
     }
 
     public func metrics() -> Metrics {
@@ -97,7 +132,8 @@ public actor PlaylistRefreshController {
             lastRefreshDate: lastRefreshDate,
             consecutiveFailures: consecutiveFailures,
             lastErrorDescription: lastErrorDescription,
-            remoteMediaSequence: remoteMediaSequence
+            remoteMediaSequence: remoteMediaSequence,
+            blockingReloadEngaged: (lowLatencyConfiguration?.isEnabled ?? false) && (lastServerControl?.canBlockReload ?? false)
         )
     }
 
@@ -112,13 +148,15 @@ public actor PlaylistRefreshController {
 
         while !Task.isCancelled && !isEnded {
             do {
-                let playlist = try await fetchPlaylist()
+                let (requestURL, timeout, wasBlocking) = nextRequestParameters()
+                let playlist = try await fetchPlaylist(from: requestURL, requestTimeout: timeout)
+                updateBlockingMetadata(from: playlist)
                 await onUpdate?(playlist)
                 lastRefreshDate = Date()
                 consecutiveFailures = 0
                 lastErrorDescription = nil
                 remoteMediaSequence = playlist.mediaSequence
-                currentDelay = configuration.refreshInterval
+                currentDelay = nextDelay(after: playlist, wasBlocking: wasBlocking)
                 if playlist.isEndlist {
                     isEnded = true
                 }
@@ -130,6 +168,7 @@ public actor PlaylistRefreshController {
             }
 
             if Task.isCancelled || isEnded { break }
+            guard currentDelay > 0 else { continue }
             do {
                 try await Task.sleep(nanoseconds: UInt64(max(0.01, currentDelay) * 1_000_000_000))
             } catch {
@@ -138,19 +177,69 @@ public actor PlaylistRefreshController {
         }
     }
 
-    private func fetchPlaylist() async throws -> MediaPlaylist {
-        guard let url = sourceURL else { throw RefreshError.missingSourceURL }
+    private func fetchPlaylist(from url: URL, requestTimeout: TimeInterval?) async throws -> MediaPlaylist {
         let fetcher = HLSManifestFetcher(
             url: url,
             session: session,
             retryPolicy: retryPolicy,
             logger: logger
         )
-        let text = try await fetcher.fetchManifest(from: url, allowInsecure: allowInsecure)
+        let text = try await fetcher.fetchManifest(from: url, allowInsecure: allowInsecure, requestTimeout: requestTimeout)
         let manifest = try parser.parse(text, baseURL: url)
         guard let playlist = manifest.mediaPlaylist else {
             throw RefreshError.mediaPlaylistUnavailable
         }
         return playlist
+    }
+
+    private func nextRequestParameters() -> (URL, TimeInterval?, Bool) {
+        guard let baseURL = sourceURL else { return (URL(fileURLWithPath: "/"), nil, false) }
+        guard
+            let lowLatencyConfiguration,
+            lowLatencyConfiguration.isEnabled,
+            let control = lastServerControl,
+            control.canBlockReload,
+            let reference = lastBlockingReference
+        else {
+            return (baseURL, nil, false)
+        }
+
+        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+        var items = components?.queryItems ?? []
+        items.removeAll { ["_HLS_msn", "_HLS_part", "_HLS_skip"].contains($0.name) }
+        items.append(URLQueryItem(name: "_HLS_msn", value: String(reference.sequence)))
+        if let partIndex = reference.partIndex {
+            items.append(URLQueryItem(name: "_HLS_part", value: String(partIndex)))
+        }
+        if lowLatencyConfiguration.enableDeltaUpdates {
+            items.append(URLQueryItem(name: "_HLS_skip", value: "YES"))
+        }
+        components?.queryItems = items
+        return (
+            components?.url ?? baseURL,
+            lowLatencyConfiguration.blockingRequestTimeout,
+            true
+        )
+    }
+
+    private func updateBlockingMetadata(from playlist: MediaPlaylist) {
+        lastServerControl = playlist.serverControl
+        guard let lastSegment = playlist.segments.last else {
+            lastBlockingReference = nil
+            return
+        }
+        let partIndex = lastSegment.parts.last?.partIndex
+        lastBlockingReference = BlockingReference(sequence: lastSegment.sequence, partIndex: partIndex)
+    }
+
+    private func nextDelay(after playlist: MediaPlaylist, wasBlocking: Bool) -> TimeInterval {
+        if wasBlocking, lowLatencyConfiguration?.isEnabled == true {
+            return 0
+        }
+        if let lowLatencyConfiguration, lowLatencyConfiguration.isEnabled,
+           let holdBack = playlist.serverControl?.partHoldBack, holdBack > 0 {
+            return max(0.05, holdBack / 2)
+        }
+        return configuration.refreshInterval
     }
 }
