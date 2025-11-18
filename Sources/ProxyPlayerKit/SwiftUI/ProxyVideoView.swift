@@ -108,8 +108,6 @@ public struct ProxyVideoView: View {
         ),
         autoplay: true
     )
-    .frame(height: 240)
-    .padding()
 }
 #endif
 #endif

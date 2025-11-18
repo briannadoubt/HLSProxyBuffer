@@ -135,6 +135,7 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var latestManifestRenditions: [HLSManifest.Rendition] = []
     @ObservationIgnored private var latestKeyStatuses: [ProxyPlayerDiagnostics.KeyStatus] = []
     @ObservationIgnored private var shouldPlayWhenReady = false
+    @ObservationIgnored private var mediaSelectionTask: Task<Void, Never>?
 
     public init(
         configuration: ProxyPlayerConfiguration = .init(),
@@ -227,6 +228,8 @@ public final class ProxyHLSPlayer {
         shouldPlayWhenReady = false
         player?.pause()
         player = nil
+        mediaSelectionTask?.cancel()
+        mediaSelectionTask = nil
         didPreparePlayerForCurrentLoad = false
         variants = []
         activeVariant = nil
@@ -777,11 +780,22 @@ public final class ProxyHLSPlayer {
     }
 
     private func applyActiveRenditionsToPlayer() {
-        selectMediaOption(for: activeAudioRendition, kind: .audio)
-        selectMediaOption(for: activeSubtitleRendition, kind: .subtitles)
+        mediaSelectionTask?.cancel()
+        guard player?.currentItem != nil else {
+            mediaSelectionTask = nil
+            return
+        }
+        mediaSelectionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.selectMediaOption(for: self.activeAudioRendition, kind: .audio)
+            if Task.isCancelled { return }
+            await self.selectMediaOption(for: self.activeSubtitleRendition, kind: .subtitles)
+        }
     }
 
-    private func selectMediaOption(for rendition: HLSManifest.Rendition?, kind: HLSManifest.Rendition.Kind) {
+    @MainActor
+    private func selectMediaOption(for rendition: HLSManifest.Rendition?, kind: HLSManifest.Rendition.Kind) async {
+        if Task.isCancelled { return }
         guard let item = player?.currentItem else { return }
         let characteristic: AVMediaCharacteristic
         switch kind {
@@ -790,7 +804,22 @@ public final class ProxyHLSPlayer {
         case .subtitles, .closedCaptions:
             characteristic = .legible
         }
-        guard let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: characteristic) else { return }
+        let group: AVMediaSelectionGroup?
+        if #available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *) {
+            do {
+                group = try await item.asset.loadMediaSelectionGroup(for: characteristic)
+            } catch is CancellationError {
+                return
+            } catch {
+                logger.log("Failed to load media selection group for \(characteristic.rawValue): \(error)", category: .player)
+                return
+            }
+        } else {
+            group = item.asset.mediaSelectionGroup(forMediaCharacteristic: characteristic)
+        }
+        if Task.isCancelled { return }
+        guard player?.currentItem === item else { return }
+        guard let group else { return }
         guard let rendition else {
             item.select(nil, in: group)
             return
