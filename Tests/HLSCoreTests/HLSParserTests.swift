@@ -105,20 +105,24 @@ final class HLSParserTests: XCTestCase {
         XCTAssertNil(captions?.uri)
     }
 
-    func testMissingRenditionURIThrows() {
+    func testAudioRenditionWithoutURIIsMuxedInStream() throws {
+        // Per RFC 8216, audio renditions without a URI indicate that the audio
+        // is muxed into the main video stream. This should parse successfully.
         let playlist = """
         #EXTM3U
-        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-main",NAME="Broken"
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-main",NAME="Muxed Audio",DEFAULT=YES
+        #EXT-X-STREAM-INF:BANDWIDTH=500000,AUDIO="audio-main"
+        variant.m3u8
         """
 
         let parser = HLSParser()
-        XCTAssertThrowsError(try parser.parse(playlist, baseURL: nil)) { error in
-            guard case HLSParser.ParserError.missingMediaAttribute(let attribute) = error else {
-                XCTFail("Expected missing attribute error")
-                return
-            }
-            XCTAssertEqual(attribute, "URI")
-        }
+        let manifest = try parser.parse(playlist, baseURL: URL(string: "https://example.com/master.m3u8"))
+
+        XCTAssertEqual(manifest.renditions.count, 1)
+        let audio = try XCTUnwrap(manifest.renditions.first)
+        XCTAssertEqual(audio.type, .audio)
+        XCTAssertEqual(audio.name, "Muxed Audio")
+        XCTAssertNil(audio.uri, "Audio rendition without URI means audio is muxed in video stream")
     }
 
     func testClosedCaptionsRequireInstreamId() {

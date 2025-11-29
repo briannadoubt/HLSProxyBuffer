@@ -378,13 +378,10 @@ public struct HLSManifest: Sendable, Hashable {
 }
 
 public extension HLSManifest.Rendition.Kind {
+    /// Per RFC 8216, URI is optional for AUDIO and SUBTITLES (omitted when media is muxed in the main stream).
+    /// CLOSED-CAPTIONS never has a URI (uses INSTREAM-ID instead).
     var requiresURI: Bool {
-        switch self {
-        case .audio, .subtitles:
-            return true
-        case .closedCaptions:
-            return false
-        }
+        false
     }
 
     var requiresInstreamId: Bool {
