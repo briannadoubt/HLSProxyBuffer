@@ -152,7 +152,7 @@ public actor PlaylistRefreshController {
 
         while !Task.isCancelled && !isEnded {
             do {
-                let (requestURL, timeout, wasBlocking) = nextRequestParameters()
+                let (requestURL, timeout, wasBlocking) = try nextRequestParameters()
                 let playlist = try await fetchPlaylist(from: requestURL, requestTimeout: timeout)
                 updateBlockingMetadata(from: playlist)
                 await onUpdate?(playlist)
@@ -201,8 +201,8 @@ public actor PlaylistRefreshController {
         return playlist
     }
 
-    private func nextRequestParameters() -> (URL, TimeInterval?, Bool) {
-        guard let baseURL = sourceURL else { return (URL(fileURLWithPath: "/"), nil, false) }
+    private func nextRequestParameters() throws -> (URL, TimeInterval?, Bool) {
+        guard let baseURL = sourceURL else { throw RefreshError.missingSourceURL }
         guard
             let lowLatencyConfiguration,
             lowLatencyConfiguration.isEnabled,

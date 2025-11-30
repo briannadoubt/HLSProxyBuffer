@@ -1028,13 +1028,20 @@ public final class ProxyHLSPlayer {
     }
 
     private func waitForBaseURL() async throws -> URL {
-        for _ in 0..<50 {
+        // Wait up to 5 seconds for server startup with exponential backoff
+        var delay: UInt64 = 10_000_000 // Start at 10ms
+        let maxDelay: UInt64 = 200_000_000 // Cap at 200ms
+        let maxAttempts = 30
+
+        for _ in 0..<maxAttempts {
             if let url = server.baseURL, server.port != 0 {
                 return url
             }
-            try await Task.sleep(nanoseconds: 20_000_000)
+            try await Task.sleep(nanoseconds: delay)
+            delay = min(delay * 2, maxDelay)
         }
-        throw URLError(.cannotFindHost)
+        logger.log("Proxy server failed to start within timeout", category: .player)
+        throw URLError(.cannotConnectToHost)
     }
 
     private func evaluateABR(bufferState providedState: BufferState?) async {
@@ -1125,7 +1132,13 @@ public final class ProxyHLSPlayer {
         guard let floor = bufferState?.playedThroughSequence else { return playlist }
         let minimumSequence = floor + 1
         let visibleSegments = playlist.segments.drop { $0.sequence < minimumSequence }
-        guard !visibleSegments.isEmpty else { return playlist }
+        guard !visibleSegments.isEmpty else {
+            logger.log(
+                "Playlist alignment failed: all \(playlist.segments.count) segments are before playhead sequence \(minimumSequence)",
+                category: .player
+            )
+            return playlist
+        }
         return MediaPlaylist(
             targetDuration: playlist.targetDuration,
             mediaSequence: visibleSegments.first?.sequence ?? playlist.mediaSequence,

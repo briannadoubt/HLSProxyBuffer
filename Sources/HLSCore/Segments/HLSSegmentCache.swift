@@ -20,12 +20,15 @@ public actor HLSSegmentCache: Caching {
     private var order: [String] = []
     private var hitCount = 0
     private var missCount = 0
+    private var diskWriteFailures = 0
     private var diskDirectory: URL?
     private let fileManager = FileManager()
+    private let logger: Logger
 
-    public init(capacity: Int = 32, diskDirectory: URL? = nil) {
+    public init(capacity: Int = 32, diskDirectory: URL? = nil, logger: Logger = DefaultLogger()) {
         self.capacity = capacity
         self.diskDirectory = diskDirectory
+        self.logger = logger
         if let diskDirectory {
             try? fileManager.createDirectory(at: diskDirectory, withIntermediateDirectories: true)
         }
@@ -67,7 +70,8 @@ public actor HLSSegmentCache: Caching {
         do {
             try data.write(to: fileURL(for: key, directory: directory), options: [.atomic])
         } catch {
-            // Disk caching is best-effort; ignore write failures in MVP.
+            diskWriteFailures += 1
+            logger.log("Disk cache write failed for key \(key): \(error.localizedDescription)", category: .cache)
         }
     }
 

@@ -32,9 +32,8 @@ public enum SegmentIdentity {
             guard !digits.isEmpty else { return nil }
             return Int(digits)
         }
-        let digits = key.prefix { $0.isNumber }
-        guard !digits.isEmpty else { return nil }
-        return Int(digits)
+        // Unknown key format - return nil instead of guessing
+        return nil
     }
 
     public static func namespace(from key: String) -> String? {

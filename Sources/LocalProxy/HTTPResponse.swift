@@ -40,12 +40,21 @@ public struct HTTPResponse: Sendable {
     }
 
     public static func json(_ object: [String: Any], status: Status = .ok) -> HTTPResponse {
-        let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
-        return HTTPResponse(
-            status: status,
-            headers: ["Content-Type": "application/json"],
-            body: data ?? Data()
-        )
+        do {
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            return HTTPResponse(
+                status: status,
+                headers: ["Content-Type": "application/json"],
+                body: data
+            )
+        } catch {
+            let errorBody = Data("{\"error\":\"JSON serialization failed\"}".utf8)
+            return HTTPResponse(
+                status: .internalServerError,
+                headers: ["Content-Type": "application/json"],
+                body: errorBody
+            )
+        }
     }
 
     private func reasonPhrase(for status: Status) -> String {

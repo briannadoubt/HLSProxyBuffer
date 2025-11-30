@@ -59,7 +59,7 @@ public struct HLSParser: Sendable {
             .split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
 
-        guard lines.first == "#EXTM3U" || lines.contains("#EXTM3U") else {
+        guard lines.first == "#EXTM3U" else {
             throw ParserError.missingHeader
         }
 
