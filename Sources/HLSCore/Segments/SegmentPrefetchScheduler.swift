@@ -5,15 +5,18 @@ public actor SegmentPrefetchScheduler {
         public var targetBufferSeconds: TimeInterval
         public var maxSegments: Int
         public var targetPartCount: Int
+        public var maxConcurrentFetches: Int
 
         public init(
             targetBufferSeconds: TimeInterval = 6,
             maxSegments: Int = 6,
-            targetPartCount: Int = 0
+            targetPartCount: Int = 0,
+            maxConcurrentFetches: Int = 4
         ) {
             self.targetBufferSeconds = targetBufferSeconds
             self.maxSegments = maxSegments
             self.targetPartCount = targetPartCount
+            self.maxConcurrentFetches = maxConcurrentFetches
         }
     }
 
@@ -59,6 +62,11 @@ public actor SegmentPrefetchScheduler {
     private var activeCache: HLSSegmentCache?
     private var prefetchTask: Task<Void, Never>?
     private var lastConsumedSequence: Int?
+
+    // In-flight request deduplication
+    private var inFlightKeys: Set<String> = []
+    private var pendingContinuations: [String: [CheckedContinuation<Data?, Never>]] = [:]
+    private var activeFetchCount: Int = 0
 
     public init(configuration: Configuration = .init(), logger: Logger = DefaultLogger()) {
         self.configuration = configuration
@@ -114,6 +122,15 @@ public actor SegmentPrefetchScheduler {
         readyPartsBySequence.removeAll()
         readyPartDurations.removeAll()
         lastConsumedSequence = nil
+        inFlightKeys.removeAll()
+        activeFetchCount = 0
+        // Cancel any pending continuations
+        for (_, continuations) in pendingContinuations {
+            for continuation in continuations {
+                continuation.resume(returning: nil)
+            }
+        }
+        pendingContinuations.removeAll()
         notifyBufferChange()
     }
 
@@ -243,6 +260,13 @@ public actor SegmentPrefetchScheduler {
         while shouldPrefetchMore(),
               nextPrefetchIndex < combinedItems.count {
             if Task.isCancelled { return }
+
+            // Backpressure: wait if too many concurrent fetches
+            while activeFetchCount >= configuration.maxConcurrentFetches {
+                try? await Task.sleep(nanoseconds: 10_000_000) // 10ms
+                if Task.isCancelled { return }
+            }
+
             let item = combinedItems[nextPrefetchIndex]
             let key: String
             switch item {
@@ -254,11 +278,30 @@ public actor SegmentPrefetchScheduler {
                 scheduled.append(part.parentSequence)
             }
 
+            // Check cache first
             if await cache.get(key) != nil {
                 handlePrefetchHit(for: item)
                 nextPrefetchIndex += 1
                 continue
             }
+
+            // In-flight deduplication: if already fetching this key, wait for result
+            if inFlightKeys.contains(key) {
+                let result: Data? = await withCheckedContinuation { continuation in
+                    var continuations = pendingContinuations[key] ?? []
+                    continuations.append(continuation)
+                    pendingContinuations[key] = continuations
+                }
+                if result != nil {
+                    handlePrefetchHit(for: item)
+                }
+                nextPrefetchIndex += 1
+                continue
+            }
+
+            // Mark as in-flight
+            inFlightKeys.insert(key)
+            activeFetchCount += 1
 
             do {
                 let data: Data
@@ -269,9 +312,32 @@ public actor SegmentPrefetchScheduler {
                     data = try await fetcher.fetchPartialSegment(part)
                 }
                 await cache.put(data, for: key)
+
+                // Complete in-flight tracking
+                inFlightKeys.remove(key)
+                activeFetchCount -= 1
+
+                // Notify any waiting continuations
+                if let continuations = pendingContinuations.removeValue(forKey: key) {
+                    for continuation in continuations {
+                        continuation.resume(returning: data)
+                    }
+                }
+
                 handlePrefetchHit(for: item)
                 nextPrefetchIndex += 1
             } catch {
+                // Complete in-flight tracking
+                inFlightKeys.remove(key)
+                activeFetchCount -= 1
+
+                // Notify waiting continuations of failure
+                if let continuations = pendingContinuations.removeValue(forKey: key) {
+                    for continuation in continuations {
+                        continuation.resume(returning: nil)
+                    }
+                }
+
                 let sequence: Int
                 switch item {
                 case .segment(let segment):
@@ -281,7 +347,7 @@ public actor SegmentPrefetchScheduler {
                 }
                 logger.log("Prefetch failed for sequence \(sequence): \(error)", category: .scheduler)
                 failures += 1
-                break
+                nextPrefetchIndex += 1 // Move to next item even on failure
             }
         }
 
@@ -289,6 +355,16 @@ public actor SegmentPrefetchScheduler {
         if shouldPrefetchMore() {
             schedulePrefetchIfNeeded()
         }
+    }
+
+    /// Returns the current number of in-flight fetch requests
+    public func inFlightCount() -> Int {
+        activeFetchCount
+    }
+
+    /// Returns whether a specific key is currently being fetched
+    public func isInFlight(_ key: String) -> Bool {
+        inFlightKeys.contains(key)
     }
 
     private func handlePrefetchHit(for item: PrefetchItem) {

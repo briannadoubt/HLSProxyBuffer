@@ -5,10 +5,19 @@ public actor PlaylistRefreshController {
     public struct Configuration: Sendable, Equatable {
         public var refreshInterval: TimeInterval
         public var maxBackoffInterval: TimeInterval
+        public var jitterFactor: Double
+        public var enableExponentialBackoff: Bool
 
-        public init(refreshInterval: TimeInterval = 2, maxBackoffInterval: TimeInterval = 8) {
+        public init(
+            refreshInterval: TimeInterval = 2,
+            maxBackoffInterval: TimeInterval = 8,
+            jitterFactor: Double = 0.1,
+            enableExponentialBackoff: Bool = true
+        ) {
             self.refreshInterval = refreshInterval
             self.maxBackoffInterval = max(maxBackoffInterval, refreshInterval)
+            self.jitterFactor = max(0, min(0.5, jitterFactor))
+            self.enableExponentialBackoff = enableExponentialBackoff
         }
     }
 
@@ -168,7 +177,7 @@ public actor PlaylistRefreshController {
                 consecutiveFailures += 1
                 lastErrorDescription = error.localizedDescription
                 logger.log("Playlist refresh failed: \(error)", category: .manifest)
-                currentDelay = min(configuration.maxBackoffInterval, max(configuration.refreshInterval, currentDelay * 2))
+                currentDelay = calculateBackoffDelay(currentDelay: currentDelay)
             }
 
             if Task.isCancelled || isEnded { break }
@@ -249,6 +258,23 @@ public actor PlaylistRefreshController {
            let holdBack = playlist.serverControl?.partHoldBack, holdBack > 0 {
             return max(0.05, holdBack / 2)
         }
-        return configuration.refreshInterval
+        return applyJitter(to: configuration.refreshInterval)
+    }
+
+    private func calculateBackoffDelay(currentDelay: TimeInterval) -> TimeInterval {
+        guard configuration.enableExponentialBackoff else {
+            return applyJitter(to: configuration.refreshInterval)
+        }
+
+        let baseBackoff = min(configuration.maxBackoffInterval, currentDelay * 2)
+        return applyJitter(to: baseBackoff)
+    }
+
+    private func applyJitter(to delay: TimeInterval) -> TimeInterval {
+        guard configuration.jitterFactor > 0 else { return delay }
+
+        let jitterRange = delay * configuration.jitterFactor
+        let jitter = Double.random(in: -jitterRange...jitterRange)
+        return max(0.01, delay + jitter)
     }
 }

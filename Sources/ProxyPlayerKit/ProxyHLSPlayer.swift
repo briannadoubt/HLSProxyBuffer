@@ -106,6 +106,10 @@ public final class ProxyHLSPlayer {
     public private(set) var subtitleRenditions: [HLSManifest.Rendition] = []
     public private(set) var activeAudioRendition: HLSManifest.Rendition?
     public private(set) var activeSubtitleRendition: HLSManifest.Rendition?
+    public private(set) var playbackRate: Float = 1.0
+
+    /// Available playback rates
+    public static let availablePlaybackRates: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 
     @ObservationIgnored private let logger: Logger
     @ObservationIgnored private let parser = HLSParser()
@@ -216,12 +220,21 @@ public final class ProxyHLSPlayer {
 
     public func play() {
         shouldPlayWhenReady = true
-        player?.play()
+        player?.rate = playbackRate
     }
 
     public func pause() {
         shouldPlayWhenReady = false
         player?.pause()
+    }
+
+    /// Sets the playback rate. Common values: 0.5 (half speed), 1.0 (normal), 1.5, 2.0 (double speed)
+    public func setPlaybackRate(_ rate: Float) {
+        let clampedRate = max(0.1, min(rate, 4.0))
+        playbackRate = clampedRate
+        if shouldPlayWhenReady {
+            player?.rate = clampedRate
+        }
     }
 
     public func stop() {
@@ -372,7 +385,7 @@ public final class ProxyHLSPlayer {
         }
         applyActiveRenditionsToPlayer()
         if shouldPlayWhenReady {
-            player?.play()
+            player?.rate = playbackRate
         }
     }
 

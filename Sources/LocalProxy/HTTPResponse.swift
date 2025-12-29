@@ -3,9 +3,12 @@ import Foundation
 public struct HTTPResponse: Sendable {
     public enum Status: Int, Sendable {
         case ok = 200
+        case badRequest = 400
         case notFound = 404
-        case serviceUnavailable = 503
+        case tooManyRequests = 429
         case internalServerError = 500
+        case serviceUnavailable = 503
+        case gatewayTimeout = 504
     }
 
     public let status: Status
@@ -51,9 +54,12 @@ public struct HTTPResponse: Sendable {
     private func reasonPhrase(for status: Status) -> String {
         switch status {
         case .ok: return "OK"
+        case .badRequest: return "Bad Request"
         case .notFound: return "Not Found"
-        case .serviceUnavailable: return "Service Unavailable"
+        case .tooManyRequests: return "Too Many Requests"
         case .internalServerError: return "Internal Server Error"
+        case .serviceUnavailable: return "Service Unavailable"
+        case .gatewayTimeout: return "Gateway Timeout"
         }
     }
 }
