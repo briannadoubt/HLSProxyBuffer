@@ -169,7 +169,7 @@ public struct MultiClipPlaylist: Sendable {
     }
 
     private var isLive: Bool {
-        clips.last?.playlist.isLive ?? false
+        !(clips.last?.playlist.isEndlist ?? true)
     }
 }
 
@@ -402,7 +402,7 @@ private extension MediaPlaylist {
     }
 
     var hasEndList: Bool {
-        !isLive
+        isEndlist
     }
 
     var duration: TimeInterval {

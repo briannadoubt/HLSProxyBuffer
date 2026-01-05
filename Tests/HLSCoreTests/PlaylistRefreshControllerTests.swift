@@ -170,5 +170,5 @@ private actor PlaylistRefreshMockLoader {
 }
 
 private struct TestLogger: Logger {
-    func log(_ message: @autoclosure () -> String, category: LogCategory) {}
+    func log(_ message: @autoclosure () -> String, level: LogLevel, category: LogCategory) {}
 }
