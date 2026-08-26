@@ -92,6 +92,14 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
 
         await player.load(from: origin.manifestURL, quality: .automatic)
         player.play()
+
+        // The mock segment bytes are intentionally minimal and AVPlayer may wait
+        // before requesting them. Fetch the first proxy segment directly so this
+        // integration test deterministically establishes a playback boundary.
+        let initialSegmentURL = try await firstSegmentURL(for: player)
+        let (initialSegmentData, _) = try await URLSession.shared.data(from: initialSegmentURL)
+        XCTAssertFalse(initialSegmentData.isEmpty)
+
         await fulfillment(of: [switchedExpectation], timeout: 20)
 
         guard let playlistURL = player.playlistURL() else {
@@ -278,6 +286,33 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
             try await Task.sleep(nanoseconds: 100_000_000)
         }
         XCTFail("Timed out waiting for renditions")
+    }
+
+    private func firstSegmentURL(for player: ProxyHLSPlayer) async throws -> URL {
+        guard let playlistURL = player.playlistURL() else {
+            throw URLError(.badURL)
+        }
+        let (masterData, _) = try await URLSession.shared.data(from: playlistURL)
+        guard
+            let masterString = String(data: masterData, encoding: .utf8),
+            let variantLine = masterString
+                .split(separator: "\n")
+                .last(where: { !$0.hasPrefix("#") }),
+            let variantURL = URL(string: String(variantLine))
+        else {
+            throw URLError(.cannotParseResponse)
+        }
+        let (variantData, _) = try await URLSession.shared.data(from: variantURL)
+        guard
+            let playlistString = String(data: variantData, encoding: .utf8),
+            let segmentLine = playlistString
+                .split(separator: "\n")
+                .first(where: { $0.hasPrefix("http://") }),
+            let segmentURL = URL(string: String(segmentLine))
+        else {
+            throw URLError(.cannotParseResponse)
+        }
+        return segmentURL
     }
 
 }
