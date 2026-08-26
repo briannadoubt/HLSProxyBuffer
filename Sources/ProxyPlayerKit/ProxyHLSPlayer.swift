@@ -349,7 +349,7 @@ public final class ProxyHLSPlayer {
         latestManifestRenditions = playlistResult.renditions
         await resolveRenditions(playlistResult.renditions, baseURL: baseURL)
         updateRenditionSelections(for: activeVariant)
-        scheduleRenditionPlaylists(config: rewriteConfiguration)
+        await loadRenditionPlaylists(config: rewriteConfiguration)
         await updateMasterPlaylist()
         await updatePlaybackState(with: bufferState)
         await startPlaylistRefresh(at: playlistResult.url)
@@ -611,12 +611,9 @@ public final class ProxyHLSPlayer {
         subtitleRenditions = ordered.filter { $0.rendition.type == .subtitles }.map(\.rendition)
     }
 
-    private func scheduleRenditionPlaylists(config: HLSRewriteConfiguration) {
+    private func loadRenditionPlaylists(config: HLSRewriteConfiguration) async {
         for info in orderedRenditionInfos where info.remoteURI != nil {
-            Task { [weak self] in
-                guard let self else { return }
-                await self.fetchRenditionPlaylist(info: info, config: config)
-            }
+            await fetchRenditionPlaylist(info: info, config: config)
         }
     }
 
