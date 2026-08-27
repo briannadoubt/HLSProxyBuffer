@@ -200,4 +200,22 @@ final class HLSFeedTelemetryTests: XCTestCase {
         XCTAssertEqual(telemetry.snapshot.storageBound.eventBufferCapacityPerSubscriber, 256)
         XCTAssertEqual(telemetry.snapshot.storageBound.maximumBufferedEventCount, 2_048)
     }
+
+    func testDefaultLatencyHistogramDistinguishesReleaseTargetFromHardCeiling() throws {
+        let telemetry = HLSFeedTelemetry()
+        let path = HLSFeedTelemetry.Path(
+            reuse: .warm,
+            intent: .focused,
+            mediaKind: .videoOnDemand
+        )
+
+        telemetry.record(.init(path: path, payload: .firstFrame(latency: 0.375)))
+
+        let distribution = try XCTUnwrap(
+            telemetry.snapshot.metrics(for: path)?.firstFrameLatency
+        )
+        XCTAssertEqual(distribution.approximateQuantile(0.95), 0.4)
+        XCTAssertTrue(distribution.upperBounds.contains(0.4))
+        XCTAssertTrue(distribution.upperBounds.contains(0.5))
+    }
 }

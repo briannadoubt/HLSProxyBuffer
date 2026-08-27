@@ -41,6 +41,11 @@ improvement moves real decode work into the predictive preparation window
 without weakening the focus-to-platform-playback measurement or its 500 ms
 hard gate.
 
+The default bounded latency histogram includes both 400 ms and 500 ms bucket
+boundaries. Hosted evidence can therefore distinguish the release target from
+the unchanged hard ceiling instead of rounding every 251-500 ms sample up to
+500 ms.
+
 ## Reproducing the UI gate
 
 Choose an installed iOS simulator and run:
