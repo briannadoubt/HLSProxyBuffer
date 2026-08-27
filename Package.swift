@@ -42,6 +42,14 @@ let package = Package(
                 "LocalProxy",
             ]
         ),
+        .executableTarget(
+            name: "HLSProxyBenchmarks",
+            dependencies: [
+                "HLSCore",
+                "LocalProxy",
+            ],
+            path: "Benchmarks/HLSProxyBenchmarks"
+        ),
         .testTarget(
             name: "HLSCoreTests",
             dependencies: ["HLSCore"]

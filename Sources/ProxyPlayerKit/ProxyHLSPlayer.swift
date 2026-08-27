@@ -1840,20 +1840,22 @@ private extension HLSManifest.Rendition.Kind {
     }
 }
 
-private actor ManifestProcessor {
+private struct ManifestProcessor: Sendable {
     private let parser = HLSParser()
     private let rewriter = HLSRewriter()
 
-    func parse(_ text: String, baseURL: URL?) throws -> HLSManifest {
+    @concurrent
+    func parse(_ text: String, baseURL: URL?) async throws -> HLSManifest {
         try parser.parse(text, baseURL: baseURL)
     }
 
+    @concurrent
     func rewrite(
         mediaPlaylist: MediaPlaylist,
         config: HLSRewriteConfiguration,
         bufferState: BufferState,
         namespace: String? = nil
-    ) -> String {
+    ) async -> String {
         rewriter.rewrite(
             mediaPlaylist: mediaPlaylist,
             config: config,
