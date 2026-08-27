@@ -52,7 +52,8 @@ let package = Package(
         ),
         .testTarget(
             name: "HLSCoreTests",
-            dependencies: ["HLSCore"]
+            dependencies: ["HLSCore"],
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "LocalProxyTests",
