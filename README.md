@@ -44,11 +44,7 @@ import SwiftUI
 
 struct LowLatencyStreamView: View {
     @State private var player = ProxyHLSPlayer(
-        configuration: .init(
-            cachePolicy: .init(memoryCapacityBytes: 256 * 1024 * 1024),
-            bufferPolicy: .init(targetBufferSeconds: 10, maxPrefetchSegments: 12),
-            lowLatencyPolicy: .init(isEnabled: true, targetPartBufferCount: 6, enableBlockingReloads: true)
-        )
+        configuration: .preset(.lowLatencyLive)
     )
 
     private let streamURL = URL(string: "https://example.com/live/playlist.m3u8")!
@@ -67,7 +63,7 @@ struct LowLatencyStreamView: View {
 }
 ```
 
-`ProxyHLSPlayer` encapsulates the manifest fetcher, LL-HLS scheduler, cache, and embedded proxy server. The SwiftUI surface stays declarative, while diagnostics remain opt-in via `ProxyPlayerDiagnostics`. Because the player is annotated with `@Observable`, store it in `@State` and access it via `@Bindable` to let the Observation graph refresh any SwiftUI view that reads its properties—no `@StateObject` or `ObservableObject` bridging required. See `docs/ProxyPlayerKit.md` for a deeper dive into the Observation-based API and migration tips.
+`ProxyHLSPlayer` encapsulates the manifest fetcher, LL-HLS scheduler, cache, and embedded proxy server. The SwiftUI surface stays declarative, while diagnostics remain opt-in via `ProxyPlayerDiagnostics`. Because the player is annotated with `@Observable`, store it in `@State` and access it via `@Bindable` to let the Observation graph refresh any SwiftUI view that reads its properties—no `@StateObject` or `ObservableObject` bridging required. See `docs/ProxyPlayerKit.md` for a deeper dive into the Observation-based API and migration tips, and `docs/ConfigurationPresets.md` for validated workload starting points.
 
 ### Custom Local Proxy server
 
