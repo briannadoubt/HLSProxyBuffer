@@ -16,3 +16,9 @@ When the controller detects `#EXT-X-ENDLIST`, it automatically stops refreshing.
 ```
 
 Apps can also observe `ProxyPlayerDiagnostics.onPlaylistRefreshed` to record telemetry or react to manifest advances (e.g., scheduling UI updates).
+
+Each accepted refresh also rebuilds the typed `HLSLiveWindow`. Sliding media
+sequences, PDT anchors, discontinuities, trailing LL-HLS parts, and server
+hold-back values therefore update `ProxyHLSPlayer.livePlayback` before the
+corresponding state snapshot is delivered. A callback-triggered stop cannot
+observe refresh metrics from the previous playlist.

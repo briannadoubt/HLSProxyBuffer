@@ -652,7 +652,8 @@ private extension FeedPreparedItem {
             preparedResourceCount: preparedResourceCount,
             preparedByteCount: preparedByteCount,
             cacheHitCount: cacheHitCount,
-            originFetchCount: originFetchCount
+            originFetchCount: originFetchCount,
+            liveWindow: liveWindow
         )
     }
 }

@@ -70,6 +70,93 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         await player.stopAndWait()
     }
 
+    func testOnePlayerHandsOffBetweenVODAndLiveAndClearsDVRState() async throws {
+        let vodOrigin = try MockOriginServer(segmentCount: 3, segmentDuration: 1)
+        let liveOrigin = try MockOriginServer(
+            segmentCount: 4,
+            segmentDuration: 1,
+            isLive: true
+        )
+        try await vodOrigin.start()
+        try await liveOrigin.start()
+        defer {
+            vodOrigin.stop()
+            liveOrigin.stop()
+        }
+        let player = ProxyHLSPlayer(configuration: .init(
+            bufferPolicy: .init(
+                targetBufferSeconds: 1,
+                maxPrefetchSegments: 2,
+                hideUntilBuffered: false,
+                refreshInterval: 30
+            ),
+            allowInsecureManifests: true
+        ))
+
+        await player.load(from: vodOrigin.manifestURL)
+        let avPlayer = try XCTUnwrap(player.player)
+        let firstItem = try XCTUnwrap(avPlayer.currentItem)
+        XCTAssertNil(player.livePlayback)
+        do {
+            try await player.jumpToLive()
+            XCTFail("VOD must reject jump-to-live")
+        } catch {
+            XCTAssertEqual(error as? LivePlaybackControlError, .notLive)
+        }
+
+        await player.load(from: liveOrigin.manifestURL)
+        XCTAssertTrue(player.player === avPlayer)
+        XCTAssertFalse(player.player?.currentItem === firstItem)
+        XCTAssertEqual(player.livePlayback?.window?.mediaSequenceRange, 1...4)
+
+        let liveItem = try XCTUnwrap(player.player?.currentItem)
+        await player.load(from: vodOrigin.manifestURL)
+        XCTAssertTrue(player.player === avPlayer)
+        XCTAssertFalse(player.player?.currentItem === liveItem)
+        XCTAssertNil(player.livePlayback)
+
+        await player.stopAndWait()
+    }
+
+    func testLiveFixtureSupportsDVRSeekAndJumpToLiveOnOneAVPlayerItem() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        defer { origin.stop() }
+        let player = ProxyHLSPlayer(configuration: .init(
+            bufferPolicy: .init(
+                targetBufferSeconds: 1,
+                maxPrefetchSegments: 3,
+                hideUntilBuffered: false,
+                refreshInterval: 30
+            ),
+            allowInsecureManifests: true
+        ))
+
+        await player.load(from: origin.fixturePlaylistURL(named: "live"))
+        player.play()
+        let item = try XCTUnwrap(player.player?.currentItem)
+        let duration = try XCTUnwrap(player.livePlayback?.window?.durationSeconds)
+        let request = min(1, duration / 2)
+
+        try await player.seek(secondsBehindLiveEdge: request)
+        XCTAssertTrue(player.player?.currentItem === item)
+        XCTAssertEqual(
+            player.player?.currentTime().seconds ?? .nan,
+            duration - request,
+            accuracy: 0.25
+        )
+        XCTAssertEqual(
+            player.livePlayback?.liveEdgeDistanceSeconds ?? .nan,
+            request,
+            accuracy: 0.25
+        )
+
+        try await player.jumpToLive()
+        XCTAssertTrue(player.player?.currentItem === item)
+        XCTAssertNotNil(player.livePlayback)
+        await player.stopAndWait()
+    }
+
     func testCompatibleClipsInstallOneProxyTimelineAndServeAcrossBoundary() async throws {
         let origin = try FeedFixtureOrigin()
         try await origin.start()
