@@ -16,6 +16,7 @@ public struct HLSParser: Sendable {
         case missingHintAttribute(String)
         case missingRenditionReportAttribute(String)
         case malformedByteRange(String)
+        case sequenceArithmeticOverflow
 
         public var description: String {
             switch self {
@@ -47,6 +48,8 @@ public struct HLSParser: Sendable {
                 return "EXT-X-RENDITION-REPORT tag is missing required attribute \(attribute)."
             case .malformedByteRange(let value):
                 return "Invalid HLS byte range: \(value)."
+            case .sequenceArithmeticOverflow:
+                return "HLS media sequence arithmetic exceeded the supported integer range."
             }
         }
     }
@@ -174,6 +177,7 @@ public struct HLSParser: Sendable {
                 currentMap = try parseInitializationMap(
                     from: value,
                     baseURL: baseURL,
+                    encryption: currentEncryption,
                     previousByteRangeEnds: &previousMapByteRangeEndByURL
                 )
             } else if line.hasPrefix("#EXT-X-PART:") {
@@ -212,7 +216,9 @@ public struct HLSParser: Sendable {
                 if let skippedValue = attributes["SKIPPED-SEGMENTS"], let count = Int(skippedValue) {
                     skippedSegmentCount = count
                     if segments.isEmpty, count > 0 {
-                        currentSequence += count
+                        let (nextSequence, overflow) = currentSequence.addingReportingOverflow(count)
+                        guard !overflow else { throw ParserError.sequenceArithmeticOverflow }
+                        currentSequence = nextSequence
                     }
                 }
             } else if line.hasPrefix("#") {
@@ -249,7 +255,9 @@ public struct HLSParser: Sendable {
                     pendingByteRange = nil
                     pendingParts.removeAll()
                     pendingSegmentTags.removeAll()
-                    currentSequence += 1
+                    let (nextSequence, overflow) = currentSequence.addingReportingOverflow(1)
+                    guard !overflow else { throw ParserError.sequenceArithmeticOverflow }
+                    currentSequence = nextSequence
                 }
             }
         }
@@ -721,6 +729,7 @@ public struct HLSParser: Sendable {
     private func parseInitializationMap(
         from string: String,
         baseURL: URL?,
+        encryption: SegmentEncryption?,
         previousByteRangeEnds: inout [URL: Int]
     ) throws -> MediaInitializationMap {
         let attributes = attributeDictionary(from: string)
@@ -738,7 +747,11 @@ public struct HLSParser: Sendable {
         } else {
             range = nil
         }
-        return MediaInitializationMap(uri: resolvedURI, byteRange: range)
+        return MediaInitializationMap(
+            uri: resolvedURI,
+            byteRange: range,
+            encryption: encryption
+        )
     }
 
     private func isSegmentMetadataTag(_ line: String) -> Bool {

@@ -232,7 +232,9 @@ public struct HLSRewriter: Sendable {
                 pendingSegments.append(segment)
                 continue
             }
-            lines.append(contentsOf: segment.metadataTags)
+            if !visibleParts.isEmpty {
+                lines.append(contentsOf: segment.metadataTags)
+            }
             for part in visibleParts {
                 appendResourceMetadataIfNeeded(
                     map: part.initializationMap,
@@ -262,6 +264,9 @@ public struct HLSRewriter: Sendable {
                 configuration: config,
                 namespace: namespace
             )
+            if visibleParts.isEmpty {
+                lines.append(contentsOf: segment.metadataTags)
+            }
             let durationString = String(format: "%.3f", segment.duration)
             lines.append("#EXTINF:\(durationString),")
             if let range = segment.byteRange {
@@ -455,25 +460,44 @@ public struct HLSRewriter: Sendable {
     ) {
         if map != lastMap {
             if let map {
+                appendEncryptionChange(
+                    to: map.encryption,
+                    lines: &lines,
+                    lastEncryption: &lastEncryption,
+                    resolver: resolver
+                )
                 lines.append(renderMapLine(for: map, configuration: configuration, namespace: namespace))
             }
             lastMap = map
         }
 
-        if encryption != lastEncryption {
-            if let encryption,
-               let keyLine = renderKeyLine(
-                    prefix: "#EXT-X-KEY",
-                    key: encryption.key,
-                    initializationVector: encryption.initializationVector,
-                    resolver: resolver
-                ) {
-                lines.append(keyLine)
-            } else if lastEncryption != nil {
-                lines.append("#EXT-X-KEY:METHOD=NONE")
-            }
-            lastEncryption = encryption
+        appendEncryptionChange(
+            to: encryption,
+            lines: &lines,
+            lastEncryption: &lastEncryption,
+            resolver: resolver
+        )
+    }
+
+    private func appendEncryptionChange(
+        to encryption: SegmentEncryption?,
+        lines: inout [String],
+        lastEncryption: inout SegmentEncryption?,
+        resolver: HLSRewriteConfiguration.KeyURLResolver?
+    ) {
+        guard encryption != lastEncryption else { return }
+        if let encryption,
+           let keyLine = renderKeyLine(
+                prefix: "#EXT-X-KEY",
+                key: encryption.key,
+                initializationVector: encryption.initializationVector,
+                resolver: resolver
+           ) {
+            lines.append(keyLine)
+        } else if lastEncryption != nil {
+            lines.append("#EXT-X-KEY:METHOD=NONE")
         }
+        lastEncryption = encryption
     }
 
     private func renderKeyLine(

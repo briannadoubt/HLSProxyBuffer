@@ -127,7 +127,7 @@ private extension FeedPlanner {
             guard byID[item.id] == nil else {
                 throw FeedPlanningError.duplicateItemID(item.id)
             }
-            if case .clips(let urls) = item.source, urls.isEmpty {
+            if item.source.hasEmptyClipSequence {
                 throw FeedPlanningError.emptyClipSequence(item.id)
             }
             byID[item.id] = item

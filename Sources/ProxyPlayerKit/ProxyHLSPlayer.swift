@@ -126,6 +126,8 @@ public final class ProxyHLSPlayer {
     public private(set) var subtitleRenditions: [HLSManifest.Rendition] = []
     public private(set) var activeAudioRendition: HLSManifest.Rendition?
     public private(set) var activeSubtitleRendition: HLSManifest.Rendition?
+    /// The last typed direct-stitching failure, cleared whenever a new load begins.
+    public private(set) var clipStitchingError: HLSClipStitchingError?
 
     /// The preferred forward-playback rate. Pausing does not reset this value.
     public private(set) var playbackRate: Float = 1.0
@@ -296,6 +298,7 @@ public final class ProxyHLSPlayer {
         from remoteURL: URL,
         quality: HLSRewriteConfiguration.QualityPolicy = .automatic
     ) async {
+        clipStitchingError = nil
         sessionGeneration &+= 1
         let generation = sessionGeneration
         activeLoadTask?.cancel()
@@ -333,6 +336,51 @@ public final class ProxyHLSPlayer {
                 activeLoadTask = nil
                 updateState(PlayerState(status: .failed(error.localizedDescription)))
             }
+        }
+    }
+
+    /// Loads compatible finite media playlists as one seekable local timeline.
+    ///
+    /// The player owns manifest resolution, validation, proxy routing, buffering,
+    /// and the `AVPlayerItem`; adopters only provide trusted media signatures.
+    public func load(clips: [ProxyPlaybackClip]) async throws {
+        clipStitchingError = nil
+        sessionGeneration &+= 1
+        let generation = sessionGeneration
+        activeLoadTask?.cancel()
+        if let activeLoadTask { _ = await activeLoadTask.result }
+        if let cleanupTask { await cleanupTask.value }
+        guard generation == sessionGeneration else { throw CancellationError() }
+        if let initializationTask {
+            await initializationTask.value
+            self.initializationTask = nil
+        }
+        updateState(PlayerState(status: .buffering, qualityDescription: "stitched"))
+        let task = Task { @MainActor [weak self] in
+            guard let self else { throw CancellationError() }
+            try await self.performClipLoad(clips, generation: generation)
+        }
+        activeLoadTask = task
+        do {
+            try await task.value
+            if generation == sessionGeneration { activeLoadTask = nil }
+        } catch is CancellationError {
+            if generation == sessionGeneration {
+                activeLoadTask = nil
+                updateState(PlayerState())
+            }
+            throw CancellationError()
+        } catch {
+            if generation == sessionGeneration {
+                activeLoadTask = nil
+                clipStitchingError = error as? HLSClipStitchingError
+                player?.pause()
+                removePlaybackTimeObserver()
+                player?.replaceCurrentItem(with: nil)
+                didPreparePlayerForCurrentLoad = false
+                updateState(PlayerState(status: .failed(error.localizedDescription)))
+            }
+            throw error
         }
     }
 
@@ -400,6 +448,7 @@ public final class ProxyHLSPlayer {
             server.stop()
         }
         latestKeyStatuses = []
+        clipStitchingError = nil
         updateState(PlayerState())
     }
 
@@ -565,6 +614,95 @@ public final class ProxyHLSPlayer {
         await updatePlaybackState(with: bufferState, generation: generation)
         await startPlaylistRefresh(at: playlistResult.url, generation: generation)
         startRenditionRefresh(generation: generation, config: rewriteConfiguration)
+    }
+
+    private func performClipLoad(
+        _ clips: [ProxyPlaybackClip],
+        generation: UInt64
+    ) async throws {
+        try ensureActiveSession(generation)
+        if server.port == nil {
+            try server.start()
+        }
+        let baseURL = try await waitForBaseURL()
+
+        var parsedClips: [HLSClip] = []
+        parsedClips.reserveCapacity(clips.count)
+        for (clipIndex, clip) in clips.enumerated() {
+            try ensureActiveSession(generation)
+            let text = try await fetchManifestText(from: clip.playlistURL)
+            let manifest = try await manifestProcessor.parse(text, baseURL: clip.playlistURL)
+            guard manifest.kind == .media,
+                  manifest.variants.isEmpty,
+                  manifest.renditions.isEmpty,
+                  let playlist = manifest.mediaPlaylist
+            else {
+                throw HLSClipStitchingError.unsupportedMasterOrRenditionTopology(
+                    clipIndex: clipIndex
+                )
+            }
+            parsedClips.append(HLSClip(
+                id: clip.id,
+                playlist: playlist,
+                mediaSignature: clip.mediaSignature
+            ))
+        }
+
+        // Stitching is the validation boundary: no catalog, cache, scheduler,
+        // proxy-playlist, or player item is changed until this succeeds.
+        let playlist = try HLSClipStitcher().stitch(parsedClips)
+        try ensureActiveSession(generation)
+
+        didPreparePlayerForCurrentLoad = false
+        for task in renditionRefreshTasks.values { task.cancel() }
+        renditionRefreshTasks.removeAll()
+        await playlistRefresher.stop()
+        await clearResolvedRenditions()
+        await cache.clear()
+        await throughputEstimator.reset()
+        await adaptiveController.reset()
+        try ensureActiveSession(generation)
+
+        variants = []
+        activeVariant = nil
+        await adaptiveController.updateVariants([])
+        masterProtocolVersion = playlist.protocolVersion
+        masterIndependentSegments = playlist.independentSegments
+        masterPassthroughTags = []
+        // The media playlist owns these keys. Avoid duplicating them into the
+        // generated master, where the generic DRM policy could expose origins.
+        masterSessionKeys = []
+        currentPlaylist = playlist
+        updateKeyDiagnostics(for: playlist)
+        await segmentCatalog.update(with: playlist, namespace: SegmentCatalog.Namespace.primary)
+
+        await scheduler.onBufferStateChange(nil)
+        await scheduler.stop()
+        await scheduler.enqueueUpcomingPlaylists(configuration.upcomingPlaylists)
+        await scheduler.onBufferStateChange { [weak self] bufferState in
+            guard let self else { return }
+            await self.handleBufferStateChange(bufferState, generation: generation)
+        }
+        await scheduler.start(playlist: playlist, fetcher: segmentFetcher, cache: cache)
+        try ensureActiveSession(generation)
+
+        currentRewriteConfiguration = HLSRewriteConfiguration(
+            proxyBaseURL: baseURL,
+            hideUntilBuffered: configuration.bufferPolicy.hideUntilBuffered,
+            qualityPolicy: .automatic,
+            lowLatencyOptions: nil,
+            keyURLResolver: localKeyURLResolver(for: baseURL)
+        )
+        latestManifestRenditions = []
+        let bufferState = await scheduler.bufferState()
+        latestBufferState = bufferState
+        try ensureActiveSession(generation)
+        logger.log(
+            "Installed \(clips.count) clips as \(playlist.segments.count) stitched segments.",
+            category: .player
+        )
+        await updateMasterPlaylist()
+        await updatePlaybackState(with: bufferState, generation: generation)
     }
 
     private func describeQuality(_ policy: HLSRewriteConfiguration.QualityPolicy) -> String {
@@ -1690,6 +1828,10 @@ public final class ProxyHLSPlayer {
 
     private func keyURLResolver(for baseURL: URL) -> HLSRewriteConfiguration.KeyURLResolver? {
         guard configuration.drmPolicy == .proxy else { return nil }
+        return localKeyURLResolver(for: baseURL)
+    }
+
+    private func localKeyURLResolver(for baseURL: URL) -> HLSRewriteConfiguration.KeyURLResolver {
         let keyBaseURL = baseURL
             .appendingPathComponent("assets")
             .appendingPathComponent(AuxiliaryAssetType.keys.rawValue)
@@ -1717,10 +1859,11 @@ public final class ProxyHLSPlayer {
             }
         }
         for segment in playlist.segments {
-            guard let encryption = segment.encryption else { continue }
-            guard let status = keyStatus(from: encryption.key, isSessionKey: false) else { continue }
-            if seen.insert(status).inserted {
-                statuses.append(status)
+            for encryption in [segment.initializationMap?.encryption, segment.encryption].compactMap({ $0 }) {
+                guard let status = keyStatus(from: encryption.key, isSessionKey: false) else { continue }
+                if seen.insert(status).inserted {
+                    statuses.append(status)
+                }
             }
         }
         return statuses
@@ -1934,9 +2077,17 @@ public final class ProxyHLSPlayer {
 public final class ProxyHLSPlayer {
     public static let supportedPlaybackRateRange: ClosedRange<Float> = 0.5...2.0
     public private(set) var playbackRate: Float = 1.0
+    public private(set) var clipStitchingError: HLSClipStitchingError?
 
     public init() {}
     public func load(from remoteURL: URL, quality: HLSRewriteConfiguration.QualityPolicy = .automatic) async {}
+    public func load(clips: [ProxyPlaybackClip]) async throws {
+        guard !clips.isEmpty else {
+            let error = HLSClipStitchingError.noClips
+            clipStitchingError = error
+            throw error
+        }
+    }
     public func play() {}
     public func pause() {}
     public func setPlaybackRate(_ rate: Float) {
@@ -1949,7 +2100,7 @@ public final class ProxyHLSPlayer {
             Self.supportedPlaybackRateRange.upperBound
         )
     }
-    public func stop() {}
+    public func stop() { clipStitchingError = nil }
 
     public nonisolated static func keyIdentifier(forKeyURI uri: URL) -> String {
         digest(for: uri.absoluteString)

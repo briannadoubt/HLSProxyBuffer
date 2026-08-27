@@ -70,11 +70,32 @@ test sleeps.
 `HLSFeedPreparationBackend` is the production preparation boundary. It resolves
 VOD, live, master/variant, and compatible clip-sequence manifests, selects the
 startup quality profile, and fetches only the leading resources permitted by
-the coordinator. Manifest, initialization-map, encryption-key, and segment
-lookups share one memory/disk cache. All misses pass through one
+the coordinator. Manifest, initialization-map, and segment lookups share one
+memory/disk cache. Encryption and DRM key bytes never enter that disk-backed
+cache; stitched loads use the existing memory-only auxiliary key route. All
+cacheable misses pass through one
 cancellation-aware global/per-origin limiter and the validated manifest and
 segment retry policies. Live streams prepare the newest permitted suffix;
-VOD and stitched sources prepare from their leading edge.
+VOD and stitched sources prepare from their leading edge. A
+`.compatibleClips([ProxyPlaybackClip])` source resolves every declared media
+playlist, validates the complete compatibility contract, and only then admits
+leading stitched resources under the coordinator's segment budget.
+
+## Implemented stitched playback path
+
+`HLSClipStitcher` is the deterministic core boundary. It accepts only finite,
+single-media VOD inputs with matching trusted signatures; renumbers their
+segments; inserts join discontinuities; preserves byte ranges, initialization
+maps, encryption state, and program dates; and materializes sequence-derived
+AES-128 IVs before renumbering. Live/LL-HLS, topology, codec, ad/interstitial,
+and ambiguous-date failures are typed.
+
+`ProxyHLSPlayer.load(clips:)` fetches and validates every manifest before it
+changes a catalog, cache, scheduler, proxy playlist, or player item. The
+resulting timeline uses the ordinary loopback master, media-playlist, wildcard
+resource, and memory-only key routes. A failed replacement clears the
+superseded `AVPlayerItem` and exposes `clipStitchingError` through Observation.
+No `AVQueuePlayer` or caller-owned proxy state is required.
 
 Readiness is reusable across navigation generations, but reused values are
 rebased to the active generation before publication. Replaced item IDs retain

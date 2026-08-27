@@ -47,10 +47,17 @@ public struct SegmentEncryption: Sendable, Hashable, Codable {
 public struct MediaInitializationMap: Sendable, Hashable, Codable {
     public let uri: URL
     public let byteRange: ClosedRange<Int>?
+    /// Encryption state in scope when `EXT-X-MAP` was declared.
+    public let encryption: SegmentEncryption?
 
-    public init(uri: URL, byteRange: ClosedRange<Int>? = nil) {
+    public init(
+        uri: URL,
+        byteRange: ClosedRange<Int>? = nil,
+        encryption: SegmentEncryption? = nil
+    ) {
         self.uri = uri
         self.byteRange = byteRange
+        self.encryption = encryption
     }
 }
 

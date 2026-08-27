@@ -202,28 +202,75 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
         try Task.checkCancellation()
         let sourceURLs: [URL]
         let sourceKind: FeedStreamKind
+        let compatibleClips: [ProxyPlaybackClip]?
         switch request.item.source {
         case .stream(let url, let kind):
             sourceURLs = [url]
             sourceKind = kind
+            compatibleClips = nil
         case .clips(let urls):
             guard !urls.isEmpty else {
                 throw FeedPreparationError.emptyClipSequence(request.item.id)
             }
             sourceURLs = Array(urls.prefix(request.maximumLeadingSegments))
             sourceKind = .videoOnDemand
+            compatibleClips = nil
+        case .compatibleClips(let clips):
+            guard !clips.isEmpty else {
+                throw FeedPreparationError.emptyClipSequence(request.item.id)
+            }
+            sourceURLs = clips.map(\.playlistURL)
+            sourceKind = .videoOnDemand
+            compatibleClips = clips
         }
 
         var resolvedPlaylists: [ResolvedPlaylist] = []
-        for url in sourceURLs {
+        for (clipIndex, url) in sourceURLs.enumerated() {
             try Task.checkCancellation()
-            let resolved = try await resolveMediaPlaylist(
-                from: url,
-                qualityPolicy: request.qualityPolicy,
-                visited: [],
-                depth: 0
-            )
+            let resolved: ResolvedPlaylist
+            if compatibleClips != nil {
+                let loaded = try await loadManifest(from: url)
+                guard loaded.manifest.kind == .media,
+                      loaded.manifest.variants.isEmpty,
+                      loaded.manifest.renditions.isEmpty,
+                      let playlist = loaded.manifest.mediaPlaylist
+                else {
+                    throw HLSClipStitchingError.unsupportedMasterOrRenditionTopology(
+                        clipIndex: clipIndex
+                    )
+                }
+                resolved = ResolvedPlaylist(
+                    playlist: playlist,
+                    manifestURLs: [url],
+                    cacheHitCount: loaded.cacheHitCount,
+                    originFetchCount: loaded.originFetchCount
+                )
+            } else {
+                resolved = try await resolveMediaPlaylist(
+                    from: url,
+                    qualityPolicy: request.qualityPolicy,
+                    visited: [],
+                    depth: 0
+                )
+            }
             resolvedPlaylists.append(resolved)
+        }
+
+        let mediaPlaylistCount = resolvedPlaylists.count
+        if let compatibleClips {
+            let stitched = try HLSClipStitcher().stitch(zip(compatibleClips, resolvedPlaylists).map {
+                HLSClip(
+                    id: $0.0.id,
+                    playlist: $0.1.playlist,
+                    mediaSignature: $0.0.mediaSignature
+                )
+            })
+            resolvedPlaylists = [ResolvedPlaylist(
+                playlist: stitched,
+                manifestURLs: resolvedPlaylists.flatMap(\.manifestURLs),
+                cacheHitCount: resolvedPlaylists.reduce(0) { $0 + $1.cacheHitCount },
+                originFetchCount: resolvedPlaylists.reduce(0) { $0 + $1.originFetchCount }
+            )]
         }
 
         var resources: [Resource] = []
@@ -252,17 +299,6 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
                             key: SegmentIdentity.key(for: map),
                             url: map.uri,
                             byteRange: map.byteRange
-                        ),
-                        to: &resources,
-                        seenKeys: &seenResourceKeys
-                    )
-                }
-                if let keyURL = segment.encryption?.key.uri {
-                    append(
-                        Resource(
-                            key: "key-\(keyURL.absoluteString)",
-                            url: keyURL,
-                            byteRange: nil
                         ),
                         to: &resources,
                         seenKeys: &seenResourceKeys
@@ -305,7 +341,7 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
             itemID: request.item.id,
             generation: request.generation,
             manifestURLs: manifestURLs,
-            mediaPlaylistCount: resolvedPlaylists.count,
+            mediaPlaylistCount: mediaPlaylistCount,
             leadingSegmentCount: leadingSegmentCount,
             preparedResourceCount: outcomes.count,
             preparedByteCount: outcomes.reduce(0) { $0 + $1.byteCount },

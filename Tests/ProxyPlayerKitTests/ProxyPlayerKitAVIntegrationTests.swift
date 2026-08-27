@@ -70,6 +70,85 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         await player.stopAndWait()
     }
 
+    func testCompatibleClipsInstallOneProxyTimelineAndServeAcrossBoundary() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        defer { origin.stop() }
+        let player = ProxyHLSPlayer(configuration: .init(
+            bufferPolicy: .init(
+                targetBufferSeconds: 2,
+                maxPrefetchSegments: 2,
+                hideUntilBuffered: false
+            ),
+            allowInsecureManifests: true
+        ))
+        let clips = ["short-a", "short-b"].map { name in
+            ProxyPlaybackClip(
+                id: name,
+                playlistURL: origin.fixturePlaylistURL(named: name),
+                mediaSignature: Self.compatibleClipSignature
+            )
+        }
+
+        try await player.load(clips: clips)
+        XCTAssertNotNil(player.player?.currentItem)
+        XCTAssertNil(player.clipStitchingError)
+        let masterURL = try XCTUnwrap(player.playlistURL())
+        let master = String(decoding: try await URLSession.shared.data(from: masterURL).0, as: UTF8.self)
+        XCTAssertFalse(master.contains(origin.baseURL.absoluteString))
+        let variantLine = try XCTUnwrap(master.split(separator: "\n").last { !$0.hasPrefix("#") })
+        let variantURL = try XCTUnwrap(URL(string: String(variantLine)))
+        let variant = String(decoding: try await URLSession.shared.data(from: variantURL).0, as: UTF8.self)
+
+        XCTAssertFalse(variant.contains(origin.baseURL.absoluteString))
+        XCTAssertTrue(variant.contains("#EXT-X-MEDIA-SEQUENCE:0"))
+        XCTAssertTrue(variant.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0"))
+        XCTAssertEqual(
+            variant.split(separator: "\n").filter { $0 == "#EXT-X-DISCONTINUITY" }.count,
+            1
+        )
+        let boundary = try XCTUnwrap(variant.range(of: "#EXT-X-DISCONTINUITY"))
+        let boundarySegment = try XCTUnwrap(variant.range(of: "/segments/segment-3-"))
+        XCTAssertLessThan(boundary.lowerBound, boundarySegment.lowerBound)
+
+        let lines = variant.split(separator: "\n").map(String.init)
+        let segmentURLs = try lines
+            .filter { !$0.hasPrefix("#") && $0.hasPrefix("http://") }
+            .map { try XCTUnwrap(URL(string: $0)) }
+        let mapURLs = try lines
+            .filter { $0.hasPrefix("#EXT-X-MAP:") }
+            .map { try XCTUnwrap(quotedURI(in: $0)) }
+        XCTAssertEqual(segmentURLs.count, 6)
+        XCTAssertEqual(mapURLs.count, 2)
+        XCTAssertTrue(segmentURLs.allSatisfy { $0.pathExtension == "m4s" })
+        XCTAssertTrue(mapURLs.allSatisfy { $0.pathExtension == "mp4" })
+        for url in mapURLs + segmentURLs {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+            XCTAssertFalse(data.isEmpty, "Expected proxied bytes for \(url)")
+        }
+
+        let firstItem = player.player?.currentItem
+        let incompatible = ProxyPlaybackClip(
+            id: "short-b-hevc",
+            playlistURL: origin.fixturePlaylistURL(named: "short-b"),
+            mediaSignature: Self.incompatibleClipSignature
+        )
+        do {
+            try await player.load(clips: [clips[0], incompatible])
+            XCTFail("Incompatible clips must fail before proxy catalog replacement")
+        } catch {
+            XCTAssertEqual(
+                error as? HLSClipStitchingError,
+                .incompatibleMediaSignature(clipIndex: 1)
+            )
+        }
+        XCTAssertEqual(player.clipStitchingError, .incompatibleMediaSignature(clipIndex: 1))
+        XCTAssertNotNil(firstItem)
+        XCTAssertNil(player.player?.currentItem, "The superseded item must not continue playback after failure")
+        await player.stopAndWait()
+    }
+
     func testPlaybackRateSurvivesPauseAndItemReplacement() async throws {
         let origin = try MockOriginServer()
         try await origin.start()
@@ -390,6 +469,28 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         }
         return segmentURL
     }
+
+    private static let compatibleClipSignature = HLSClipMediaSignature(
+        container: .fragmentedMP4,
+        codecs: ["avc1.640028", "mp4a.40.2"],
+        tracks: [
+            .init(kind: .video, codec: "avc1.640028"),
+            .init(kind: .audio, codec: "mp4a.40.2", layout: "stereo"),
+        ],
+        videoRange: "SDR",
+        segmentsAreIndependent: true
+    )
+
+    private static let incompatibleClipSignature = HLSClipMediaSignature(
+        container: .fragmentedMP4,
+        codecs: ["hvc1.2.4.L123.B0", "mp4a.40.2"],
+        tracks: [
+            .init(kind: .video, codec: "hvc1.2.4.L123.B0"),
+            .init(kind: .audio, codec: "mp4a.40.2", layout: "stereo"),
+        ],
+        videoRange: "SDR",
+        segmentsAreIndependent: true
+    )
 
 }
 

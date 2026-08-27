@@ -1,4 +1,5 @@
 import Foundation
+import HLSCore
 
 /// A stable application-defined identity for one item in a playback feed.
 public struct FeedItemID: RawRepresentable, Hashable, Codable, Sendable,
@@ -23,6 +24,24 @@ public enum FeedStreamKind: String, Codable, Sendable {
     case live
 }
 
+/// One finite media-playlist clip plus the trusted decoder compatibility facts
+/// required to join it directly into a single HLS timeline.
+public struct ProxyPlaybackClip: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let playlistURL: URL
+    public let mediaSignature: HLSClipMediaSignature
+
+    public init(
+        id: String,
+        playlistURL: URL,
+        mediaSignature: HLSClipMediaSignature
+    ) {
+        self.id = id
+        self.playlistURL = playlistURL
+        self.mediaSignature = mediaSignature
+    }
+}
+
 /// A source the automatic playback engine can own and prepare.
 ///
 /// Clip sequences are stitched only when they satisfy the compatibility
@@ -30,7 +49,21 @@ public enum FeedStreamKind: String, Codable, Sendable {
 /// queues themselves.
 public enum FeedPlaybackSource: Hashable, Sendable {
     case stream(url: URL, kind: FeedStreamKind)
+    /// Legacy untyped clip preparation. Prefer ``compatibleClips(_:)`` when
+    /// the clips will be presented as one seamless playback timeline.
     case clips([URL])
+    case compatibleClips([ProxyPlaybackClip])
+
+    var hasEmptyClipSequence: Bool {
+        switch self {
+        case .stream:
+            false
+        case .clips(let urls):
+            urls.isEmpty
+        case .compatibleClips(let clips):
+            clips.isEmpty
+        }
+    }
 }
 
 /// One ordered source and its conservative planning estimate.

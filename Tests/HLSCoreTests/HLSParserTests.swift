@@ -2,6 +2,26 @@ import XCTest
 @testable import HLSCore
 
 final class HLSParserTests: XCTestCase {
+    func testSequenceArithmeticOverflowIsTypedInsteadOfTrapping() {
+        let playlist = """
+        #EXTM3U
+        #EXT-X-TARGETDURATION:4
+        #EXT-X-MEDIA-SEQUENCE:\(Int.max)
+        #EXTINF:4,
+        segment.ts
+        #EXT-X-ENDLIST
+        """
+
+        XCTAssertThrowsError(try HLSParser().parse(
+            playlist,
+            baseURL: URL(string: "https://example.com/playlist.m3u8")
+        )) { error in
+            guard case HLSParser.ParserError.sequenceArithmeticOverflow = error else {
+                return XCTFail("Expected typed sequence overflow, got \(error)")
+            }
+        }
+    }
+
     func testParsesMediaPlaylist() throws {
         let playlist = """
         #EXTM3U

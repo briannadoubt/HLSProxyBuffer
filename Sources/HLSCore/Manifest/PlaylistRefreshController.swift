@@ -170,7 +170,6 @@ public actor PlaylistRefreshController {
                 let playlist = try await fetchPlaylist(from: requestURL, requestTimeout: timeout)
                 try Task.checkCancellation()
                 updateBlockingMetadata(from: playlist)
-                await onUpdate?(playlist)
                 lastRefreshDate = Date()
                 consecutiveFailures = 0
                 lastErrorDescription = nil
@@ -179,6 +178,11 @@ public actor PlaylistRefreshController {
                 if playlist.isEndlist {
                     isEnded = true
                 }
+                // Commit observable controller state before notifying clients.
+                // A callback may fulfill an expectation or stop the controller;
+                // publishing first prevents those actions from observing stale
+                // metrics for a playlist they already received.
+                await onUpdate?(playlist)
             } catch is CancellationError {
                 break
             } catch {
