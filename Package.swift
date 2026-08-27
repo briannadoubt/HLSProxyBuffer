@@ -68,7 +68,8 @@ let package = Package(
             dependencies: [
                 "ProxyPlayerKit",
                 "HLSCore",
-            ]
+            ],
+            resources: [.copy("Fixtures")]
         ),
     ]
 )
