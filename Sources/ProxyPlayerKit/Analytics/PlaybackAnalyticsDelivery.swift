@@ -79,6 +79,21 @@ public protocol PlaybackAnalyticsSink: Sendable {
     func send(_ batch: PlaybackAnalyticsBatch) async throws
 }
 
+/// Tells the delivery actor whether retrying a sink failure can make progress.
+public enum PlaybackAnalyticsRetryDisposition: Equatable, Sendable {
+    case retryable
+    case permanent
+}
+
+/// Optional error contract for sinks that can classify failures.
+///
+/// Unknown errors remain retryable for backward compatibility. Permanent
+/// failures skip delivery backoff and move directly to configured spool/drop
+/// behavior.
+public protocol PlaybackAnalyticsRetryClassifyingError: Error, Sendable {
+    var retryDisposition: PlaybackAnalyticsRetryDisposition { get }
+}
+
 /// Playback-independent, bounded delivery for typed analytics records.
 ///
 /// Calls to `record` only perform actor-isolated memory admission. Sink and
@@ -544,7 +559,10 @@ public actor PlaybackAnalyticsDelivery {
                 return true
             } catch {
                 exportFailureCount = Self.saturatingAdd(exportFailureCount, 1)
-                guard attempt < configuration.retryPolicy.maximumAttempts,
+                let disposition = (error as? any PlaybackAnalyticsRetryClassifyingError)?
+                    .retryDisposition ?? .retryable
+                guard disposition == .retryable,
+                      attempt < configuration.retryPolicy.maximumAttempts,
                       !Task.isCancelled
                 else {
                     publishSnapshot()

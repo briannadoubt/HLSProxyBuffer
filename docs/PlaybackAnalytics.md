@@ -315,6 +315,19 @@ flush, spools or drops anything left, and finishes the health stream. Sink
 implementations must honor Swift task cancellation so that deadline and task
 bounds remain enforceable.
 
+## Reference exporters
+
+`PlaybackAnalyticsExportCodec` supplies deterministic batch and JSON Lines
+encodings. The package includes bounded in-memory and rotating JSONL sinks, an
+OSLog/signpost sink that logs aggregate counts only, and an HTTPS sink with an
+injected dedicated session, per-request ephemeral authorization, bounded
+deflate compression, HTTPS redirect enforcement, and typed retry disposition.
+No third-party analytics dependency is required.
+
+See [Playback analytics operations](PlaybackAnalyticsOperations.md) for the
+ingestion/idempotency contract, a small existing-SDK adapter, session isolation,
+sampling, privacy/retention, alerting, and dashboard-ready fields.
+
 ## Schema compatibility
 
 The schema uses `{major, minor}` versions.
