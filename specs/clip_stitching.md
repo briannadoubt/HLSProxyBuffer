@@ -1,7 +1,6 @@
 # Clip stitching contract
 
-Status: approved design for HLS-10. This document is normative for the first
-implementation.
+Status: implemented by HLS-10. This document is normative for direct stitching.
 
 The implementation follows the March 2026 [HTTP Live Streaming 2nd Edition
 draft](https://datatracker.ietf.org/doc/html/draft-pantos-hls-rfc8216bis-21),
@@ -68,6 +67,33 @@ exact equality of container, codec set, track layout, and video range. A
 discontinuity permits timestamp and encoding-parameter changes; it is not a
 license to join arbitrary decoder configurations. Inputs containing video must
 assert independent segment starts.
+
+The same typed source composes with feed preparation:
+
+```swift
+let clips = [
+    ProxyPlaybackClip(
+        id: "opening",
+        playlistURL: openingURL,
+        mediaSignature: signature
+    ),
+    ProxyPlaybackClip(
+        id: "continuation",
+        playlistURL: continuationURL,
+        mediaSignature: signature
+    ),
+]
+
+try await player.load(clips: clips)
+
+let item = FeedPlaybackItem(
+    id: "story",
+    source: .compatibleClips(clips),
+    estimatedPreparationBytes: 2_000_000
+)
+```
+
+No queue, proxy URL, segment catalog, or buffer is exposed to the caller.
 
 ## Input validation and explicit failures
 
@@ -141,21 +167,26 @@ AVFoundation/content-type hints without weakening identity uniqueness.
 
 All manifest and resource URLs exposed to AVPlayer are loopback URLs. Origin
 credentials stay in the configured URL sessions; raw origin URLs do not appear
-in the stitched manifest. Key bytes remain outside the disk segment cache.
+in the stitched manifest. Direct stitched playback always maps key identities
+onto the memory-only `/assets/keys` route, even when ordinary single-stream
+playback uses passthrough DRM policy. Applications register those bytes with
+`registerAuxiliaryAsset`; feed preparation never downloads or persists key
+bytes in the segment cache.
 
 ## Conformance fixtures and gates
 
 `Tests/HLSCoreTests/Fixtures/ClipStitching` is copied as a SwiftPM test resource.
-`expectations.json` records signatures and expected decisions. HLS-10 must add:
+`expectations.json` records signatures and expected decisions. HLS-10 provides:
 
-- parser/stitcher/rewriter golden tests for sequences, discontinuities, maps,
+- [x] parser/stitcher/rewriter golden tests for sequences, discontinuities, maps,
   keys, implicit IVs, byte ranges, program dates, and extensions;
-- table-driven rejection tests for codec mismatch, live/LL-HLS, ad metadata,
+- [x] table-driven rejection tests for codec mismatch, live/LL-HLS, ad metadata,
   invalid durations, non-independent video, and date overlap;
-- proxy tests that fetch every rewritten resource route and prove no origin URL
+- [x] proxy tests that fetch every rewritten resource route and prove no origin URL
   leaks into the manifest;
-- an AVFoundation integration test that installs the stitched local item and
+- [x] an AVFoundation integration test that installs the stitched local item and
   fetches resources across the boundary, plus an incompatible-input failure
   test. The existing environment flag may skip AVFoundation execution, but the
   deterministic core and proxy conformance tests always run in CI;
-- normal, Thread Sanitizer, release warnings-as-errors, and simulator CI gates.
+- normal, Thread Sanitizer, release warnings-as-errors, and simulator CI gates
+  are recorded on the HLS-10 Scope ticket and pull request for each release.

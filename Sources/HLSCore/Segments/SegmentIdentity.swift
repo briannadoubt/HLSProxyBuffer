@@ -3,7 +3,7 @@ import CryptoKit
 
 public enum SegmentIdentity {
     public static func key(for segment: HLSSegment, namespace: String? = nil) -> String {
-        let suffix = "segment-\(segment.sequence)-\(fingerprint(url: segment.url, range: segment.byteRange))"
+        let suffix = "segment-\(segment.sequence)-\(fingerprint(url: segment.url, range: segment.byteRange)).\(resourceExtension(for: segment.url))"
         return namespaced(suffix: suffix, namespace: namespace)
     }
 
@@ -13,7 +13,7 @@ public enum SegmentIdentity {
     }
 
     public static func key(for part: HLSPartialSegment, namespace: String? = nil) -> String {
-        let suffix = "part-\(part.parentSequence)-\(part.partIndex)-\(fingerprint(url: part.url, range: part.byteRange))"
+        let suffix = "part-\(part.parentSequence)-\(part.partIndex)-\(fingerprint(url: part.url, range: part.byteRange)).\(resourceExtension(for: part.url))"
         return namespaced(suffix: suffix, namespace: namespace)
     }
 
@@ -23,12 +23,12 @@ public enum SegmentIdentity {
     }
 
     public static func key(for map: MediaInitializationMap, namespace: String? = nil) -> String {
-        let suffix = "map-\(fingerprint(url: map.uri, range: map.byteRange))"
+        let suffix = "map-\(fingerprint(url: map.uri, range: map.byteRange)).\(resourceExtension(for: map.uri))"
         return namespaced(suffix: suffix, namespace: namespace)
     }
 
     public static func key(for hint: HLSPreloadHint, namespace: String? = nil) -> String {
-        let suffix = "hint-\(hint.sequence)-\(hint.partIndex ?? 0)-\(fingerprint(url: hint.uri, range: hint.byteRange))"
+        let suffix = "hint-\(hint.sequence)-\(hint.partIndex ?? 0)-\(fingerprint(url: hint.uri, range: hint.byteRange)).\(resourceExtension(for: hint.uri))"
         return namespaced(suffix: suffix, namespace: namespace)
     }
 
@@ -99,5 +99,12 @@ public enum SegmentIdentity {
             .prefix(10)
             .map { String(format: "%02x", $0) }
             .joined()
+    }
+
+    private static func resourceExtension(for url: URL) -> String {
+        let value = url.pathExtension.lowercased().filter { character in
+            character.isLetter || character.isNumber
+        }
+        return value.isEmpty ? "bin" : String(value.prefix(12))
     }
 }

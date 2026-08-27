@@ -185,6 +185,11 @@ final class FeedPlannerTests: XCTestCase {
             source: .clips([]),
             estimatedPreparationBytes: 0
         )
+        let invalidTyped = FeedPlaybackItem(
+            id: "empty-typed",
+            source: .compatibleClips([]),
+            estimatedPreparationBytes: 0
+        )
         let planner = FeedPlanner()
 
         _ = try planner.makePlan(
@@ -196,6 +201,12 @@ final class FeedPlannerTests: XCTestCase {
             signal: makeSignal(generation: 2, focused: invalid.id, observedAt: .zero)
         )) { error in
             XCTAssertEqual(error as? FeedPlanningError, .emptyClipSequence(invalid.id))
+        }
+        XCTAssertThrowsError(try planner.makePlan(
+            items: [invalidTyped],
+            signal: makeSignal(generation: 3, focused: invalidTyped.id, observedAt: .zero)
+        )) { error in
+            XCTAssertEqual(error as? FeedPlanningError, .emptyClipSequence(invalidTyped.id))
         }
     }
 

@@ -203,10 +203,98 @@ final class FeedCoordinatorTests: XCTestCase {
         let diskMetrics = await secondBackend.cacheMetrics()
         XCTAssertGreaterThan(diskMetrics.diskBytes, 0)
     }
+
+    func testProductionBackendValidatesAndPreparesCompatibleClipTimeline() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        defer { origin.stop() }
+        let backend = try HLSFeedPreparationBackend(
+            policy: singleItemPolicy(),
+            allowsInsecureManifests: true
+        )
+        let clips = [
+            ProxyPlaybackClip(
+                id: "short-a",
+                playlistURL: origin.fixturePlaylistURL(named: "short-a"),
+                mediaSignature: compatibleSignature
+            ),
+            ProxyPlaybackClip(
+                id: "short-b",
+                playlistURL: origin.fixturePlaylistURL(named: "short-b"),
+                mediaSignature: compatibleSignature
+            ),
+        ]
+        let item = FeedPlaybackItem(
+            id: "stitched-feed-item",
+            source: .compatibleClips(clips),
+            estimatedPreparationBytes: 512 * 1_024
+        )
+
+        let prepared = try await backend.prepare(.init(
+            item: item,
+            generation: .init(rawValue: 9),
+            role: .focused,
+            maximumLeadingSegments: 4,
+            maximumConcurrentFetches: 2
+        ))
+
+        XCTAssertEqual(prepared.mediaPlaylistCount, 2)
+        XCTAssertEqual(prepared.manifestURLs, clips.map(\.playlistURL))
+        XCTAssertEqual(prepared.leadingSegmentCount, 4)
+        XCTAssertEqual(prepared.preparedResourceCount, 6, "two maps plus four timeline segments")
+
+        let incompatible = ProxyPlaybackClip(
+            id: "short-b-incompatible",
+            playlistURL: origin.fixturePlaylistURL(named: "short-b"),
+            mediaSignature: HLSClipMediaSignature(
+                container: .fragmentedMP4,
+                codecs: ["hvc1.2.4.L123.B0", "mp4a.40.2"],
+                tracks: [
+                    .init(kind: .video, codec: "hvc1.2.4.L123.B0"),
+                    .init(kind: .audio, codec: "mp4a.40.2", layout: "stereo"),
+                ],
+                videoRange: "SDR",
+                segmentsAreIndependent: true
+            )
+        )
+        let invalidItem = FeedPlaybackItem(
+            id: "invalid-stitched-feed-item",
+            source: .compatibleClips([clips[0], incompatible]),
+            estimatedPreparationBytes: 512 * 1_024
+        )
+        do {
+            _ = try await backend.prepare(.init(
+                item: invalidItem,
+                generation: .init(rawValue: 10),
+                role: .focused,
+                maximumLeadingSegments: 4,
+                maximumConcurrentFetches: 2
+            ))
+            XCTFail("Incompatible media signatures must not reach resource preparation")
+        } catch {
+            XCTAssertEqual(
+                error as? HLSClipStitchingError,
+                .incompatibleMediaSignature(clipIndex: 1)
+            )
+        }
+    }
 #endif
 }
 
 private extension FeedCoordinatorTests {
+    var compatibleSignature: HLSClipMediaSignature {
+        HLSClipMediaSignature(
+            container: .fragmentedMP4,
+            codecs: ["avc1.640028", "mp4a.40.2"],
+            tracks: [
+                .init(kind: .video, codec: "avc1.640028"),
+                .init(kind: .audio, codec: "mp4a.40.2", layout: "stereo"),
+            ],
+            videoRange: "SDR",
+            segmentsAreIndependent: true
+        )
+    }
+
     func singleItemPolicy() -> FeedPlaybackPolicy {
         var policy = FeedPlaybackPolicy.preset(.shortFormFeed)
         policy.prefetch.aheadItemCount = 0

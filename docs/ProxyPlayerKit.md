@@ -37,6 +37,37 @@ player.play()
 
 Calling `pause()` sets AVPlayer's effective rate to zero without changing the preference. A later `play()` resumes with the selected rate. The preference also survives manifest reloads and AVPlayer item replacement, and setting it while paused does not start playback.
 
+## Compatible Clip Timelines
+
+Use `ProxyPlaybackClip` when a trusted packager guarantees that multiple finite
+media playlists share a decoder configuration. `load(clips:)` validates and
+installs one seekable proxy timeline; callers do not create an `AVQueuePlayer`
+or manage join buffers.
+
+```swift
+let clips = sourceURLs.enumerated().map { index, url in
+    ProxyPlaybackClip(
+        id: "chapter-\(index)",
+        playlistURL: url,
+        mediaSignature: signature
+    )
+}
+
+do {
+    try await player.load(clips: clips)
+    player.play()
+} catch let error as HLSClipStitchingError {
+    // The observable player.clipStitchingError contains the same typed reason.
+    present(error)
+}
+```
+
+Direct stitching accepts compatible single-media VOD only. It rejects master
+topology, live/LL-HLS state, interstitial metadata, ambiguous program dates,
+and incompatible signatures. Encrypted stitched playback uses the memory-only
+auxiliary key route; register key bytes by their
+`ProxyHLSPlayer.keyIdentifier(forKeyURI:)` value before loading.
+
 ## Feed-aware Buffering
 
 TikTok-style feeds want deterministic control over which videos stay warm. `FeedBufferController` coordinates every `ProxyHLSPlayer` in the stack and keeps the visible item playing while the next/previous neighbors retain a shallow buffer. The controller accepts a `FeedBufferPolicy` (max live/VOD neighbors, buffer targets per role, total memory budget, cooldown delay) and `FeedPlayerDescriptor` metadata, including an estimated peak memory cost, so it can prioritize specific rows.
