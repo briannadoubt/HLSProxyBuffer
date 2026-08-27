@@ -26,6 +26,14 @@ While iterating on simulator/device behavior, run the bundled CI script:
 
 This script executes SwiftPM tests and, when Xcode simulators are available, attempts basic iOS/tvOS builds to ensure the package schemes still compile.
 
+Run the release-mode proxy microbenchmarks with:
+
+```sh
+make benchmark
+```
+
+The benchmark exercises memory-cache hits, catalog lookups, and cached segment requests under serial and concurrent load. Treat the numbers as a local regression signal rather than a cross-machine performance contract.
+
 ## Code Samples
 
 ### SwiftUI + ProxyPlayerKit
@@ -113,7 +121,7 @@ Every dependency is injected (URL sessions, schedulers, routers) so units stay t
 - **Predictable buffering** – Target buffer/part counts, ABR policies, and LL-HLS knobs are configuration structs, so you can tune them per-market or per-device. This keeps startup latency low while avoiding stalls on congested networks.
 - **Bounded caching** – Memory and optional disk caches use byte budgets, URL/range-aware identities, mapped disk reads, and LRU eviction so large segments cannot turn an entry-count limit into unbounded memory.
 - **Horizontal observability** – Metrics endpoints match Prometheus-style scrapes and are safe to fan out to custom dashboards. With determinisitic key identifiers, you can correlate manifest, DRM, and segment health across fleets.
-- **Concurrency aware** – Actors isolate fetch, cache, playlist, and scheduler state; bounded task groups prefetch concurrently; duplicate origin reads are coalesced; and `AsyncStream` state feeds bridge the pipeline to Observation-backed UI.
+- **Concurrency aware** – Actors isolate asynchronous subsystem state; `@concurrent` keeps manifest work off caller actors; a dedicated executor contains blocking disk I/O; lightweight locks protect tiny synchronous hot-path state; bounded task groups prefetch concurrently; duplicate origin reads are coalesced; and `AsyncStream` state feeds bridge the pipeline to Observation-backed UI.
 - **Future-ready roadmap** – The modular split means you can swap the transport (e.g., QUIC) or plug in custom `SegmentPrefetchScheduler` strategies as you chase lower latency and higher throughput.
 
 ## Repo Layout
@@ -128,6 +136,7 @@ Tests/
   HLSCoreTests/
   LocalProxyTests/
   ProxyPlayerKitTests/
+Benchmarks/HLSProxyBenchmarks/ # Release-mode hot-path microbenchmarks
 Scripts/run-ci.sh      # Host + simulator smoke tests
 specs/ & docs/         # Reference designs, buffer policies, LL-HLS primer
 ```

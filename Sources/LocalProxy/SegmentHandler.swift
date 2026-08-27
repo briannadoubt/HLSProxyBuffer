@@ -1,5 +1,6 @@
 import Foundation
 import HLSCore
+import os
 
 public struct SegmentHandler: Sendable {
     private let cache: HLSSegmentCache
@@ -93,7 +94,7 @@ public struct SegmentHandler: Sendable {
 
         if request.method == .get,
            entry?.namespace == SegmentCatalog.Namespace.primary,
-           await servedTracker.markFirstDelivery(for: key),
+           servedTracker.markFirstDelivery(for: key),
            let payload = entry?.payload {
             switch payload {
             case .segment(let segment):
@@ -185,44 +186,48 @@ public struct SegmentHandler: Sendable {
     }
 }
 
-private actor SegmentLoadCoordinator {
+private final class SegmentLoadCoordinator: Sendable {
     private struct InFlight {
         let id: UUID
         let task: Task<Data, Error>
     }
 
-    private var inFlight: [String: InFlight] = [:]
+    private let inFlight = OSAllocatedUnfairLock(initialState: [String: InFlight]())
 
     func data(
         for key: String,
         operation: @escaping @Sendable () async throws -> Data
     ) async throws -> Data {
-        if let existing = inFlight[key] {
-            return try await existing.task.value
+        let entry = inFlight.withLock { inFlight -> InFlight in
+            if let existing = inFlight[key] {
+                return existing
+            }
+            let entry = InFlight(id: UUID(), task: Task { try await operation() })
+            inFlight[key] = entry
+            return entry
         }
-        let id = UUID()
-        let task = Task { try await operation() }
-        inFlight[key] = InFlight(id: id, task: task)
         do {
-            let data = try await task.value
-            remove(key: key, id: id)
+            let data = try await entry.task.value
+            remove(key: key, id: entry.id)
             return data
         } catch {
-            remove(key: key, id: id)
+            remove(key: key, id: entry.id)
             throw error
         }
     }
 
     private func remove(key: String, id: UUID) {
-        guard inFlight[key]?.id == id else { return }
-        inFlight.removeValue(forKey: key)
+        inFlight.withLock { inFlight in
+            guard inFlight[key]?.id == id else { return }
+            inFlight.removeValue(forKey: key)
+        }
     }
 }
 
-private actor ServedResourceTracker {
-    private var delivered: Set<String> = []
+private final class ServedResourceTracker: Sendable {
+    private let delivered = OSAllocatedUnfairLock(initialState: Set<String>())
 
     func markFirstDelivery(for key: String) -> Bool {
-        delivered.insert(key).inserted
+        delivered.withLock { $0.insert(key).inserted }
     }
 }

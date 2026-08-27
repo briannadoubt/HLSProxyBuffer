@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Dispatch)
+import Dispatch
+#endif
 
 public actor HLSSegmentCache: Caching {
     public struct Metrics: Sendable {
@@ -131,6 +134,14 @@ public actor HLSSegmentCache: Caching {
 }
 
 private actor DiskCacheStore {
+#if canImport(Dispatch)
+    nonisolated private let executor = DiskCacheExecutor()
+
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        executor.asUnownedSerialExecutor()
+    }
+#endif
+
     private let directory: URL
     private var capacityBytes: Int
     private let fileManager = FileManager()
@@ -234,3 +245,20 @@ private actor DiskCacheStore {
             .replacingOccurrences(of: "=", with: "-")
     }
 }
+
+#if canImport(Dispatch)
+private final class DiskCacheExecutor: SerialExecutor {
+    private let queue = DispatchQueue(
+        label: "com.hlsproxybuffer.disk-cache",
+        qos: .userInitiated
+    )
+
+    func enqueue(_ job: consuming ExecutorJob) {
+        let unownedJob = UnownedJob(job)
+        let executor = asUnownedSerialExecutor()
+        queue.async {
+            unownedJob.runSynchronously(on: executor)
+        }
+    }
+}
+#endif
