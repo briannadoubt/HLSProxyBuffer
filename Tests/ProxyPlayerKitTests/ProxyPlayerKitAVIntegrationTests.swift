@@ -70,6 +70,40 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         await player.stopAndWait()
     }
 
+    func testPlaybackRateSurvivesPauseAndItemReplacement() async throws {
+        let origin = try MockOriginServer()
+        try await origin.start()
+        try await waitForOriginReachability(origin.manifestURL)
+        defer { origin.stop() }
+
+        let configuration = ProxyPlayerConfiguration(
+            bufferPolicy: .init(targetBufferSeconds: 2, maxPrefetchSegments: 2, hideUntilBuffered: false),
+            allowInsecureManifests: true
+        )
+        let player = ProxyHLSPlayer(configuration: configuration)
+        player.setPlaybackRate(1.5)
+        player.play()
+
+        await player.load(from: origin.manifestURL)
+        let firstItem = try XCTUnwrap(player.player?.currentItem)
+        XCTAssertEqual(player.player?.defaultRate, 1.5)
+        XCTAssertEqual(player.playbackRate, 1.5)
+
+        player.pause()
+        XCTAssertEqual(player.player?.rate, 0)
+        XCTAssertEqual(player.playbackRate, 1.5)
+
+        await player.load(from: origin.manifestURL)
+        let replacementItem = try XCTUnwrap(player.player?.currentItem)
+        XCTAssertFalse(firstItem === replacementItem)
+        XCTAssertEqual(player.player?.defaultRate, 1.5)
+        XCTAssertEqual(player.player?.rate, 0)
+
+        player.play()
+        XCTAssertEqual(player.player?.defaultRate, 1.5)
+        await player.stopAndWait()
+    }
+
     func testSwitchesVariantsAfterFailures() async throws {
         let origin = AdaptiveMockOriginServer()
         try await origin.start()
