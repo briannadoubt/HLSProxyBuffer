@@ -13,7 +13,7 @@ import os
 public final class HLSFeedTelemetry {
     public struct Configuration: Equatable, Sendable {
         public static let defaultLatencyUpperBounds: [TimeInterval] = [
-            0.016, 0.033, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10,
+            0.016, 0.033, 0.05, 0.1, 0.25, 0.4, 0.5, 1, 2, 5, 10,
         ]
 
         public let latencyUpperBounds: [TimeInterval]

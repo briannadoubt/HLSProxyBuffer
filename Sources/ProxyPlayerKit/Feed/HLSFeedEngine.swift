@@ -99,6 +99,7 @@ protocol HLSFeedPlayerSession: AnyObject {
     func stateUpdates() -> AsyncStream<PlayerState>
     func load(from remoteURL: URL, quality: HLSRewriteConfiguration.QualityPolicy) async
     func load(clips: [ProxyPlaybackClip]) async throws
+    func prepareForImmediatePlayback() async -> Bool
     func play()
     func pause()
     func setPlaybackRate(_ rate: Float)
@@ -111,6 +112,32 @@ protocol HLSFeedPlayerSession: AnyObject {
 
 extension ProxyHLSPlayer: HLSFeedPlayerSession {
     var feedPlatformPlayer: AVPlayer? { player }
+
+    func prepareForImmediatePlayback() async -> Bool {
+        guard let player, let item = player.currentItem else { return false }
+        player.pause()
+
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while player.status == .unknown || item.status == .unknown {
+            guard clock.now < deadline else { return false }
+            do {
+                try await clock.sleep(for: .milliseconds(5))
+            } catch {
+                return false
+            }
+        }
+        guard player.status == .readyToPlay, item.status == .readyToPlay else {
+            return false
+        }
+
+        let rate = playbackRate
+        return await withTaskCancellationHandler {
+            await player.preroll(atRate: rate)
+        } onCancel: {
+            player.cancelPendingPrerolls()
+        }
+    }
 
     func restartPlayback() async {
         guard let player else { return }
@@ -714,6 +741,18 @@ public final class HLSFeedEngine {
                 guard self.owns(slot, token: token), !Task.isCancelled else {
                     self.recordStaleCompletion()
                     return
+                }
+                let isPreparedForImmediatePlayback = await slot.session
+                    .prepareForImmediatePlayback()
+                guard self.owns(slot, token: token), !Task.isCancelled else {
+                    self.recordStaleCompletion()
+                    return
+                }
+                guard isPreparedForImmediatePlayback else {
+                    throw HLSFeedEngineError.playerFailed(
+                        item.id,
+                        "AVPlayer could not prime its media pipeline"
+                    )
                 }
                 self.finishLoad(in: slot, token: token)
             } catch is CancellationError {
