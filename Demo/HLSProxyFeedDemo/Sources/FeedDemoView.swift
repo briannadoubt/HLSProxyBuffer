@@ -160,63 +160,81 @@ private struct FeedDemoQualificationView: View {
 }
 
 private struct FeedDemoShell: View {
+    @State private var isInspectorPresented = false
+
     let model: FeedDemoModel
 
     var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [Color(red: 0.035, green: 0.04, blue: 0.075), .black],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            .ignoresSafeArea()
-
-            VStack(spacing: 14) {
-                FeedDemoHeader(
-                    mode: model.selectedMode,
-                    status: model.status,
-                    isLowPowerModeEnabled: model.isLowPowerModeEnabled,
-                    onLowPowerChange: { enabled in
-                        Task { await model.setLowPowerModeEnabled(enabled) }
-                    }
+        GeometryReader { proxy in
+            ZStack {
+                LinearGradient(
+                    colors: [Color(red: 0.035, green: 0.04, blue: 0.075), .black],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
                 )
-                FeedDemoModeRail(
-                    selectedMode: model.selectedMode,
-                    onSelect: { mode in
-                        Task { await model.select(mode) }
-                    }
-                )
+                .ignoresSafeArea()
 
-                if let engine = model.engine {
-                    FeedDemoViewport(
-                        entries: model.entries,
-                        engine: engine,
-                        snapshot: model.engineSnapshot,
-                        focusedItemID: model.focusedItemID,
-                        layout: model.selectedMode.layout,
-                        onGeometryChange: model.observe,
-                        onFocusRequest: model.requestFocus
-                    )
-                } else {
-                    FeedDemoLoadingView(status: model.status)
-                }
-
-                if model.selectedMode == .liveDVR, model.engine != nil {
-                    FeedDemoLiveControls(
-                        onSeek: { seconds in
-                            Task { await model.seekBehindLiveEdge(seconds: seconds) }
-                        },
-                        onJumpToLive: {
-                            Task { await model.jumpToLive() }
+                VStack(spacing: 14) {
+                    FeedDemoHeader(
+                        mode: model.selectedMode,
+                        status: model.status,
+                        isLowPowerModeEnabled: model.isLowPowerModeEnabled,
+                        onLowPowerChange: { enabled in
+                            Task { await model.setLowPowerModeEnabled(enabled) }
                         }
                     )
-                }
+                    FeedDemoModeRail(
+                        selectedMode: model.selectedMode,
+                        onSelect: { mode in
+                            Task { await model.select(mode) }
+                        }
+                    )
+                    if let engine = model.engine {
+                        FeedDemoViewport(
+                            entries: model.entries,
+                            engine: engine,
+                            snapshot: model.engineSnapshot,
+                            focusedItemID: model.focusedItemID,
+                            layout: model.selectedMode.layout,
+                            onGeometryChange: model.observe,
+                            onFocusRequest: model.requestFocus
+                        )
+                    } else {
+                        FeedDemoLoadingView(status: model.status)
+                    }
 
-                FeedDemoMetricsGrid(metrics: model.metrics)
+                    if model.selectedMode == .liveDVR, model.engine != nil {
+                        FeedDemoLiveControls(
+                            onSeek: { seconds in
+                                Task { await model.seekBehindLiveEdge(seconds: seconds) }
+                            },
+                            onJumpToLive: {
+                                Task { await model.jumpToLive() }
+                            }
+                        )
+                    }
+
+                    FeedDemoMetricsGrid(metrics: model.metrics)
+                }
+                .padding()
+
             }
-            .padding()
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .overlay(alignment: .bottomTrailing) {
+                FeedDemoAnalyticsLauncher(
+                    inspector: model.analyticsInspector,
+                    onOpen: { isInspectorPresented = true }
+                )
+                .padding()
+            }
         }
         .tint(.mint)
+        .sheet(isPresented: $isInspectorPresented) {
+            FeedDemoAnalyticsInspectorView(
+                inspector: model.analyticsInspector,
+                onClose: { isInspectorPresented = false }
+            )
+        }
     }
 }
 

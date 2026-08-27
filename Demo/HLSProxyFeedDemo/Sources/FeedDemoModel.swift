@@ -29,6 +29,8 @@ enum FeedDemoStatus: Equatable, Sendable {
 @Observable
 @MainActor
 final class FeedDemoModel {
+    let analyticsInspector = FeedDemoAnalyticsInspector()
+
     private(set) var selectedMode: FeedDemoMode = .shortForm
     private(set) var status: FeedDemoStatus = .idle
     private(set) var entries: [FeedDemoEntry] = []
@@ -49,6 +51,11 @@ final class FeedDemoModel {
     @ObservationIgnored private var latestViewport = CGRect.zero
     @ObservationIgnored private var engineUpdatesTask: Task<Void, Never>?
     @ObservationIgnored private var telemetryTask: Task<Void, Never>?
+    @ObservationIgnored private var analyticsEventTask: Task<Void, Never>?
+    @ObservationIgnored private var analyticsSummaryTask: Task<Void, Never>?
+    @ObservationIgnored private var analyticsDeliverySnapshotTask: Task<Void, Never>?
+    @ObservationIgnored private var analyticsDelivery: PlaybackAnalyticsDelivery?
+    @ObservationIgnored private var analyticsSink: InMemoryPlaybackAnalyticsSink?
     @ObservationIgnored private var signalTask: Task<Void, Never>?
     @ObservationIgnored private var qualificationRequestedItemID: FeedItemID?
     @ObservationIgnored private var qualificationWarmupNavigationCount: Int?
@@ -162,12 +169,12 @@ final class FeedDemoModel {
         signalTask?.cancel()
         engineUpdatesTask?.cancel()
         telemetryTask?.cancel()
+        let observationTasks = [signalTask, engineUpdatesTask, telemetryTask].compactMap { $0 }
         signalTask = nil
         engineUpdatesTask = nil
         telemetryTask = nil
-        if let engine {
-            await engine.stop()
-        }
+        await stopCurrentEngineAndAnalytics()
+        for task in observationTasks { await task.value }
         self.engine = nil
         origin?.stop()
         origin = nil
@@ -187,9 +194,12 @@ final class FeedDemoModel {
         signalTask?.cancel()
         engineUpdatesTask?.cancel()
         telemetryTask?.cancel()
-        if let engine {
-            await engine.stop()
-        }
+        let observationTasks = [signalTask, engineUpdatesTask, telemetryTask].compactMap { $0 }
+        signalTask = nil
+        engineUpdatesTask = nil
+        telemetryTask = nil
+        await stopCurrentEngineAndAnalytics()
+        for task in observationTasks { await task.value }
 
         let nextEntries = FeedDemoCatalog.entries(for: mode, baseURL: baseURL)
         let policy = mode.policy
@@ -212,6 +222,7 @@ final class FeedDemoModel {
         signalBuilder = FeedDemoSignalBuilder(orderedItemIDs: nextEntries.map(\.id))
         latestFrames = [:]
         latestViewport = .zero
+        observeAnalytics(nextEngine, mode: mode)
         observeEngine(nextEngine, policy: policy)
 
         if let first = nextEntries.first {
@@ -250,6 +261,94 @@ final class FeedDemoModel {
                 self.refreshMetrics(engine: observedEngine, policy: policy)
             }
         }
+    }
+
+    private func observeAnalytics(_ observedEngine: HLSFeedEngine, mode: FeedDemoMode) {
+        analyticsInspector.reset(
+            for: mode,
+            timelineSnapshot: observedEngine.analytics.snapshot
+        )
+        let sink = InMemoryPlaybackAnalyticsSink(configuration: .init(
+            maximumRecordCount: 256,
+            maximumBatchCount: 64
+        ))
+        let delivery = PlaybackAnalyticsDelivery(
+            sink: sink,
+            configuration: .init(
+                memoryBudgetBytes: 128 * 1_024,
+                maximumQueuedRecordCount: 128,
+                maximumBatchBytes: 32 * 1_024,
+                maximumBatchRecordCount: 32,
+                flushInterval: .milliseconds(250),
+                shutdownFlushTimeout: .seconds(2)
+            )
+        )
+        analyticsSink = sink
+        analyticsDelivery = delivery
+
+        analyticsEventTask = Task { @MainActor [weak self, weak observedEngine] in
+            guard let observedEngine else { return }
+            for await event in observedEngine.analytics.events {
+                guard !Task.isCancelled,
+                      let self,
+                      self.engine === observedEngine
+                else {
+                    return
+                }
+                self.analyticsInspector.record(
+                    event,
+                    timelineSnapshot: observedEngine.analytics.snapshot
+                )
+                await delivery.record(event)
+            }
+        }
+        analyticsSummaryTask = Task { @MainActor [weak self, weak observedEngine] in
+            guard let observedEngine else { return }
+            for await summary in observedEngine.analytics.summaries {
+                guard !Task.isCancelled,
+                      let self,
+                      self.engine === observedEngine
+                else {
+                    return
+                }
+                self.analyticsInspector.record(
+                    summary,
+                    timelineSnapshot: observedEngine.analytics.snapshot
+                )
+                await delivery.record(summary)
+            }
+        }
+        analyticsDeliverySnapshotTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.analyticsInspector.update(delivery: await delivery.snapshot)
+            for await snapshot in delivery.snapshots {
+                guard !Task.isCancelled else { return }
+                self.analyticsInspector.update(delivery: snapshot)
+            }
+        }
+    }
+
+    private func stopCurrentEngineAndAnalytics() async {
+        if let engine {
+            await engine.stop()
+        }
+
+        let eventTask = analyticsEventTask
+        let summaryTask = analyticsSummaryTask
+        analyticsEventTask = nil
+        analyticsSummaryTask = nil
+        await eventTask?.value
+        await summaryTask?.value
+
+        let deliverySnapshotTask = analyticsDeliverySnapshotTask
+        analyticsDeliverySnapshotTask = nil
+        if let analyticsDelivery {
+            _ = await analyticsDelivery.shutdown()
+            analyticsInspector.update(delivery: await analyticsDelivery.snapshot)
+        }
+        await deliverySnapshotTask?.value
+        analyticsDelivery = nil
+        analyticsSink = nil
     }
 
     private func submitSignal(requestedFocus: FeedItemID?) {

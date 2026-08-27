@@ -48,6 +48,49 @@ The authorization provider runs once per request and returns the complete
 rejected. The value is applied after payload encoding and can never enter the
 encoded batch.
 
+## Automatic feed inspector
+
+The `HLSProxyFeedDemo` app includes a live playback analytics inspector for
+every demo mode: short form, paged, continuous/windowed, long form, live/DVR,
+offline first, looping, and stitched playback. Open the floating **Inspect**
+button at the lower-right of the viewport to see the bounded current-session
+timeline, terminal summary, delivery
+queue/backpressure health, signal counts split across AVFoundation,
+proxy/origin, feed-engine, and exporter layers, plus a canonical sanitized JSON
+Lines preview. Stable `analytics-*` accessibility identifiers make the same
+surface available to UI qualification.
+
+The demo attaches exactly one sink to the engine's public typed streams. The
+engine still owns every `AVPlayer`, proxy listener, cache, and buffer:
+
+```swift
+let sink = InMemoryPlaybackAnalyticsSink()
+let delivery = PlaybackAnalyticsDelivery(sink: sink)
+
+let eventTask = Task {
+    for await event in engine.analytics.events {
+        await delivery.record(event)
+    }
+}
+let summaryTask = Task {
+    for await summary in engine.analytics.summaries {
+        await delivery.record(summary)
+    }
+}
+
+// On teardown, stop the engine so its final summaries are emitted, wait for
+// both stream tasks, then perform the delivery actor's bounded final flush.
+await engine.stop()
+await eventTask.value
+await summaryTask.value
+await delivery.shutdown()
+```
+
+The inspector renders only typed source/lifecycle/measurement values and the
+canonical exporter codec. It never reads or displays manifest URLs, origin
+addresses, request/response headers, cookies, authorization values, or player
+resource objects.
+
 ## Ingestion contract
 
 HTTPS requests use `POST`, `Content-Type: application/json`, `Accept:

@@ -65,6 +65,85 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
     }
 
     @MainActor
+    func testAnalyticsInspectorShowsTypedSanitizedPublicPipeline() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let inspectorButton = app.buttons["analytics-inspector-button"]
+        XCTAssertTrue(inspectorButton.waitForExistence(timeout: 10))
+        inspectorButton.tap()
+
+        let inspector = app.descendants(matching: .any)["analytics-inspector"]
+        XCTAssertTrue(inspector.waitForExistence(timeout: 5))
+        let mode = app.descendants(matching: .any)["analytics-mode"]
+        XCTAssertTrue(waitForValue("shortForm", in: mode, timeout: 5))
+        let eventCount = app.descendants(matching: .any)["analytics-event-count"]
+        XCTAssertTrue(waitForValueMatching(
+            NSPredicate(format: "value != %@", "0"),
+            in: eventCount,
+            timeout: 10
+        ))
+
+        for layer in ["avFoundation", "proxyOrigin", "engine", "exporter"] {
+            XCTAssertTrue(
+                scrollToExistence(
+                    app.descendants(matching: .any)["analytics-layer-\(layer)"],
+                    in: app
+                ),
+                layer
+            )
+        }
+        XCTAssertTrue(
+            scrollToExistence(
+                app.descendants(matching: .any)["analytics-summary-status"],
+                in: app
+            )
+        )
+        XCTAssertTrue(
+            scrollToExistence(
+                app.descendants(matching: .any)["analytics-delivery-health"],
+                in: app
+            )
+        )
+
+        let previewElement = app.descendants(matching: .any)["analytics-export-preview"]
+        XCTAssertTrue(scrollToExistence(previewElement, in: app))
+        XCTAssertTrue(waitForValueMatching(
+            NSPredicate(format: "value != %@", "pending"),
+            in: previewElement,
+            timeout: 10
+        ))
+        let preview = previewElement.value as? String ?? previewElement.label
+        for forbidden in [
+            "http://", "https://", "authorization", "cookie", "bearer", "token",
+            "requestHeaders", "responseHeaders", "userIdentifier", "ipAddress",
+        ] {
+            XCTAssertFalse(
+                preview.localizedCaseInsensitiveContains(forbidden),
+                "Inspector leaked forbidden text: \(forbidden)"
+            )
+        }
+
+        app.buttons["analytics-inspector-close"].tap()
+        XCTAssertFalse(inspector.waitForExistence(timeout: 2))
+    }
+
+    @MainActor
+    private func scrollToExistence(
+        _ element: XCUIElement,
+        in app: XCUIApplication,
+        maximumSwipes: Int = 12
+    ) -> Bool {
+        for _ in 0..<maximumSwipes {
+            if element.exists {
+                return true
+            }
+            app.swipeUp()
+        }
+        return element.exists
+    }
+
+    @MainActor
     private func waitForValue(
         _ expectedValue: String,
         in element: XCUIElement,
