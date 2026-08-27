@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "signatures": {
+    "avcFMP4": {
+      "container": "fragmentedMP4",
+      "codecs": ["avc1.640028", "mp4a.40.2"],
+      "tracks": ["video:avc1.640028", "audio:mp4a.40.2:stereo"],
+      "videoRange": "SDR",
+      "independentSegments": true
+    },
+    "hevcFMP4": {
+      "container": "fragmentedMP4",
+      "codecs": ["hvc1.2.4.L123.B0", "mp4a.40.2"],
+      "tracks": ["video:hvc1.2.4.L123.B0", "audio:mp4a.40.2:stereo"],
+      "videoRange": "SDR",
+      "independentSegments": true
+    }
+  },
+  "cases": [
+    {
+      "name": "compatible-fmp4",
+      "inputs": ["compatible-main.m3u8", "compatible-insert.m3u8"],
+      "signatures": ["avcFMP4", "avcFMP4"],
+      "result": "success",
+      "segmentSequences": [0, 1, 2, 3],
+      "discontinuityBeforeSequences": [2],
+      "materializedIVForOriginalSequence100": "0x00000000000000000000000000000064",
+      "resourceExtensions": ["m4s", "mp4"]
+    },
+    {
+      "name": "codec-mismatch",
+      "inputs": ["compatible-main.m3u8", "incompatible-codec.m3u8"],
+      "signatures": ["avcFMP4", "hevcFMP4"],
+      "result": "incompatibleMediaSignature"
+    },
+    {
+      "name": "low-latency-live",
+      "inputs": ["low-latency-live.m3u8"],
+      "signatures": ["avcFMP4"],
+      "result": "unsupportedLiveOrLowLatencyPlaylist"
+    },
+    {
+      "name": "interstitial-metadata",
+      "inputs": ["ad-interstitial.m3u8"],
+      "signatures": ["avcFMP4"],
+      "result": "interstitialMetadataRequiresInterstitialPath"
+    },
+    {
+      "name": "program-date-overlap",
+      "inputs": ["compatible-main.m3u8", "overlapping-program-date-time.m3u8"],
+      "signatures": ["avcFMP4", "avcFMP4"],
+      "result": "ambiguousProgramDateTime"
+    }
+  ]
+}
