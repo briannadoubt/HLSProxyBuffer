@@ -255,7 +255,11 @@ public actor AdaptiveVariantController {
         lastSwitchDate = now
         let decision = Decision(action: .switchVariant, targetVariant: target, reason: reason, timestamp: now)
         lastDecisionValue = decision
-        logger.log("ABR switching to \(target.url.absoluteString) reason=\(reason)", category: .player)
+        logger.log(
+            "ABR switching to \(target.url.absoluteString) reason=\(reason)",
+            level: .info,
+            category: .player
+        )
         return decision
     }
 

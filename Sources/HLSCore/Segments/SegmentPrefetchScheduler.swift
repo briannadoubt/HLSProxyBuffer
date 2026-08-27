@@ -340,6 +340,7 @@ public actor SegmentPrefetchScheduler {
                     failures += 1
                     logger.log(
                         "Prefetch failed for sequence \(result.item.sequence): \(result.errorDescription ?? "unknown error")",
+                        level: .warning,
                         category: .scheduler
                     )
                 }

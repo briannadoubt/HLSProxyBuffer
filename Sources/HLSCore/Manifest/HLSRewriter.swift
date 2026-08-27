@@ -294,6 +294,7 @@ public struct HLSRewriter: Sendable {
         if config.hideUntilBuffered && !pendingSegments.isEmpty {
             logger.log(
                 "Hiding \(pendingSegments.count) of \(mediaPlaylist.segments.count) segments until buffered.",
+                level: .debug,
                 category: .rewriter
             )
         }

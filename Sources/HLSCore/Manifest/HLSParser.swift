@@ -286,6 +286,7 @@ public struct HLSParser: Sendable {
 
         logger.log(
             "Parsed manifest – kind: \(kind), variants: \(variants.count), renditions: \(renditions.count), segments: \(segments.count)",
+            level: .debug,
             category: .parser
         )
 
