@@ -26,6 +26,17 @@ struct StreamView: View {
 
 Imperative consumers can use `player.stateUpdates()`. It returns a bounded `AsyncStream<PlayerState>` that immediately yields the current snapshot and then delivers ordered updates without polling. Cancel the consuming task when its owner disappears.
 
+## Playback Rate
+
+`playbackRate` is observable and records the preferred forward-playback speed. Use `setPlaybackRate(_:)` to select a rate; values are clamped to `ProxyHLSPlayer.supportedPlaybackRateRange` (`0.5...2.0`), and `NaN` restores normal speed.
+
+```swift
+player.setPlaybackRate(1.5)
+player.play()
+```
+
+Calling `pause()` sets AVPlayer's effective rate to zero without changing the preference. A later `play()` resumes with the selected rate. The preference also survives manifest reloads and AVPlayer item replacement, and setting it while paused does not start playback.
+
 ## Feed-aware Buffering
 
 TikTok-style feeds want deterministic control over which videos stay warm. `FeedBufferController` coordinates every `ProxyHLSPlayer` in the stack and keeps the visible item playing while the next/previous neighbors retain a shallow buffer. The controller accepts a `FeedBufferPolicy` (max live/VOD neighbors, buffer targets per role, total memory budget, cooldown delay) and `FeedPlayerDescriptor` metadata, including an estimated peak memory cost, so it can prioritize specific rows.

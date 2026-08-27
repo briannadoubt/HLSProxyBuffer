@@ -48,6 +48,9 @@ public struct AuxiliaryRenditionRegistration: Sendable, Equatable {
 @Observable
 @MainActor
 public final class ProxyHLSPlayer {
+    /// Playback rates accepted by `setPlaybackRate(_:)`.
+    public nonisolated static let supportedPlaybackRateRange: ClosedRange<Float> = 0.5...2.0
+
     public nonisolated static func keyIdentifier(forKeyURI uri: URL) -> String {
         digest(for: uri.absoluteString)
     }
@@ -123,6 +126,9 @@ public final class ProxyHLSPlayer {
     public private(set) var subtitleRenditions: [HLSManifest.Rendition] = []
     public private(set) var activeAudioRendition: HLSManifest.Rendition?
     public private(set) var activeSubtitleRendition: HLSManifest.Rendition?
+
+    /// The preferred forward-playback rate. Pausing does not reset this value.
+    public private(set) var playbackRate: Float = 1.0
 
     @ObservationIgnored private let logger: Logger
     @ObservationIgnored private let manifestProcessor = ManifestProcessor()
@@ -294,12 +300,28 @@ public final class ProxyHLSPlayer {
 
     public func play() {
         shouldPlayWhenReady = true
-        player?.play()
+        guard let player else { return }
+        player.defaultRate = playbackRate
+        player.play()
     }
 
     public func pause() {
         shouldPlayWhenReady = false
         player?.pause()
+    }
+
+    /// Selects the forward-playback rate used by the current item and future replacements.
+    ///
+    /// Values outside `supportedPlaybackRateRange` are clamped. `NaN` resets the
+    /// preference to normal speed. Changing the preference while paused does not
+    /// start playback; the next call to `play()` uses the selected rate.
+    public func setPlaybackRate(_ rate: Float) {
+        playbackRate = Self.normalizedPlaybackRate(rate)
+        guard let player else { return }
+        player.defaultRate = playbackRate
+        if shouldPlayWhenReady {
+            player.play()
+        }
     }
 
     public func stop() {
@@ -523,11 +545,20 @@ public final class ProxyHLSPlayer {
         } else {
             player = AVPlayer(url: url)
         }
+        player?.defaultRate = playbackRate
         installPlaybackTimeObserver()
         applyActiveRenditionsToPlayer()
         if shouldPlayWhenReady {
             player?.play()
         }
+    }
+
+    private nonisolated static func normalizedPlaybackRate(_ rate: Float) -> Float {
+        guard !rate.isNaN else { return 1.0 }
+        return min(
+            max(rate, supportedPlaybackRateRange.lowerBound),
+            supportedPlaybackRateRange.upperBound
+        )
     }
 
     private func rebuildPlaybackTimeline() {
@@ -1795,10 +1826,23 @@ public final class ProxyHLSPlayer {
 }
 #else
 public final class ProxyHLSPlayer {
+    public static let supportedPlaybackRateRange: ClosedRange<Float> = 0.5...2.0
+    public private(set) var playbackRate: Float = 1.0
+
     public init() {}
     public func load(from remoteURL: URL, quality: HLSRewriteConfiguration.QualityPolicy = .automatic) async {}
     public func play() {}
     public func pause() {}
+    public func setPlaybackRate(_ rate: Float) {
+        guard !rate.isNaN else {
+            playbackRate = 1.0
+            return
+        }
+        playbackRate = min(
+            max(rate, Self.supportedPlaybackRateRange.lowerBound),
+            Self.supportedPlaybackRateRange.upperBound
+        )
+    }
     public func stop() {}
 
     public nonisolated static func keyIdentifier(forKeyURI uri: URL) -> String {

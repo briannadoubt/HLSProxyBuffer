@@ -9,6 +9,30 @@ import Network
 
 @MainActor
 final class ProxyPlayerKitObservationTests: XCTestCase {
+    func testPlaybackRateIsObservableAndValidated() async {
+        let player = ProxyHLSPlayer()
+        let expectation = expectation(description: "Playback rate observation fired")
+
+        withObservationTracking {
+            _ = player.playbackRate
+        } onChange: {
+            expectation.fulfill()
+        }
+
+        player.setPlaybackRate(1.5)
+        await fulfillment(of: [expectation], timeout: 1)
+        XCTAssertEqual(player.playbackRate, 1.5)
+
+        player.setPlaybackRate(10)
+        XCTAssertEqual(player.playbackRate, ProxyHLSPlayer.supportedPlaybackRateRange.upperBound)
+
+        player.setPlaybackRate(-1)
+        XCTAssertEqual(player.playbackRate, ProxyHLSPlayer.supportedPlaybackRateRange.lowerBound)
+
+        player.setPlaybackRate(.nan)
+        XCTAssertEqual(player.playbackRate, 1.0)
+    }
+
     func testStateChangesTriggerObservationCallbacks() async throws {
         let origin = try MockOriginServer()
         try await origin.start()
