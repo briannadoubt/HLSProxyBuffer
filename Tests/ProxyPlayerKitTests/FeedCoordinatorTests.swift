@@ -64,6 +64,7 @@ final class FeedCoordinatorTests: XCTestCase {
         XCTAssertEqual(revisited.preparationCacheReuseCount, 1)
         XCTAssertEqual(revisited.readyItemIDs, [items[0].id])
         XCTAssertEqual(preparedGeneration(in: revisited, itemID: items[0].id), .init(rawValue: 3))
+        XCTAssertEqual(preparedItem(in: revisited, itemID: items[0].id)?.isPreparationReuse, true)
     }
 
     func testLowPowerModeAppliesPreparationAndLeadingSegmentCaps() async throws {
@@ -166,6 +167,9 @@ final class FeedCoordinatorTests: XCTestCase {
         let cold = try await firstBackend.prepare(request)
         XCTAssertEqual(cold.leadingSegmentCount, 1)
         XCTAssertEqual(cold.originFetchCount, 3, "manifest, initialization map, and media segment")
+        XCTAssertEqual(cold.cacheHitByteCount, 0)
+        XCTAssertGreaterThan(cold.originFetchByteCount, cold.preparedByteCount)
+        XCTAssertFalse(cold.isPreparationReuse)
         XCTAssertEqual(
             origin.timelineSnapshot().filter {
                 $0.path == "/short-a/segment-000.m4s" && $0.kind == .requestStarted
@@ -184,6 +188,9 @@ final class FeedCoordinatorTests: XCTestCase {
         ))
         XCTAssertEqual(memoryWarm.originFetchCount, 0)
         XCTAssertEqual(memoryWarm.cacheHitCount, 3)
+        XCTAssertEqual(memoryWarm.originFetchByteCount, 0)
+        XCTAssertEqual(memoryWarm.cacheHitByteCount, cold.originFetchByteCount)
+        XCTAssertFalse(memoryWarm.isPreparationReuse)
         XCTAssertTrue(origin.timelineSnapshot().isEmpty)
 
         let secondBackend = try HLSFeedPreparationBackend(
@@ -199,6 +206,9 @@ final class FeedCoordinatorTests: XCTestCase {
         ))
         XCTAssertEqual(diskWarm.originFetchCount, 0)
         XCTAssertEqual(diskWarm.cacheHitCount, 3)
+        XCTAssertEqual(diskWarm.originFetchByteCount, 0)
+        XCTAssertEqual(diskWarm.cacheHitByteCount, cold.originFetchByteCount)
+        XCTAssertFalse(diskWarm.isPreparationReuse)
         XCTAssertTrue(origin.timelineSnapshot().isEmpty)
         let diskMetrics = await secondBackend.cacheMetrics()
         XCTAssertGreaterThan(diskMetrics.diskBytes, 0)
@@ -405,12 +415,19 @@ private extension FeedCoordinatorTests {
         in snapshot: FeedCoordinatorSnapshot,
         itemID: FeedItemID
     ) -> FeedNavigationGeneration? {
+        preparedItem(in: snapshot, itemID: itemID)?.generation
+    }
+
+    func preparedItem(
+        in snapshot: FeedCoordinatorSnapshot,
+        itemID: FeedItemID
+    ) -> FeedPreparedItem? {
         guard let entry = snapshot.entries.first(where: { $0.itemID == itemID }),
               case .ready(let value) = entry.status
         else {
             return nil
         }
-        return value.generation
+        return value
     }
 
     func waitUntil(

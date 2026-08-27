@@ -118,6 +118,29 @@ consumers. Use `engine.setPlaybackRate(_:for:)`, `jumpToLive(for:)`, and
 `seek(secondsBehindLiveEdge:for:)` for typed controls, then `await engine.stop()`
 when the feed session ends.
 
+Feed quality and resource budgets are available without registering a logging
+callback or retaining per-item history:
+
+```swift
+let current = engine.telemetry.snapshot
+
+for await event in engine.telemetry.events() {
+    consume(event) // bounded newest-event delivery
+}
+
+let stressArtifact = try engine.telemetry.machineReadableSummary()
+```
+
+The Observation snapshot and deterministic JSON include readiness latency,
+stall duration, cache hit rate and origin bytes avoided, cancellation latency
+and outcome, handoff readiness/success, current and maximum memory/disk bytes,
+and player/proxy pool occupancy. Aggregates use a fixed 12-path matrix for
+cold/warm × focused/predicted × VOD/live/stitched. Histograms, subscriber count,
+and each subscriber's event buffer are all capped. Slow consumers drop their
+oldest pending event and can detect the loss through `droppedEventCount`;
+additional consumers beyond the configured cap are rejected and counted.
+Instruments receives matching signposts for lifecycle and resource correlation.
+
 The engine accepts ordinary VOD/live streams and
 `.compatibleClips([ProxyPlaybackClip])`. The legacy untyped `.clips([URL])`
 source remains preparation-only because it lacks the decoder compatibility

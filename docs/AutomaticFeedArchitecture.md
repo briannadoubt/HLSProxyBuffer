@@ -192,18 +192,36 @@ The engine records bounded aggregates and a lossy newest-event stream for:
 
 | Signal | Start | End / value |
 | --- | --- | --- |
-| First-frame latency | focus generation accepted | first decoded frame displayed |
+| First-frame readiness | focus generation accepted | ready destination is atomically activated |
 | Stall | playback was expected to advance | time control resumes or focus changes |
 | Cache hit rate | cache lookup | memory, disk, miss, expired, or rejected |
 | Memory / disk | residency mutation | bytes and entries after mutation |
 | Cancellation | replacement plan requests stop | task finishes or misses deadline |
 | Handoff | destination selected | ready lease becomes focused or fails |
 
-Dimensions are bounded workload/source classes (`focused`, `predicted`, `cold`,
-`warm`, `vod`, `live`, `stitched`), never arbitrary item or URL cardinality.
-HLS-18 adds fixed-memory distributions, counters, Observation snapshots,
-`AsyncStream` events with an explicit drop policy, signposts, and a
-machine-readable run summary.
+Dimensions are the fixed Cartesian product of `focused`/`predicted`,
+`cold`/`warm`, and `vod`/`live`/`stitched`; item IDs and URLs are never metric
+keys. `HLSFeedTelemetry` owns exactly 12 path aggregates and three histograms
+per path. Each histogram has at most 33 non-cumulative buckets (32 configured
+bounds plus infinity). Event delivery is additionally capped at eight
+subscribers with 256 newest events each. Therefore aggregate and delivery
+storage has a documented constant upper bound independent of navigation or
+event count.
+
+`engine.telemetry.snapshot` is the Observation-native aggregate. The same
+typed lifecycle is available through `engine.telemetry.events()`, whose
+`.bufferingNewest` policy discards the oldest pending value for a slow
+subscriber and increments `droppedEventCount`. Instruments signposts mark
+first-frame readiness, stalls, cancellations, handoffs, and resource samples.
+Every stress runner must persist or attach
+`try engine.telemetry.machineReadableSummary()`; the deterministic, sorted-key
+JSON snapshot includes the exact storage bound and dropped/rejected consumer
+counts as well as distributions, counters, and resource high-water marks.
+
+The readiness timestamp is deliberately measured at the engine ownership
+boundary: the existing ready player item becomes focused and `play()` is
+issued. A UI may layer pixel-present timing on top of the typed event stream,
+but renderer scheduling is not mislabeled as proxy or player preparation.
 
 ## Delivery graph and gates
 
@@ -216,7 +234,7 @@ machine-readable run summary.
 - HLS-16: bounded predictive coordination and obsolete-work cancellation.
 - HLS-17: pooled resources, seamless handoff, and the simple public API
   (implemented).
-- HLS-18: feed-quality and resource instrumentation.
+- HLS-18: feed-quality and resource instrumentation (implemented).
 - HLS-19: SwiftUI demo proving every policy and source class.
 - HLS-20: release qualification: 500 core transitions, 100 rapid UI
   navigations, p95 readiness/first-frame gates, at least 90% revisit cache hits,
@@ -232,14 +250,19 @@ generation-correct warm reuse, low-power caps, typed catalog failures, segment
 retry, per-origin serialization, and both memory and cross-backend disk reuse.
 The stress suite drives all seven standard traces (532 observations) through
 the actor and asserts item, byte, and preparation-task high-water marks at every
-step. The engine suite adds a deterministic 500-transition ownership run,
-generation-stale completion rejection, failure teardown, looping/live/stitched
-composition, and a real AVPlayer fixture handoff that proves the warmed player
-and current item are unchanged when focus transfers.
+step. The engine suite adds a deterministic 500-transition ownership run that
+round-trips its machine-readable telemetry summary, generation-stale completion
+rejection, failure teardown, looping/live/stitched composition, and a real
+AVPlayer fixture handoff that proves the warmed player and current item are
+unchanged when focus transfers. The telemetry suite drives 100,000 events
+through the fixed histograms and verifies exact counters, quantiles, cache-byte
+accounting, resource high-water marks, subscriber rejection, and slow-consumer
+drops.
 
 ```sh
 swift test --filter FeedCoordinator
 swift test --filter HLSFeedEngineTests
+swift test --filter HLSFeedTelemetryTests
 RUN_PROXY_AV_TESTS=1 swift test --filter HLSFeedEngineAVIntegrationTests
 ```
 
