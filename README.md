@@ -9,6 +9,7 @@ HLSProxyBuffer turns ordered HLS sources plus framework-independent viewport sig
 - **Low-latency HLS** – LL-HLS metadata (`#EXT-X-PART`, preload hints, blocking reloads, delta updates, and rendition reports) is parsed, rewritten, and cached through localhost. Actual glass-to-glass latency still depends on the encoder, origin, player, and configured hold-back. Full guidance lives in `docs/LowLatencyHLS.md`.
 - **Deterministic ABR & caching** – Throughput estimators, rewrite policies, and LRU caches collaborate inside `HLSCore` so you know exactly when and why variants change.
 - **Batteries-included observability** – `/debug/status` and `/metrics` expose buffer depth, LL-HLS readiness, blocking reload state, cache eviction counts, and per-segment timings.
+- **Fleet-safe analytics** – `PlaybackAnalytics` provides versioned `Sendable`/`Codable` events, opaque correlation, monotonic timing, deterministic JSON, and caller dimensions that can only emit reviewed values or `other`. See [`docs/PlaybackAnalytics.md`](docs/PlaybackAnalytics.md).
 - **Drop-in player surfaces** – `ProxyPlayerKit` provides `ProxyHLSPlayer`, SwiftUI views, and diagnostics hooks so you can wire policies into your UI within minutes.
 - **Automatic feeds** – `HLSFeedEngine` accepts visibility, focus, velocity, and destination predictions; keeps only a bounded working set warm; and hands the engine-owned player to `HLSFeedVideo`.
 
