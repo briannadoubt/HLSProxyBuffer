@@ -67,7 +67,7 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         let (segmentData, _) = try await URLSession.shared.data(from: segmentURL)
         XCTAssertEqual(segmentData.count, 1_024)
 
-        player.stop()
+        await player.stopAndWait()
     }
 
     func testSwitchesVariantsAfterFailures() async throws {
@@ -139,7 +139,7 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         XCTAssertFalse(segmentData.isEmpty)
         XCTAssertTrue(origin.didServeLowVariant())
 
-        player.stop()
+        await player.stopAndWait()
     }
 
     func testExposesAlternateRenditionsAndSelection() async throws {
@@ -194,7 +194,49 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
 
         XCTAssertEqual(payload["active_audio_rendition"] as? String, "English")
 
-        player.stop()
+        await player.stopAndWait()
+    }
+
+    func testSupplementalMasterResourcesStayOnLoopback() async throws {
+        let origin = AdaptiveMockOriginServer(includeSupplementalResources: true)
+        try await origin.start()
+        try await waitForOriginReachability(origin.manifestURL)
+        defer { origin.stop() }
+        let player = ProxyHLSPlayer(configuration: .init(allowInsecureManifests: true))
+
+        await player.load(from: origin.manifestURL)
+        let masterURL = try XCTUnwrap(player.playlistURL())
+        let master = String(decoding: try await URLSession.shared.data(from: masterURL).0, as: UTF8.self)
+        XCTAssertFalse(master.contains("EXT-X-CONTENT-STEERING"))
+        XCTAssertFalse(master.contains(origin.manifestURL.deletingLastPathComponent().absoluteString))
+
+        let iframeLine = try XCTUnwrap(master.split(separator: "\n").first {
+            $0.hasPrefix("#EXT-X-I-FRAME-STREAM-INF:")
+        })
+        let metadataLine = try XCTUnwrap(master.split(separator: "\n").first {
+            $0.hasPrefix("#EXT-X-SESSION-DATA:")
+        })
+        let iframeURL = try XCTUnwrap(quotedURI(in: String(iframeLine)))
+        let metadataURL = try XCTUnwrap(quotedURI(in: String(metadataLine)))
+        XCTAssertEqual(iframeURL.host, "127.0.0.1")
+        XCTAssertEqual(metadataURL.host, "127.0.0.1")
+
+        let (iframeData, iframeResponse) = try await URLSession.shared.data(from: iframeURL)
+        let iframePlaylist = String(decoding: iframeData, as: UTF8.self)
+        XCTAssertTrue(
+            iframePlaylist.contains("/segments/"),
+            "Expected rewritten I-frame playlist; URL=\(iframeURL), status=\((iframeResponse as? HTTPURLResponse)?.statusCode ?? -1), body=\(iframePlaylist), master=\(master)"
+        )
+        XCTAssertFalse(iframePlaylist.contains("/iframe-1.m4s"))
+        var metadataRequest = URLRequest(url: metadataURL)
+        metadataRequest.cachePolicy = .reloadIgnoringLocalCacheData
+        let (metadata, metadataResponse) = try await URLSession.shared.data(for: metadataRequest)
+        XCTAssertEqual(
+            String(decoding: metadata, as: UTF8.self),
+            "{\"title\":\"fixture\"}",
+            "URL=\(metadataURL), status=\((metadataResponse as? HTTPURLResponse)?.statusCode ?? -1), master=\(master)"
+        )
+        await player.stopAndWait()
     }
 
     func testRewritesKeysInProxyMode() async throws {
@@ -275,7 +317,7 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
 
         XCTAssertTrue(keys.contains { ($0["uri_hash"] as? String) == keyIdentifier })
 
-        player.stop()
+        await player.stopAndWait()
     }
 
     private func waitForRenditions(_ player: ProxyHLSPlayer) async throws {
@@ -315,6 +357,12 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         return segmentURL
     }
 
+}
+
+private func quotedURI(in tag: String) -> URL? {
+    guard let start = tag.range(of: "URI=\"")?.upperBound,
+          let end = tag[start...].firstIndex(of: "\"") else { return nil }
+    return URL(string: String(tag[start..<end]))
 }
 
 private func waitForOriginReachability(_ url: URL, timeout: TimeInterval = 5) async throws {

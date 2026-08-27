@@ -43,6 +43,21 @@ final class HLSManifestFetcherTests: XCTestCase {
         }
     }
 
+    func testClientErrorDoesNotRetry() async {
+        MockURLProtocol.enqueue(data: Data(), statusCode: 404)
+        let fetcher = makeFetcher(retryPolicy: .init(maxAttempts: 4, retryDelay: 0))
+
+        do {
+            _ = try await fetcher.fetchManifest(from: URL(string: "https://example.com/missing.m3u8")!)
+            XCTFail("Expected a client error")
+        } catch {
+            guard case HLSManifestFetcher.FetchError.httpStatus(404) = error else {
+                return XCTFail("Unexpected error \(error)")
+            }
+        }
+        XCTAssertEqual(MockURLProtocol.requestCount, 1)
+    }
+
     private func makeFetcher(
         retryPolicy: HLSManifestFetcher.RetryPolicy = .default
     ) -> HLSManifestFetcher {

@@ -78,10 +78,10 @@ Converts raw playlist text into strongly typed objects.
 
 **Parser capabilities:**
 
-* Parse EXTINF durations.
-* Parse EXT-X-STREAM-INF variant descriptions.
-* Parse both relative and absolute URLs.
-* Ignore unsupported tags safely.
+* Parse master, media, encryption, alternate-rendition, byte-range, and LL-HLS tags.
+* Resolve relative URLs and `EXT-X-DEFINE` variables.
+* Preserve playlist/segment metadata and unknown attributes across rewrites.
+* Reject malformed headers, ranges, and dangling URI-bearing tags.
 
 ---
 
@@ -96,7 +96,7 @@ Controls how the manifest is altered before being served to AVPlayer.
 * Rewrite URLs to local proxy form (e.g., `http://127.0.0.1:PORT/...`).
 * Hide segments until buffered.
 * Inject artificial bandwidth values.
-* Merge multiple short videos into a virtual playlist if needed.
+* Preserve encryption transitions, maps, metadata, parts, hints, and delta state.
 
 **Policies:**
 
@@ -128,9 +128,9 @@ Stores fetched segments for serving through the proxy.
 
 **Requirements:**
 
-* In-memory LRU cache (initially simple dictionary).
-* Optional disk cache layer.
-* Thread-safe locking.
+* Byte-bounded in-memory LRU cache.
+* Optional byte-bounded, per-player disk cache with atomic writes.
+* Actor isolation and URL/range-aware cache identities.
 
 **API:**
 
@@ -169,15 +169,16 @@ Small, dependency-free (Network framework) HTTP server.
 
 **Request routes:**
 
-* `GET /playlist.m3u8` (returns rewritten playlist)
-* `GET /segments/{id}` (returns Data from cache)
-* `GET /...` (future: key files, audio, subtitles)
+* `GET|HEAD /playlist.m3u8` (returns rewritten master playlist)
+* `GET|HEAD /variants/*` and `/renditions/*` (rewritten media playlists)
+* `GET|HEAD /segments/{id}` (cached or single-flight origin data, including ranges)
+* `GET|HEAD /assets/*` (registered keys, audio, subtitles, and metadata)
 
 **Implementation:**
 
 * Use `NWListener` and `NWConnection`.
-* Parse HTTP requests minimally.
-* Send valid HTTP/1.1 responses.
+* Incrementally parse size-bounded HTTP requests.
+* Send persistent HTTP/1.1 responses with correct range and HEAD semantics.
 
 ---
 
@@ -230,20 +231,21 @@ Uses `VideoPlayer` or custom player view.
 
 ## Performance Goals
 
-* <2ms overhead in proxy server path.
-* Seamless playback even with frequent playlist rewrites.
-* Zero quality oscillation when quality is locked.
-* Minimal memory overhead for short-form content.
+* Keep proxy overhead small and measure it on target hardware; do not infer an
+  absolute latency guarantee from host unit tests.
+* Coalesce duplicate origin requests and prefetch concurrently within a bound.
+* Avoid quality oscillation with locks, compatibility filtering, hysteresis,
+  and minimum switch intervals.
+* Bound memory and disk residency in bytes for short-form and live content.
 
 ---
 
 ## Future Extensions
 
-* LL-HLS (low-latency) support.
-* Separate audio/video track rewriting.
-* FairPlay DRM forwarding.
-* Disk caching and offline playback.
-* Metrics collection (through custom `/metrics` route).
+* Offline download ownership and expiration policy.
+* More content-steering strategies for multi-pathway masters.
+* Device-specific performance baselines and long-duration soak tests.
+* Additional CMAF/HDR/interstitial fixture coverage.
 
 ---
 

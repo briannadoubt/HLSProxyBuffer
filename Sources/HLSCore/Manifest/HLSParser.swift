@@ -15,6 +15,7 @@ public struct HLSParser: Sendable {
         case missingPartAttribute(String)
         case missingHintAttribute(String)
         case missingRenditionReportAttribute(String)
+        case malformedByteRange(String)
 
         public var description: String {
             switch self {
@@ -44,8 +45,15 @@ public struct HLSParser: Sendable {
                 return "EXT-X-PRELOAD-HINT tag is missing required attribute \(attribute)."
             case .missingRenditionReportAttribute(let attribute):
                 return "EXT-X-RENDITION-REPORT tag is missing required attribute \(attribute)."
+            case .malformedByteRange(let value):
+                return "Invalid HLS byte range: \(value)."
             }
         }
+    }
+
+    private struct ByteRangeSpec {
+        let length: Int
+        let offset: Int?
     }
 
     private let logger: Logger
@@ -59,7 +67,7 @@ public struct HLSParser: Sendable {
             .split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
 
-        guard lines.first == "#EXTM3U" || lines.contains("#EXTM3U") else {
+        guard lines.first == "#EXTM3U" else {
             throw ParserError.missingHeader
         }
 
@@ -67,8 +75,12 @@ public struct HLSParser: Sendable {
         var segments: [HLSSegment] = []
         var pendingVariantAttributes: VariantPlaylist.Attributes?
         var pendingDuration: TimeInterval?
-        var pendingByteRange: ClosedRange<Int>?
+        var pendingByteRange: ByteRangeSpec?
+        var previousByteRangeEndByURL: [URL: Int] = [:]
+        var previousPartByteRangeEndByURL: [URL: Int] = [:]
+        var previousMapByteRangeEndByURL: [URL: Int] = [:]
         var currentSequence = 0
+        var declaredMediaSequence = 0
         var targetDuration: TimeInterval?
         var isEndlist = false
         var renditions: [HLSManifest.Rendition] = []
@@ -81,14 +93,45 @@ public struct HLSParser: Sendable {
         var preloadHints: [HLSPreloadHint] = []
         var renditionReports: [HLSRenditionReport] = []
         var skippedSegmentCount: Int?
+        var protocolVersion: Int?
+        var independentSegments = false
+        var playlistType: String?
+        var startTag: String?
+        var discontinuitySequence: Int?
+        var passthroughTags: [String] = []
+        var pendingSegmentTags: [String] = []
+        var variables: [String: String] = [:]
 
-        for line in lines {
+        for rawLine in lines {
+            if rawLine.hasPrefix("#EXT-X-DEFINE:") {
+                let value = String(rawLine.dropFirst("#EXT-X-DEFINE:".count))
+                let attributes = attributeDictionary(from: value)
+                if let name = attributes["NAME"], let variableValue = attributes["VALUE"] {
+                    variables[name] = variableValue
+                } else {
+                    passthroughTags.append(rawLine)
+                }
+                continue
+            }
+            let line = substituteVariables(in: rawLine, variables: variables)
             guard !line.isEmpty else { continue }
 
             if line == "#EXTM3U" {
                 continue
+            } else if line.hasPrefix("#EXT-X-VERSION:") {
+                protocolVersion = Int(line.dropFirst("#EXT-X-VERSION:".count))
             } else if line == "#EXT-X-ENDLIST" {
                 isEndlist = true
+            } else if line == "#EXT-X-INDEPENDENT-SEGMENTS" {
+                independentSegments = true
+            } else if line.hasPrefix("#EXT-X-PLAYLIST-TYPE:") {
+                playlistType = String(line.dropFirst("#EXT-X-PLAYLIST-TYPE:".count))
+            } else if line.hasPrefix("#EXT-X-START:") {
+                startTag = line
+            } else if line.hasPrefix("#EXT-X-DISCONTINUITY-SEQUENCE:") {
+                discontinuitySequence = Int(line.dropFirst("#EXT-X-DISCONTINUITY-SEQUENCE:".count))
+            } else if isSegmentMetadataTag(line) {
+                pendingSegmentTags.append(line)
             } else if line.hasPrefix("#EXTINF:") {
                 let value = line.replacingOccurrences(of: "#EXTINF:", with: "")
                 guard let duration = TimeInterval(value.split(separator: ",").first ?? "") else {
@@ -101,6 +144,7 @@ public struct HLSParser: Sendable {
             } else if line.hasPrefix("#EXT-X-MEDIA-SEQUENCE:") {
                 let value = line.replacingOccurrences(of: "#EXT-X-MEDIA-SEQUENCE:", with: "")
                 currentSequence = Int(value) ?? currentSequence
+                declaredMediaSequence = currentSequence
             } else if line.hasPrefix("#EXT-X-TARGETDURATION:") {
                 let value = line.replacingOccurrences(of: "#EXT-X-TARGETDURATION:", with: "")
                 targetDuration = TimeInterval(value)
@@ -112,7 +156,7 @@ public struct HLSParser: Sendable {
                 }
             } else if line.hasPrefix("#EXT-X-BYTERANGE:") {
                 let value = line.replacingOccurrences(of: "#EXT-X-BYTERANGE:", with: "")
-                pendingByteRange = parseByteRange(from: value)
+                pendingByteRange = try parseByteRangeSpec(from: value)
             } else if line.hasPrefix("#EXT-X-MEDIA:") {
                 let value = String(line.dropFirst("#EXT-X-MEDIA:".count))
                 let rendition = try parseRendition(from: value, baseURL: baseURL)
@@ -127,7 +171,11 @@ public struct HLSParser: Sendable {
                 }
             } else if line.hasPrefix("#EXT-X-MAP:") {
                 let value = String(line.dropFirst("#EXT-X-MAP:".count))
-                currentMap = try parseInitializationMap(from: value, baseURL: baseURL)
+                currentMap = try parseInitializationMap(
+                    from: value,
+                    baseURL: baseURL,
+                    previousByteRangeEnds: &previousMapByteRangeEndByURL
+                )
             } else if line.hasPrefix("#EXT-X-PART:") {
                 let value = String(line.dropFirst("#EXT-X-PART:".count))
                 let part = try parsePartialSegment(
@@ -136,7 +184,8 @@ public struct HLSParser: Sendable {
                     partIndex: pendingParts.count,
                     encryption: currentEncryption,
                     map: currentMap,
-                    baseURL: baseURL
+                    baseURL: baseURL,
+                    previousByteRangeEnds: &previousPartByteRangeEndByURL
                 )
                 pendingParts.append(part)
             } else if line.hasPrefix("#EXT-X-PRELOAD-HINT:") {
@@ -162,9 +211,12 @@ public struct HLSParser: Sendable {
                 let attributes = attributeDictionary(from: value)
                 if let skippedValue = attributes["SKIPPED-SEGMENTS"], let count = Int(skippedValue) {
                     skippedSegmentCount = count
+                    if segments.isEmpty, count > 0 {
+                        currentSequence += count
+                    }
                 }
             } else if line.hasPrefix("#") {
-                continue
+                passthroughTags.append(line)
             } else {
                 if let attributes = pendingVariantAttributes {
                     let url = try resolveURL(line, baseURL: baseURL)
@@ -173,29 +225,47 @@ public struct HLSParser: Sendable {
                 } else {
                     let url = try resolveURL(line, baseURL: baseURL)
                     let duration = pendingDuration ?? 0
+                    let byteRange = try pendingByteRange.map {
+                        try resolveByteRange(
+                            $0,
+                            for: url,
+                            previousByteRangeEnds: &previousByteRangeEndByURL
+                        )
+                    }
 
                     segments.append(
                         HLSSegment(
                             url: url,
                             duration: duration,
                             sequence: currentSequence,
-                            byteRange: pendingByteRange,
+                            byteRange: byteRange,
                             encryption: currentEncryption,
                             initializationMap: currentMap,
-                            parts: pendingParts
+                            parts: pendingParts,
+                            metadataTags: pendingSegmentTags
                         )
                     )
                     pendingDuration = nil
                     pendingByteRange = nil
                     pendingParts.removeAll()
+                    pendingSegmentTags.removeAll()
                     currentSequence += 1
                 }
             }
         }
 
-        let mediaPlaylist = segments.isEmpty ? nil : MediaPlaylist(
+        if pendingVariantAttributes != nil {
+            throw ParserError.missingURIAfterTag("#EXT-X-STREAM-INF")
+        }
+        if pendingDuration != nil || pendingByteRange != nil {
+            throw ParserError.missingURIAfterTag(pendingDuration != nil ? "#EXTINF" : "#EXT-X-BYTERANGE")
+        }
+
+        let hasMediaBody = !segments.isEmpty || !pendingParts.isEmpty || targetDuration != nil || partTargetDuration != nil
+        let mediaPlaylist = hasMediaBody ? MediaPlaylist(
+            protocolVersion: protocolVersion,
             targetDuration: targetDuration,
-            mediaSequence: segments.first?.sequence ?? 0,
+            mediaSequence: declaredMediaSequence,
             segments: segments,
             isEndlist: isEndlist,
             sessionKeys: sessionKeys,
@@ -203,8 +273,14 @@ public struct HLSParser: Sendable {
             serverControl: serverControl,
             preloadHints: preloadHints,
             renditionReports: renditionReports,
-            skippedSegmentCount: skippedSegmentCount
-        )
+            skippedSegmentCount: skippedSegmentCount,
+            independentSegments: independentSegments,
+            playlistType: playlistType,
+            startTag: startTag,
+            discontinuitySequence: discontinuitySequence,
+            passthroughTags: passthroughTags,
+            trailingParts: pendingParts
+        ) : nil
 
         let kind: HLSManifestKind = (variants.isEmpty && renditions.isEmpty) ? .media : .master
 
@@ -219,7 +295,10 @@ public struct HLSParser: Sendable {
             mediaPlaylist: mediaPlaylist,
             renditions: renditions,
             originalText: text,
-            sessionKeys: sessionKeys
+            sessionKeys: sessionKeys,
+            protocolVersion: protocolVersion,
+            independentSegments: independentSegments,
+            passthroughTags: passthroughTags + pendingSegmentTags
         )
     }
 
@@ -250,6 +329,11 @@ public struct HLSParser: Sendable {
         audioGroupId = attributes["AUDIO"]
         subtitleGroupId = attributes["SUBTITLES"]
         closedCaptionGroupId = attributes["CLOSED-CAPTIONS"]
+        let knownKeys: Set<String> = [
+            "BANDWIDTH", "AVERAGE-BANDWIDTH", "FRAME-RATE", "RESOLUTION", "CODECS",
+            "AUDIO", "SUBTITLES", "CLOSED-CAPTIONS"
+        ]
+        let additionalAttributes = attributes.filter { !knownKeys.contains($0.key) }
 
         return VariantPlaylist.Attributes(
             bandwidth: bandwidth,
@@ -259,7 +343,8 @@ public struct HLSParser: Sendable {
             codecs: codecs,
             audioGroupId: audioGroupId,
             subtitleGroupId: subtitleGroupId,
-            closedCaptionGroupId: closedCaptionGroupId
+            closedCaptionGroupId: closedCaptionGroupId,
+            additionalAttributes: additionalAttributes
         )
     }
 
@@ -273,15 +358,45 @@ public struct HLSParser: Sendable {
         return VariantPlaylist.Resolution(width: width, height: height)
     }
 
-    private func parseByteRange(from string: String) -> ClosedRange<Int>? {
-        let components = string.split(separator: "@")
-        guard let length = Int(components.first ?? "") else { return nil }
-
-        if components.count == 2, let offset = Int(components[1]) {
-            return offset...(offset + length - 1)
+    private func parseByteRangeSpec(from string: String) throws -> ByteRangeSpec {
+        let components = string.split(separator: "@", omittingEmptySubsequences: false)
+        guard components.count <= 2,
+              let length = Int(components.first ?? ""),
+              length > 0 else {
+            throw ParserError.malformedByteRange(string)
         }
+        let offset: Int?
+        if components.count == 2 {
+            guard let parsedOffset = Int(components[1]), parsedOffset >= 0 else {
+                throw ParserError.malformedByteRange(string)
+            }
+            offset = parsedOffset
+        } else {
+            offset = nil
+        }
+        return ByteRangeSpec(length: length, offset: offset)
+    }
 
-        return 0...(length - 1)
+    private func resolveByteRange(
+        _ spec: ByteRangeSpec,
+        for url: URL,
+        previousByteRangeEnds: inout [URL: Int]
+    ) throws -> ClosedRange<Int> {
+        let start: Int
+        if let offset = spec.offset {
+            start = offset
+        } else if let previousEnd = previousByteRangeEnds[url], previousEnd < Int.max {
+            start = previousEnd + 1
+        } else {
+            throw ParserError.malformedByteRange("\(spec.length) without a previous range for \(url.absoluteString)")
+        }
+        let (distance, overflow) = spec.length.subtractingReportingOverflow(1)
+        let (end, additionOverflow) = start.addingReportingOverflow(distance)
+        guard !overflow, !additionOverflow, end >= start else {
+            throw ParserError.malformedByteRange("\(spec.length)@\(start)")
+        }
+        previousByteRangeEnds[url] = end
+        return start...end
     }
 
     private func parsePartialSegment(
@@ -290,7 +405,8 @@ public struct HLSParser: Sendable {
         partIndex: Int,
         encryption: SegmentEncryption?,
         map: MediaInitializationMap?,
-        baseURL: URL?
+        baseURL: URL?,
+        previousByteRangeEnds: inout [URL: Int]
     ) throws -> HLSPartialSegment {
         let attributes = attributeDictionary(from: string)
         guard let durationValue = attributes["DURATION"], let duration = TimeInterval(durationValue) else {
@@ -300,7 +416,16 @@ public struct HLSParser: Sendable {
             throw ParserError.missingPartAttribute("URI")
         }
         let url = try resolveURL(uriValue, baseURL: baseURL)
-        let range = attributes["BYTERANGE"].flatMap(parseByteRange(from:))
+        let range: ClosedRange<Int>?
+        if let value = attributes["BYTERANGE"] {
+            range = try resolveByteRange(
+                parseByteRangeSpec(from: value),
+                for: url,
+                previousByteRangeEnds: &previousByteRangeEnds
+            )
+        } else {
+            range = nil
+        }
         let isIndependent = parseBoolean(attributes["INDEPENDENT"]) ?? false
         let isGap = parseBoolean(attributes["GAP"]) ?? false
         return HLSPartialSegment(
@@ -488,6 +613,11 @@ public struct HLSParser: Sendable {
         } else {
             characteristics = []
         }
+        let knownKeys: Set<String> = [
+            "TYPE", "GROUP-ID", "NAME", "LANGUAGE", "DEFAULT", "AUTOSELECT", "FORCED",
+            "CHARACTERISTICS", "URI", "INSTREAM-ID"
+        ]
+        let additionalAttributes = attributes.filter { !knownKeys.contains($0.key) }
 
         return HLSManifest.Rendition(
             type: kind,
@@ -499,7 +629,8 @@ public struct HLSParser: Sendable {
             isForced: isForced,
             characteristics: characteristics,
             uri: resolvedURI,
-            instreamId: instreamId
+            instreamId: instreamId,
+            additionalAttributes: additionalAttributes
         )
     }
 
@@ -586,13 +717,46 @@ public struct HLSParser: Sendable {
         return value.split(separator: "/").map { String($0) }
     }
 
-    private func parseInitializationMap(from string: String, baseURL: URL?) throws -> MediaInitializationMap {
+    private func parseInitializationMap(
+        from string: String,
+        baseURL: URL?,
+        previousByteRangeEnds: inout [URL: Int]
+    ) throws -> MediaInitializationMap {
         let attributes = attributeDictionary(from: string)
         guard let uriValue = attributes["URI"], !uriValue.isEmpty else {
             throw ParserError.missingMapAttribute("URI")
         }
         let resolvedURI = try resolveURL(uriValue, baseURL: baseURL)
-        let range = attributes["BYTERANGE"].flatMap(parseByteRange(from:))
+        let range: ClosedRange<Int>?
+        if let value = attributes["BYTERANGE"] {
+            range = try resolveByteRange(
+                parseByteRangeSpec(from: value),
+                for: resolvedURI,
+                previousByteRangeEnds: &previousByteRangeEnds
+            )
+        } else {
+            range = nil
+        }
         return MediaInitializationMap(uri: resolvedURI, byteRange: range)
+    }
+
+    private func isSegmentMetadataTag(_ line: String) -> Bool {
+        line == "#EXT-X-DISCONTINUITY"
+            || line == "#EXT-X-GAP"
+            || line.hasPrefix("#EXT-X-PROGRAM-DATE-TIME:")
+            || line.hasPrefix("#EXT-X-DATERANGE:")
+            || line.hasPrefix("#EXT-X-BITRATE:")
+            || line.hasPrefix("#EXT-X-CUE-OUT")
+            || line == "#EXT-X-CUE-IN"
+            || line.hasPrefix("#EXT-OATCLS-SCTE35:")
+            || line.hasPrefix("#EXT-X-SCTE35:")
+            || line.hasPrefix("#EXT-X-ASSET:")
+            || line.hasPrefix("#EXT-X-PLACEMENT-OPPORTUNITY:")
+    }
+
+    private func substituteVariables(in value: String, variables: [String: String]) -> String {
+        variables.reduce(value) { result, pair in
+            result.replacingOccurrences(of: "{$\(pair.key)}", with: pair.value)
+        }
     }
 }

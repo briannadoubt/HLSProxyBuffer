@@ -2,14 +2,23 @@ import Foundation
 
 public struct HLSManifestFetcher: Sendable, HLSManifestSource {
     public struct RetryPolicy: Sendable, Equatable {
-        public static let `default` = RetryPolicy(maxAttempts: 2, retryDelay: 0.5)
+        public static let `default` = RetryPolicy(maxAttempts: 3, retryDelay: 0.25)
 
         public let maxAttempts: Int
         public let retryDelay: TimeInterval
+        public let maximumRetryDelay: TimeInterval
+        public let jitterRatio: Double
 
-        public init(maxAttempts: Int, retryDelay: TimeInterval) {
+        public init(
+            maxAttempts: Int,
+            retryDelay: TimeInterval,
+            maximumRetryDelay: TimeInterval = 8,
+            jitterRatio: Double = 0.2
+        ) {
             self.maxAttempts = max(1, maxAttempts)
-            self.retryDelay = retryDelay
+            self.retryDelay = max(0, retryDelay)
+            self.maximumRetryDelay = max(self.retryDelay, maximumRetryDelay)
+            self.jitterRatio = min(max(0, jitterRatio), 1)
         }
     }
 
@@ -25,6 +34,8 @@ public struct HLSManifestFetcher: Sendable, HLSManifestSource {
             switch self {
             case .utf8Decoding, .insecureScheme:
                 return false
+            case .httpStatus(let code):
+                return code == 408 || code == 429 || (500...599).contains(code)
             default:
                 return true
             }
@@ -86,10 +97,19 @@ public struct HLSManifestFetcher: Sendable, HLSManifestSource {
             } catch let fetchError as FetchError where !fetchError.isRetryable {
                 throw fetchError
             } catch {
+                if Task.isCancelled || (error as? URLError)?.code == .cancelled {
+                    throw CancellationError()
+                }
                 lastError = error
                 logger.log("Manifest fetch failed (attempt \(attempt)): \(error)", category: .manifest)
                 if attempt < retryPolicy.maxAttempts {
-                    try await Task.sleep(nanoseconds: UInt64(retryPolicy.retryDelay * 1_000_000_000))
+                    let exponential = min(
+                        retryPolicy.maximumRetryDelay,
+                        retryPolicy.retryDelay * pow(2, Double(attempt - 1))
+                    )
+                    let jitter = exponential * retryPolicy.jitterRatio * Double.random(in: -1...1)
+                    let delay = max(0, exponential + jitter)
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 }
             }
         }

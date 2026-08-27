@@ -4,7 +4,7 @@ import XCTest
 final class SegmentPrefetchSchedulerTests: XCTestCase {
     func testUpcomingPlaylistsArePrefetched() async throws {
         let scheduler = SegmentPrefetchScheduler(configuration: .init(targetBufferSeconds: 12, maxSegments: 4))
-        let cache = HLSSegmentCache(capacity: 4)
+        let cache = HLSSegmentCache(capacityBytes: 1_024)
         let fetcher = MockSegmentSource()
 
         let primary = MediaPlaylist(
@@ -28,13 +28,17 @@ final class SegmentPrefetchSchedulerTests: XCTestCase {
         await scheduler.start(playlist: primary, fetcher: fetcher, cache: cache)
         try await Task.sleep(nanoseconds: 200_000_000)
 
-        let upcomingData = await cache.get(SegmentIdentity.key(forSequence: 10))
+        let upcomingData = await cache.get(SegmentIdentity.key(for: upcoming.segments[0]))
         XCTAssertNotNil(upcomingData, "Upcoming playlist segment should be prefetched.")
     }
 
     func testTelemetryReportsFailures() async throws {
-        let scheduler = SegmentPrefetchScheduler(configuration: .init(targetBufferSeconds: 4, maxSegments: 1))
-        let cache = HLSSegmentCache(capacity: 2)
+        let scheduler = SegmentPrefetchScheduler(configuration: .init(
+            targetBufferSeconds: 4,
+            maxSegments: 1,
+            maximumRetryCount: 0
+        ))
+        let cache = HLSSegmentCache(capacityBytes: 1_024)
         let fetcher = FailingSegmentSource()
         let expectation = expectation(description: "telemetry")
 
@@ -54,11 +58,45 @@ final class SegmentPrefetchSchedulerTests: XCTestCase {
 
         await scheduler.start(playlist: playlist, fetcher: fetcher, cache: cache)
         await fulfillment(of: [expectation], timeout: 1.0)
+        await scheduler.stop()
+    }
+
+    func testFailedPrefetchRetriesTheHoleAndRecovers() async throws {
+        let scheduler = SegmentPrefetchScheduler(configuration: .init(
+            targetBufferSeconds: 4,
+            maxSegments: 1,
+            maximumRetryCount: 0,
+            retryBaseDelay: 0.01
+        ))
+        let cache = HLSSegmentCache(capacityBytes: 1_024)
+        let fetcher = RecoveringSegmentSource(failuresBeforeSuccess: 1)
+        let segment = HLSSegment(
+            url: URL(string: "https://cdn.test/recover.ts")!,
+            duration: 4,
+            sequence: 1
+        )
+        await scheduler.start(
+            playlist: MediaPlaylist(targetDuration: 4, segments: [segment]),
+            fetcher: fetcher,
+            cache: cache
+        )
+
+        let key = SegmentIdentity.key(for: segment)
+        for _ in 0..<100 {
+            if await cache.get(key) != nil { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        let cached = await cache.get(key)
+        let count = await fetcher.fetchCount()
+        XCTAssertNotNil(cached)
+        XCTAssertEqual(count, 2)
+        await scheduler.stop()
     }
 
     func testConsumeReducesBufferDepth() async throws {
         let scheduler = SegmentPrefetchScheduler(configuration: .init(targetBufferSeconds: 8, maxSegments: 2))
-        let cache = HLSSegmentCache(capacity: 2)
+        let cache = HLSSegmentCache(capacityBytes: 1_024)
         let fetcher = MockSegmentSource()
 
         let playlist = MediaPlaylist(
@@ -87,7 +125,7 @@ final class SegmentPrefetchSchedulerTests: XCTestCase {
 
     func testPrefetchesNextSegmentAfterConsumption() async throws {
         let scheduler = SegmentPrefetchScheduler(configuration: .init(targetBufferSeconds: 4, maxSegments: 1))
-        let cache = HLSSegmentCache(capacity: 2)
+        let cache = HLSSegmentCache(capacityBytes: 1_024)
         let fetcher = MockSegmentSource()
 
         let playlist = MediaPlaylist(
@@ -126,9 +164,31 @@ final class SegmentPrefetchSchedulerTests: XCTestCase {
         XCTAssertEqual(state.playedThroughSequence, 10)
     }
 
+    func testConsumeJumpClearsAllEarlierBufferedSequences() async throws {
+        let scheduler = SegmentPrefetchScheduler(configuration: .init(targetBufferSeconds: 12, maxSegments: 3))
+        let cache = HLSSegmentCache(capacityBytes: 1_024)
+        let segments = (1...3).map {
+            HLSSegment(url: URL(string: "https://cdn.test/\($0).ts")!, duration: 4, sequence: $0)
+        }
+        await scheduler.start(
+            playlist: MediaPlaylist(targetDuration: 4, segments: segments),
+            fetcher: MockSegmentSource(),
+            cache: cache
+        )
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        await scheduler.consume(sequence: 3)
+        let state = await scheduler.bufferState()
+
+        XCTAssertTrue(state.readySequences.isEmpty)
+        XCTAssertEqual(state.prefetchDepthSeconds, 0, accuracy: 0.001)
+        XCTAssertEqual(state.playedThroughSequence, 3)
+        await scheduler.stop()
+    }
+
     func testPrefetchesPartsAndTracksReadyCount() async throws {
         let scheduler = SegmentPrefetchScheduler(configuration: .init(targetBufferSeconds: 2, maxSegments: 1, targetPartCount: 2))
-        let cache = HLSSegmentCache(capacity: 2)
+        let cache = HLSSegmentCache(capacityBytes: 1_024)
         let fetcher = MockSegmentSource()
 
         let part0 = HLSPartialSegment(
@@ -168,6 +228,58 @@ final class SegmentPrefetchSchedulerTests: XCTestCase {
         state = await scheduler.bufferState()
         XCTAssertEqual(state.readyPartCounts[1], 1)
     }
+
+    func testRemovingBufferCallbackWaitsForInFlightDelivery() async throws {
+        let scheduler = SegmentPrefetchScheduler()
+        let gate = SchedulerCallbackGate()
+
+        await scheduler.onBufferStateChange { _ in
+            await gate.wait()
+        }
+
+        for _ in 0..<100 {
+            if await gate.isWaiting { break }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let callbackIsWaiting = await gate.isWaiting
+        XCTAssertTrue(callbackIsWaiting)
+
+        let removal = Task {
+            await scheduler.onBufferStateChange(nil)
+            await gate.markRemovalCompleted()
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let completedBeforeRelease = await gate.removalCompleted
+        XCTAssertFalse(completedBeforeRelease)
+
+        await gate.release()
+        await removal.value
+        let completedAfterRelease = await gate.removalCompleted
+        XCTAssertTrue(completedAfterRelease)
+    }
+}
+
+private actor SchedulerCallbackGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var isWaiting = false
+    private(set) var removalCompleted = false
+
+    func wait() async {
+        isWaiting = true
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+        isWaiting = false
+    }
+
+    func markRemovalCompleted() {
+        removalCompleted = true
+    }
 }
 
 private actor MockSegmentSource: SegmentSource {
@@ -180,4 +292,24 @@ private actor FailingSegmentSource: SegmentSource {
     func fetchSegment(_ segment: HLSSegment) async throws -> Data {
         throw URLError(.badServerResponse)
     }
+}
+
+private actor RecoveringSegmentSource: SegmentSource {
+    private var failuresRemaining: Int
+    private var count = 0
+
+    init(failuresBeforeSuccess: Int) {
+        failuresRemaining = failuresBeforeSuccess
+    }
+
+    func fetchSegment(_ segment: HLSSegment) async throws -> Data {
+        count += 1
+        if failuresRemaining > 0 {
+            failuresRemaining -= 1
+            throw URLError(.timedOut)
+        }
+        return Data("recovered".utf8)
+    }
+
+    func fetchCount() -> Int { count }
 }

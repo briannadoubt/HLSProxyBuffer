@@ -1,8 +1,10 @@
 import Foundation
+import CryptoKit
 
 public enum SegmentIdentity {
     public static func key(for segment: HLSSegment, namespace: String? = nil) -> String {
-        key(forSequence: segment.sequence, namespace: namespace)
+        let suffix = "segment-\(segment.sequence)-\(fingerprint(url: segment.url, range: segment.byteRange))"
+        return namespaced(suffix: suffix, namespace: namespace)
     }
 
     public static func key(forSequence sequence: Int, namespace: String? = nil) -> String {
@@ -11,12 +13,22 @@ public enum SegmentIdentity {
     }
 
     public static func key(for part: HLSPartialSegment, namespace: String? = nil) -> String {
-        let suffix = "part-\(part.parentSequence)-\(part.partIndex)"
+        let suffix = "part-\(part.parentSequence)-\(part.partIndex)-\(fingerprint(url: part.url, range: part.byteRange))"
         return namespaced(suffix: suffix, namespace: namespace)
     }
 
     public static func key(forPartSequence sequence: Int, partIndex: Int, namespace: String? = nil) -> String {
         let suffix = "part-\(sequence)-\(partIndex)"
+        return namespaced(suffix: suffix, namespace: namespace)
+    }
+
+    public static func key(for map: MediaInitializationMap, namespace: String? = nil) -> String {
+        let suffix = "map-\(fingerprint(url: map.uri, range: map.byteRange))"
+        return namespaced(suffix: suffix, namespace: namespace)
+    }
+
+    public static func key(for hint: HLSPreloadHint, namespace: String? = nil) -> String {
+        let suffix = "hint-\(hint.sequence)-\(hint.partIndex ?? 0)-\(fingerprint(url: hint.uri, range: hint.byteRange))"
         return namespaced(suffix: suffix, namespace: namespace)
     }
 
@@ -78,5 +90,14 @@ public enum SegmentIdentity {
         let sanitized = sanitize(namespace)
         guard !sanitized.isEmpty else { return suffix }
         return "\(sanitized)-\(suffix)"
+    }
+
+    private static func fingerprint(url: URL, range: ClosedRange<Int>?) -> String {
+        let rangeValue = range.map { "\($0.lowerBound)-\($0.upperBound)" } ?? "full"
+        let value = "\(url.absoluteString)|\(rangeValue)"
+        return SHA256.hash(data: Data(value.utf8))
+            .prefix(10)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 }

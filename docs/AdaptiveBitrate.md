@@ -24,6 +24,13 @@ conservative thresholds:
 ABR is automatically bypassed when `qualityPolicy` is `.locked` or when
 `abrPolicy.isEnabled` is `false`.
 
+Automatic candidates are restricted to the selected variant's audio, subtitle,
+closed-caption, and codec families. This prevents an apparently harmless
+bitrate switch from changing language groups or decoder requirements. Variant
+switches preserve cached media and align the new live playlist to the observed
+playhead; a live rollback or discontinuity-sequence change clears stale cache
+state.
+
 ## Diagnostics
 
 - `ProxyPlayerDiagnostics` exposes `onQualityChanged` so apps can log or surface

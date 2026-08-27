@@ -133,6 +133,7 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
     private let segmentSize: Int
     private var lowSegmentRequests = 0
     private let includeAlternateRenditions: Bool
+    private let includeSupplementalResources: Bool
     private let audioPlaylistPath = "/audio-en.m3u8"
     private let subtitlePlaylistPath = "/subs-en.m3u8"
     private var audioSegments: [String: Data] = [:]
@@ -145,13 +146,15 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
         failureAfterSequence: Int = 2,
         segmentDuration: TimeInterval = 2,
         segmentSize: Int = 512,
-        includeAlternateRenditions: Bool = false
+        includeAlternateRenditions: Bool = false,
+        includeSupplementalResources: Bool = false
     ) {
         self.segmentCount = segmentCount
         self.failureAfterSequence = failureAfterSequence
         self.segmentDuration = segmentDuration
         self.segmentSize = segmentSize
         self.includeAlternateRenditions = includeAlternateRenditions
+        self.includeSupplementalResources = includeSupplementalResources
         if includeAlternateRenditions {
             let audioResources = AdaptiveMockOriginServer.makeAudioResources(segmentCount: segmentCount)
             audioPlaylist = audioResources.playlist
@@ -234,6 +237,20 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
             return HTTPResponse.text(variantManifest(prefix: "high"), contentType: "application/x-mpegURL").encoded()
         case "/low.m3u8":
             return HTTPResponse.text(variantManifest(prefix: "low"), contentType: "application/x-mpegURL").encoded()
+        case "/iframe.m3u8" where includeSupplementalResources:
+            return HTTPResponse.text(iframeManifest, contentType: "application/x-mpegURL").encoded()
+        case "/metadata.json" where includeSupplementalResources:
+            return HTTPResponse(
+                status: .ok,
+                headers: ["Content-Type": "application/json"],
+                body: Data("{\"title\":\"fixture\"}".utf8)
+            ).encoded()
+        case "/iframe-1.m4s" where includeSupplementalResources:
+            return HTTPResponse(
+                status: .ok,
+                headers: ["Content-Type": "video/mp4"],
+                body: Data(repeating: 0xF1, count: 64)
+            ).encoded()
         default:
             break
         }
@@ -288,6 +305,11 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
 
     private var masterManifest: String {
         var lines: [String] = ["#EXTM3U"]
+        if includeSupplementalResources {
+            lines.append("#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=100000,URI=\"/iframe.m3u8\"")
+            lines.append("#EXT-X-SESSION-DATA:DATA-ID=\"com.test.metadata\",URI=\"/metadata.json\"")
+            lines.append("#EXT-X-CONTENT-STEERING:SERVER-URI=\"/steering.json\",PATHWAY-ID=\"cdn-a\"")
+        }
         if includeAlternateRenditions {
             lines.append("""
             #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-main",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,URI="\(audioPlaylistPath)"
@@ -307,6 +329,19 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
         lines.append("#EXT-X-STREAM-INF:\(streamAttributesLow)")
         lines.append("/low.m3u8")
         return lines.joined(separator: "\n")
+    }
+
+    private var iframeManifest: String {
+        [
+            "#EXTM3U",
+            "#EXT-X-VERSION:7",
+            "#EXT-X-I-FRAMES-ONLY",
+            "#EXT-X-TARGETDURATION:2",
+            "#EXT-X-MEDIA-SEQUENCE:1",
+            "#EXTINF:2,",
+            "/iframe-1.m4s",
+            "#EXT-X-ENDLIST"
+        ].joined(separator: "\n")
     }
 
     private func variantManifest(prefix: String) -> String {

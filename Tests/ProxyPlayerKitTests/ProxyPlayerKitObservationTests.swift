@@ -26,7 +26,31 @@ final class ProxyPlayerKitObservationTests: XCTestCase {
 
         await player.load(from: origin.manifestURL, quality: .automatic)
         await fulfillment(of: [expectation], timeout: 5)
-        player.stop()
+        await player.stopAndWait()
+    }
+
+    func testAsyncStateStreamDeliversOrderedLifecycleAndStopWaitsForCleanup() async throws {
+        let origin = try MockOriginServer(segmentCount: 2)
+        try await origin.start()
+        defer { origin.stop() }
+        let player = ProxyHLSPlayer(configuration: .init(allowInsecureManifests: true))
+        let ready = expectation(description: "ready state streamed")
+        let streamTask = Task { @MainActor in
+            for await state in player.stateUpdates() {
+                if state.status == .ready {
+                    ready.fulfill()
+                    return
+                }
+            }
+        }
+
+        await player.load(from: origin.manifestURL)
+        await fulfillment(of: [ready], timeout: 5)
+        await player.stopAndWait()
+        streamTask.cancel()
+
+        XCTAssertEqual(player.status, .idle)
+        XCTAssertNil(player.player)
     }
 }
 #endif

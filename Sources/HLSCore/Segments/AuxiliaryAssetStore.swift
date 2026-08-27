@@ -4,6 +4,7 @@ public enum AuxiliaryAssetType: String, CaseIterable, Sendable {
     case audio
     case subtitles
     case keys
+    case metadata
 }
 
 public actor AuxiliaryAssetStore {

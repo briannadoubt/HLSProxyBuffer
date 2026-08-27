@@ -4,6 +4,7 @@ import Dispatch
 #endif
 #if canImport(Network)
 import Network
+import os
 #endif
 
 public enum ProxyServerError: Error {
@@ -11,12 +12,14 @@ public enum ProxyServerError: Error {
     case alreadyRunning
 }
 
-public final class ProxyServer: @unchecked Sendable {
+public final class ProxyServer: Sendable {
     public struct Configuration: Sendable {
         public let port: UInt16?
+        public let maximumRequestBytes: Int
 
-        public init(port: UInt16? = nil) {
+        public init(port: UInt16? = nil, maximumRequestBytes: Int = 64 * 1024) {
             self.port = port
+            self.maximumRequestBytes = max(1024, maximumRequestBytes)
         }
     }
 
@@ -24,8 +27,8 @@ public final class ProxyServer: @unchecked Sendable {
     private let configuration: Configuration
 
 #if canImport(Network)
-    private var listener: NWListener?
-    private let queue = DispatchQueue(label: "com.hlsproxybuffer.proxy")
+    private let listener = OSAllocatedUnfairLock<NWListener?>(initialState: nil)
+    private let queue = DispatchQueue(label: "com.hlsproxybuffer.proxy", qos: .userInitiated)
 #endif
 
     public init(configuration: Configuration = .init(), router: ProxyRouter) {
@@ -35,19 +38,17 @@ public final class ProxyServer: @unchecked Sendable {
 
     public func start() throws {
 #if canImport(Network)
-        guard listener == nil else { throw ProxyServerError.alreadyRunning }
-        let port: NWEndpoint.Port
-        if let explicit = configuration.port, let explicitPort = NWEndpoint.Port(rawValue: explicit) {
-            port = explicitPort
-        } else {
-            port = 0
-        }
-
-        listener = try NWListener(using: .tcp, on: port)
-        listener?.newConnectionHandler = { [weak self] connection in
+        guard listener.withLock({ $0 == nil }) else { throw ProxyServerError.alreadyRunning }
+        let port = configuration.port.flatMap(NWEndpoint.Port.init(rawValue:)) ?? .any
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: port)
+        let newListener = try NWListener(using: parameters)
+        router.freeze()
+        newListener.newConnectionHandler = { [weak self] connection in
             self?.handle(connection: connection)
         }
-        listener?.start(queue: queue)
+        listener.withLock { $0 = newListener }
+        newListener.start(queue: queue)
 #else
         throw ProxyServerError.networkingUnavailable
 #endif
@@ -55,17 +56,19 @@ public final class ProxyServer: @unchecked Sendable {
 
     public func stop() {
 #if canImport(Network)
-        listener?.cancel()
-        listener = nil
+        let current = listener.withLock { value -> NWListener? in
+            defer { value = nil }
+            return value
+        }
+        current?.cancel()
 #endif
     }
 
     public var port: UInt16? {
 #if canImport(Network)
-        guard let nwPort = listener?.port else { return configuration.port }
-        return nwPort.rawValue
+        listener.withLock { $0?.port?.rawValue ?? configuration.port }
 #else
-        return configuration.port
+        configuration.port
 #endif
     }
 
@@ -77,34 +80,110 @@ public final class ProxyServer: @unchecked Sendable {
 #if canImport(Network)
     private func handle(connection: NWConnection) {
         connection.start(queue: queue)
-        receive(on: connection)
+        receive(on: connection, buffer: Data())
     }
 
-    private func receive(on connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, _, error in
+    private func receive(on connection: NWConnection, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { [weak self] data, _, isComplete, error in
             guard let self else { return }
+            var accumulated = buffer
+            if let data { accumulated.append(data) }
 
-            if let data {
-                Task {
-                    let responseData = await self.response(for: data)
-                    connection.send(content: responseData, completion: .contentProcessed { _ in
-                        connection.cancel()
-                    })
+            if accumulated.count > configuration.maximumRequestBytes {
+                send(
+                    HTTPResponse(status: .payloadTooLarge),
+                    for: nil,
+                    keepAlive: false,
+                    remainder: Data(),
+                    on: connection
+                )
+                return
+            }
+
+            do {
+                if let parsed = try HTTPRequestParser.parseAvailable(
+                    data: accumulated,
+                    maximumRequestBytes: configuration.maximumRequestBytes
+                ) {
+                    let remainder = accumulated.dropFirst(parsed.consumedBytes)
+                    Task { [weak self] in
+                        guard let self else { return }
+                        let response = await router.handle(parsed.request)
+                        let responseWantsClose = response.headers["Connection"]?.lowercased() == "close"
+                        send(
+                            response,
+                            for: parsed.request,
+                            keepAlive: parsed.request.shouldKeepAlive && !responseWantsClose,
+                            remainder: Data(remainder),
+                            on: connection
+                        )
+                    }
+                    return
                 }
-            } else if let error {
-                print("Proxy connection error: \(error)")
+            } catch let parserError as HTTPRequestParser.ParserError {
+                let status: HTTPResponse.Status
+                switch parserError {
+                case .requestTooLarge:
+                    status = .payloadTooLarge
+                case .unsupportedMethod:
+                    status = .methodNotAllowed
+                default:
+                    status = .badRequest
+                }
+                send(HTTPResponse(status: status), for: nil, keepAlive: false, remainder: Data(), on: connection)
+                return
+            } catch {
+                send(HTTPResponse(status: .badRequest), for: nil, keepAlive: false, remainder: Data(), on: connection)
+                return
+            }
+
+            if error != nil || isComplete {
                 connection.cancel()
+            } else {
+                receive(on: connection, buffer: accumulated)
             }
         }
     }
 
-    private func response(for data: Data) async -> Data {
-        do {
-            let request = try HTTPRequestParser.parse(data: data)
-            let response = await router.handle(request)
-            return response.encoded()
-        } catch {
-            return HTTPResponse(status: .internalServerError).encoded()
+    private func send(
+        _ response: HTTPResponse,
+        for request: HTTPRequest?,
+        keepAlive: Bool,
+        remainder: Data,
+        on connection: NWConnection
+    ) {
+        let header = response.headerData(connection: keepAlive ? "keep-alive" : "close")
+        connection.send(content: header, completion: .contentProcessed { [weak self] error in
+            guard let self else { return }
+            guard error == nil else {
+                connection.cancel()
+                return
+            }
+            let shouldSendBody = request?.method != .head && !response.body.isEmpty
+            guard shouldSendBody else {
+                finishResponse(keepAlive: keepAlive, remainder: remainder, on: connection)
+                return
+            }
+            connection.send(content: response.body, completion: .contentProcessed { [weak self] error in
+                guard let self else { return }
+                guard error == nil else {
+                    connection.cancel()
+                    return
+                }
+                finishResponse(keepAlive: keepAlive, remainder: remainder, on: connection)
+            })
+        })
+    }
+
+    private func finishResponse(keepAlive: Bool, remainder: Data, on connection: NWConnection) {
+        guard keepAlive else {
+            connection.cancel()
+            return
+        }
+        if remainder.isEmpty {
+            receive(on: connection, buffer: Data())
+        } else {
+            receive(on: connection, buffer: remainder)
         }
     }
 #endif

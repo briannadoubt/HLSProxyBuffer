@@ -232,6 +232,21 @@ final class FeedBufferControllerTests: XCTestCase {
         await fulfillment(of: [expectation], timeout: 1)
         XCTAssertEqual(next.loadCallCount, 0)
     }
+
+    func testFailedWarmLoadRetriesAndRecovers() async {
+        let controller = FeedBufferController(policy: .init(cooldownDelay: 0))
+        let player = StubPlayer(identifier: "vod-0", failuresBeforeReady: 1)
+        _ = controller.register(
+            player: player,
+            descriptor: .make(index: 0, kind: .vod, urlIdentifier: "retry")
+        )
+
+        controller.updateVisibleIndex(0)
+        let expectation = waitUntil("failed load retries") {
+            player.loadCallCount >= 2 && player.state.status == .ready
+        }
+        await fulfillment(of: [expectation], timeout: 2)
+    }
 }
 
 @MainActor
@@ -293,15 +308,18 @@ private final class StubPlayer: FeedBufferControllable {
     private(set) var loadedURLs: [URL] = []
     let identifier: String
     let loadDelayNanoseconds: UInt64
+    private var failuresRemaining: Int
 
     init(
         identifier: String,
         configuration: ProxyPlayerConfiguration = .init(),
-        loadDelayNanoseconds: UInt64 = 0
+        loadDelayNanoseconds: UInt64 = 0,
+        failuresBeforeReady: Int = 0
     ) {
         self.identifier = identifier
         self.storedConfiguration = configuration
         self.loadDelayNanoseconds = loadDelayNanoseconds
+        self.failuresRemaining = max(0, failuresBeforeReady)
     }
 
     func load(from remoteURL: URL, quality: HLSRewriteConfiguration.QualityPolicy) async {
@@ -309,6 +327,11 @@ private final class StubPlayer: FeedBufferControllable {
         loadedURLs.append(remoteURL)
         if loadDelayNanoseconds > 0 {
             try? await Task.sleep(nanoseconds: loadDelayNanoseconds)
+        }
+        if failuresRemaining > 0 {
+            failuresRemaining -= 1
+            stateValue = PlayerState(status: .failed("stub"))
+            return
         }
         stateValue = PlayerState(status: .ready, bufferDepthSeconds: stateValue.bufferDepthSeconds + 1, qualityDescription: "test")
     }

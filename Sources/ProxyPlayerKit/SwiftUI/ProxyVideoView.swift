@@ -6,6 +6,12 @@ import Observation
 import HLSCore
 
 public struct ProxyVideoView: View {
+    private struct PlaybackRequest: Equatable {
+        let url: URL
+        let configuration: ProxyPlayerConfiguration
+        let quality: HLSRewriteConfiguration.QualityPolicy
+    }
+
     @State private var player: ProxyHLSPlayer
     @State private var autoplayController = ProxyVideoAutoplayController()
     private let remoteURL: URL
@@ -41,15 +47,24 @@ public struct ProxyVideoView: View {
 
     public var body: some View {
         @Bindable var bindablePlayer = player
-        let statusLabel = statusText(for: bindablePlayer.state)
+        let statusLabel = statusText(
+            status: bindablePlayer.status,
+            bufferDepthSeconds: bindablePlayer.bufferDepthSeconds
+        )
+        let request = PlaybackRequest(
+            url: remoteURL,
+            configuration: configuration,
+            quality: qualityOverride ?? configuration.qualityPolicy
+        )
 
         VideoPlayer(player: bindablePlayer.player)
-            .task(id: remoteURL) {
-                let quality = qualityOverride ?? configuration.qualityPolicy
+            .task(id: request) {
                 autoplayController.reset()
-                await bindablePlayer.load(from: remoteURL, quality: quality)
+                await bindablePlayer.updateConfiguration(configuration)
+                guard !Task.isCancelled else { return }
+                await bindablePlayer.load(from: remoteURL, quality: request.quality)
             }
-            .onChange(of: bindablePlayer.state.status, initial: false) { _, status in
+            .onChange(of: bindablePlayer.status, initial: false) { _, status in
                 autoplayController.handleTransition(
                     to: status,
                     autoplay: autoplay,
@@ -59,7 +74,7 @@ public struct ProxyVideoView: View {
 #if os(tvOS)
             .focusable(true)
             .onPlayPauseCommand {
-                if bindablePlayer.state.status == .ready {
+                if bindablePlayer.status == .ready {
                     if bindablePlayer.player?.timeControlStatus == .playing {
                         bindablePlayer.pause()
                     } else {
@@ -81,11 +96,11 @@ public struct ProxyVideoView: View {
     }
 
 
-    private func statusText(for state: PlayerState) -> String {
-        switch state.status {
+    private func statusText(status: PlayerState.Status, bufferDepthSeconds: TimeInterval) -> String {
+        switch status {
         case .idle: return "Idle"
         case .buffering: return "Buffering"
-        case .ready: return "Ready (\(String(format: "%.1fs", state.bufferDepthSeconds)))"
+        case .ready: return "Ready (\(String(format: "%.1fs", bufferDepthSeconds)))"
         case .failed(let reason): return "Failed: \(reason)"
         }
     }
@@ -102,7 +117,7 @@ public struct ProxyVideoView: View {
                 hideUntilBuffered: false
             ),
             cachePolicy: .init(
-                memoryCapacity: 100,
+                memoryCapacityBytes: 100 * 1024 * 1024,
                 enableDiskCache: false
             )
         ),

@@ -3,6 +3,7 @@ import Foundation
 public protocol SegmentSource: Sendable {
     func fetchSegment(_ segment: HLSSegment) async throws -> Data
     func fetchPartialSegment(_ segment: HLSPartialSegment) async throws -> Data
+    func fetchResource(at url: URL, byteRange: ClosedRange<Int>?) async throws -> Data
 }
 
 public protocol Caching: Sendable {
@@ -13,5 +14,9 @@ public protocol Caching: Sendable {
 public extension SegmentSource {
     func fetchPartialSegment(_ segment: HLSPartialSegment) async throws -> Data {
         try await fetchSegment(segment.asSegment())
+    }
+
+    func fetchResource(at url: URL, byteRange: ClosedRange<Int>?) async throws -> Data {
+        try await fetchSegment(HLSSegment(url: url, duration: 0, sequence: 0, byteRange: byteRange))
     }
 }

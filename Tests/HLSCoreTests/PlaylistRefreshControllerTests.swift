@@ -91,6 +91,25 @@ final class PlaylistRefreshControllerTests: XCTestCase {
         XCTAssertEqual(queryItems["_HLS_skip"], "YES")
     }
 
+    func testCancellationDoesNotCountAsRefreshFailure() async throws {
+        let loader = PlaylistRefreshMockLoader()
+        await loader.enqueue(error: CancellationError())
+        let controller = makeController(interval: 0.01, loader: loader)
+
+        await controller.start(
+            url: URL(string: "https://example.com/live.m3u8")!,
+            allowInsecure: false,
+            retryPolicy: .init(maxAttempts: 3, retryDelay: 0),
+            onUpdate: { _ in }
+        )
+        try await Task.sleep(nanoseconds: 30_000_000)
+
+        let metrics = await controller.metrics()
+        XCTAssertEqual(metrics.consecutiveFailures, 0)
+        XCTAssertNil(metrics.lastErrorDescription)
+        await controller.stop()
+    }
+
     private func makeController(interval: TimeInterval, loader: PlaylistRefreshMockLoader) -> PlaylistRefreshController {
         PlaylistRefreshController(
             configuration: .init(refreshInterval: interval, maxBackoffInterval: interval * 2),

@@ -154,6 +154,7 @@ public actor PlaylistRefreshController {
             do {
                 let (requestURL, timeout, wasBlocking) = nextRequestParameters()
                 let playlist = try await fetchPlaylist(from: requestURL, requestTimeout: timeout)
+                try Task.checkCancellation()
                 updateBlockingMetadata(from: playlist)
                 await onUpdate?(playlist)
                 lastRefreshDate = Date()
@@ -164,6 +165,8 @@ public actor PlaylistRefreshController {
                 if playlist.isEndlist {
                     isEnded = true
                 }
+            } catch is CancellationError {
+                break
             } catch {
                 consecutiveFailures += 1
                 lastErrorDescription = error.localizedDescription

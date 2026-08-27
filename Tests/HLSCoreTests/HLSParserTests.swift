@@ -252,4 +252,108 @@ final class HLSParserTests: XCTestCase {
         XCTAssertEqual(lastSegment.parts.count, 2)
         XCTAssertTrue(lastSegment.parts.first?.isIndependent ?? false)
     }
+
+    func testRequiresHeaderAsFirstLine() {
+        XCTAssertThrowsError(try HLSParser().parse("# comment\n#EXTM3U\n", baseURL: nil)) { error in
+            guard case HLSParser.ParserError.missingHeader = error else {
+                return XCTFail("Expected missingHeader, got \(error)")
+            }
+        }
+    }
+
+    func testResolvesImplicitByteRangesAgainstPreviousRangeForSameResource() throws {
+        let text = """
+        #EXTM3U
+        #EXT-X-TARGETDURATION:4
+        #EXT-X-BYTERANGE:4@10
+        #EXTINF:4,
+        media.mp4
+        #EXT-X-BYTERANGE:3
+        #EXTINF:4,
+        media.mp4
+        """
+        let playlist = try XCTUnwrap(
+            HLSParser().parse(text, baseURL: URL(string: "https://cdn.test/main.m3u8")).mediaPlaylist
+        )
+        XCTAssertEqual(playlist.segments.map(\.byteRange), [10...13, 14...16])
+    }
+
+    func testRejectsInvalidByteRangeWithoutPriorResourceRange() {
+        let text = """
+        #EXTM3U
+        #EXT-X-BYTERANGE:4
+        #EXTINF:4,
+        media.mp4
+        """
+        XCTAssertThrowsError(try HLSParser().parse(text, baseURL: URL(string: "https://cdn.test/main.m3u8")))
+    }
+
+    func testRejectsByteRangeWithEmptyExplicitOffset() {
+        let text = """
+        #EXTM3U
+        #EXT-X-TARGETDURATION:4
+        #EXT-X-BYTERANGE:4@
+        #EXTINF:4,
+        media.mp4
+        """
+
+        XCTAssertThrowsError(try HLSParser().parse(text, baseURL: URL(string: "https://cdn.test/main.m3u8")))
+    }
+
+    func testPreservesTrailingLowLatencyParts() throws {
+        let text = """
+        #EXTM3U
+        #EXT-X-VERSION:10
+        #EXT-X-PART-INF:PART-TARGET=0.5
+        #EXT-X-MEDIA-SEQUENCE:42
+        #EXT-X-PART:DURATION=0.5,URI="part0.m4s",INDEPENDENT=YES
+        #EXT-X-PART:DURATION=0.5,URI="part1.m4s"
+        """
+        let playlist = try XCTUnwrap(
+            HLSParser().parse(text, baseURL: URL(string: "https://cdn.test/live.m3u8")).mediaPlaylist
+        )
+        XCTAssertTrue(playlist.segments.isEmpty)
+        XCTAssertEqual(playlist.trailingParts.count, 2)
+        XCTAssertEqual(playlist.trailingParts.first?.parentSequence, 42)
+    }
+
+    func testPreservesSegmentAndPlaylistMetadata() throws {
+        let text = """
+        #EXTM3U
+        #EXT-X-VERSION:7
+        #EXT-X-INDEPENDENT-SEGMENTS
+        #EXT-X-PLAYLIST-TYPE:EVENT
+        #EXT-X-DISCONTINUITY-SEQUENCE:3
+        #EXT-X-DISCONTINUITY
+        #EXT-X-PROGRAM-DATE-TIME:2026-08-26T20:00:00Z
+        #EXT-X-GAP
+        #EXTINF:4,
+        segment.ts
+        """
+        let playlist = try XCTUnwrap(HLSParser().parse(text, baseURL: URL(string: "https://cdn.test/live.m3u8")).mediaPlaylist)
+        XCTAssertEqual(playlist.protocolVersion, 7)
+        XCTAssertTrue(playlist.independentSegments)
+        XCTAssertEqual(playlist.playlistType, "EVENT")
+        XCTAssertEqual(playlist.discontinuitySequence, 3)
+        XCTAssertEqual(playlist.segments[0].metadataTags.count, 3)
+    }
+
+    func testSubtitlesRenditionRequiresURI() {
+        let text = """
+        #EXTM3U
+        #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English"
+        """
+        XCTAssertThrowsError(try HLSParser().parse(text, baseURL: nil))
+    }
+
+    func testSubstitutesDefinedVariablesInURIs() throws {
+        let text = """
+        #EXTM3U
+        #EXT-X-DEFINE:NAME="path",VALUE="video"
+        #EXTINF:4,
+        {$path}/segment.ts
+        """
+        let playlist = try XCTUnwrap(HLSParser().parse(text, baseURL: URL(string: "https://cdn.test/main.m3u8")).mediaPlaylist)
+        XCTAssertEqual(playlist.segments.first?.url.absoluteString, "https://cdn.test/video/segment.ts")
+    }
 }

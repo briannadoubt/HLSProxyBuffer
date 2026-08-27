@@ -16,13 +16,15 @@ struct StreamView: View {
 
         ProxyVideoView(player: player, url: streamURL, autoplay: true)
             .overlay(alignment: .bottomLeading) {
-                Text("Prefetched \(player.state.bufferDepthSeconds, specifier: "%.1f")s")
+                Text("Prefetched \(player.bufferDepthSeconds, specifier: "%.1f")s")
             }
     }
 }
 ```
 
-`ProxyVideoView` and `ProxyPlayerSampleView` follow the exact pattern above. The view instantiates the player in `@State`, passes the reference through `@Bindable`, and relies on Observation to invalidate the view whenever `player.player`, `player.state`, or rendition arrays change. There is no `@StateObject`, `ObservableObject`, or `objectWillChange` bridging left in the module.
+`ProxyVideoView` and `ProxyPlayerSampleView` follow the same ownership pattern. Frequently changing values (`status`, `bufferDepthSeconds`, and `qualityDescription`) are stored independently, so reading one value does not subscribe a view to unrelated state. There is no `@StateObject`, `ObservableObject`, or `objectWillChange` bridge in the module.
+
+Imperative consumers can use `player.stateUpdates()`. It returns a bounded `AsyncStream<PlayerState>` that immediately yields the current snapshot and then delivers ordered updates without polling. Cancel the consuming task when its owner disappears.
 
 ## Feed-aware Buffering
 
@@ -71,7 +73,7 @@ struct FeedPager: View {
 }
 ```
 
-Every time the visible index changes the controller reassigns roles, calls `load`/`play`/`pause`/`stop`, and emits telemetry via `FeedBufferTelemetry`. The sample above shows the integration points: rows register descriptors and the pager reports visibility changes.
+Every time the visible index changes the controller reassigns roles, serializes configuration before loading, and emits telemetry via `FeedBufferTelemetry`. It consumes each player's state stream rather than polling, retries failed warm loads with capped exponential backoff, and applies each descriptor's memory estimate as a real cache byte cap.
 
 ## UIKit / AppKit Bridging
 
@@ -81,7 +83,7 @@ Every time the visible index changes the controller reassigns roles, calls `load
 
 - Use `@State` + `@Bindable` (or `@Environment(\.proxyPlayer)` if you inject it) instead of `@StateObject`/`@ObservedObject`.
 - Derived helpers that should not trigger view invalidations belong in `@ObservationIgnored` members or extensions, as seen in `ProxyHLSPlayer`.
-- Combine-based observers no longer fire; rely on Observation-driven updates or the `ProxyPlayerDiagnostics` callbacks for imperative hooks.
+- Combine-based observers no longer fire; rely on Observation, `stateUpdates()`, or `ProxyPlayerDiagnostics` for imperative hooks.
 - The tvOS/iOS autoplay logic lives in `ProxyVideoAutoplayController`, making it easy to test and reason about stateful playback triggers.
 
 When exposing the player through additional frameworks, mirror this pattern: adopt `@Bindable` if the consumer is a SwiftUI `DynamicProperty`, or call `ObservationTracking` directly if you need imperative callbacks.
