@@ -9,15 +9,20 @@ import HLSCore
 @MainActor
 public final class PlaybackAnalyticsTimeline {
     public struct Configuration: Equatable, Sendable {
+        /// Disables timeline storage, emission, and engine-owned analytics
+        /// observers while leaving fixed-cardinality feed telemetry enabled.
+        public let isEnabled: Bool
         public let eventBufferCapacity: Int
         public let summaryBufferCapacity: Int
         public let maximumActiveAttemptCount: Int
 
         public init(
+            isEnabled: Bool = true,
             eventBufferCapacity: Int = 128,
             summaryBufferCapacity: Int = 64,
             maximumActiveAttemptCount: Int = 16
         ) {
+            self.isEnabled = isEnabled
             self.eventBufferCapacity = min(max(1, eventBufferCapacity), 512)
             self.summaryBufferCapacity = min(max(1, summaryBufferCapacity), 256)
             self.maximumActiveAttemptCount = min(max(1, maximumActiveAttemptCount), 64)
@@ -115,10 +120,13 @@ public final class PlaybackAnalyticsTimeline {
     public let events: AsyncStream<PlaybackAnalytics.Event>
     /// One terminal summary for every attempt, including evicted and unfinished attempts.
     public let summaries: AsyncStream<PlaybackAnalytics.Summary>
+    public var isEnabled: Bool { configuration.isEnabled }
     public var snapshot: Snapshot {
         Snapshot(
             activeAttemptCount: states.count,
-            maximumActiveAttemptCount: configuration.maximumActiveAttemptCount,
+            maximumActiveAttemptCount: configuration.isEnabled
+                ? configuration.maximumActiveAttemptCount
+                : 0,
             emittedEventCount: emittedEventCount,
             droppedEventCount: droppedEventCount,
             emittedSummaryCount: emittedSummaryCount,
@@ -200,6 +208,16 @@ public final class PlaybackAnalyticsTimeline {
     /// Starts one opaque attempt and emits its first ordered lifecycle event.
     @discardableResult
     public func beginAttempt(attribution: Attribution) -> Attempt {
+        guard configuration.isEnabled else {
+            return Attempt(
+                correlation: .init(
+                    sessionID: sessionID,
+                    playbackID: .init(),
+                    itemID: .init()
+                ),
+                token: UUID()
+            )
+        }
         guard !isFinished else {
             staleEventCount = Self.saturatingAdd(staleEventCount, 1)
             return Attempt(
@@ -548,6 +566,7 @@ public final class PlaybackAnalyticsTimeline {
         avFoundation event: PlaybackAnalytics.Event,
         attempt: Attempt
     ) {
+        guard configuration.isEnabled else { return }
         guard event.correlation == attempt.correlation else {
             staleEventCount = Self.saturatingAdd(staleEventCount, 1)
             return
@@ -583,6 +602,7 @@ public final class PlaybackAnalyticsTimeline {
         lifecycle: PlaybackAnalytics.Lifecycle,
         priority: PlaybackAnalytics.Priority = .critical
     ) {
+        guard configuration.isEnabled else { return }
         guard states[attempt.token]?.attempt == attempt else {
             staleEventCount = Self.saturatingAdd(staleEventCount, 1)
             return
@@ -607,6 +627,7 @@ public final class PlaybackAnalyticsTimeline {
         reason: PlaybackAnalytics.TerminalReason,
         priority: PlaybackAnalytics.Priority = .critical
     ) {
+        guard configuration.isEnabled else { return }
         guard states[attempt.token]?.attempt == attempt else {
             staleEventCount = Self.saturatingAdd(staleEventCount, 1)
             return
@@ -663,10 +684,11 @@ public final class PlaybackAnalyticsTimeline {
     }
 
     func isActive(_ attempt: Attempt) -> Bool {
-        states[attempt.token]?.attempt == attempt
+        configuration.isEnabled && states[attempt.token]?.attempt == attempt
     }
 
     private func validState(for attempt: Attempt) -> State? {
+        guard configuration.isEnabled else { return nil }
         guard !isFinished,
               let state = states[attempt.token],
               state.attempt == attempt

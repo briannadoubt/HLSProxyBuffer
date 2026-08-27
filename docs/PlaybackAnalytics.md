@@ -364,6 +364,34 @@ Exporters must use the typed `Event` and `Summary` values rather than accepting
 arbitrary dictionaries. Authentication belongs to an ephemeral sink request
 configuration and never to an event, summary, or disk spool.
 
+## Runtime opt-out and release qualification
+
+Analytics is enabled by default. Set
+`PlaybackAnalyticsTimeline.Configuration(isEnabled: false)` through
+`HLSFeedEngine`'s `analyticsConfiguration` when a product must disable the
+ordered analytics timeline entirely. The engine then skips analytics attempt
+storage, event and summary emission, streaming-telemetry subscriptions, and
+AVFoundation metric observers. Fixed-cardinality `HLSFeedTelemetry` remains
+available for local playback health. This explicit switch is also the baseline
+for the release overhead gate; it is not a sampling shortcut.
+
+The release qualification alternates enabled and disabled runs of the same
+local-fixture rapid-navigation workload after warmup. The median enabled-minus-
+disabled first-frame p95 must be at most 5 ms, and the positive process CPU-
+utilization delta must be at most two percentage points. A separate integrated
+100,000-event run proves timeline, summary, queue, memory, task, subscriber,
+and drop bounds; slow and offline sinks prove shedding, bounded disk spooling,
+critical-summary survival, and recovery. Canonical batch, JSON Lines, and spool
+payloads are scanned for URLs, addresses, headers, credentials, user data, and
+unapproved application identifiers.
+
+Address Sanitizer runs the correctness, privacy, recovery, and lifetime suite;
+explicit weak-lifetime assertions fail on retained timelines or delivery actors,
+and Thread Sanitizer runs every non-performance test. Release JSON reports,
+sanitizer logs, and the Release-mode iOS simulator result bundle are uploaded
+together by hosted CI. See [Automatic feed release qualification](FeedQualification.md)
+for artifact names and reproduction commands.
+
 ## Aggregation rules
 
 Fleet systems aggregate numeric measurements by schema major, source,

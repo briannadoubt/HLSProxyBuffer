@@ -142,6 +142,41 @@ final class PlaybackAnalyticsTimelineTests: XCTestCase {
         XCTAssertEqual(timeline.snapshot.staleEventCount, 2)
     }
 
+    func testDisabledTimelineDoesNotStoreEmitOrCountEngineSignals() async {
+        let timeline = PlaybackAnalyticsTimeline(configuration: .init(isEnabled: false))
+        let attempt = timeline.beginAttempt(attribution: .init(
+            reuse: .warm,
+            intent: .focused,
+            mediaKind: .videoOnDemand
+        ))
+        timeline.record(
+            source: .feedEngine,
+            lifecycle: .playbackStarted,
+            priority: .important,
+            attempt: attempt
+        )
+        timeline.record(feed: .init(
+            payload: .resources(
+                memoryBytes: 4_096,
+                diskBytes: 8_192,
+                playerPoolOccupancy: 2,
+                proxyPoolOccupancy: 2
+            )
+        ), attempt: attempt)
+        timeline.end(attempt, reason: .completed)
+        timeline.finish()
+
+        var events: [PlaybackAnalytics.Event] = []
+        for await event in timeline.events { events.append(event) }
+        var summaries: [PlaybackAnalytics.Summary] = []
+        for await summary in timeline.summaries { summaries.append(summary) }
+
+        XCTAssertFalse(timeline.isEnabled)
+        XCTAssertTrue(events.isEmpty)
+        XCTAssertTrue(summaries.isEmpty)
+        XCTAssertEqual(timeline.snapshot, .empty)
+    }
+
     private func streamingSnapshot() -> HLSStreamingTelemetry.Snapshot {
         .init(
             segmentFetchLatency: .init(

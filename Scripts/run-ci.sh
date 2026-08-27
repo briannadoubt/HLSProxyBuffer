@@ -26,7 +26,15 @@ wait_for_simulator_boot() {
 }
 
 echo "Running SwiftPM tests on host..."
-swift test
+echo "Running analytics qualification in Release configuration..."
+HLS_ANALYTICS_QUALIFICATION_CONFIGURATION=release \
+  swift test -c release \
+    --filter 'PlaybackAnalytics(Qualification|Performance)Tests'
+
+echo "Running the remaining SwiftPM tests on host..."
+swift test \
+  --skip 'PlaybackAnalyticsQualificationTests' \
+  --skip 'PlaybackAnalyticsPerformanceTests'
 
 if command -v xcodebuild >/dev/null 2>&1; then
   IOS_SIM_NAME="iPhone Air"
