@@ -34,17 +34,25 @@ public struct ProxyPlayerConfiguration: Sendable, Equatable {
         public var diskCapacityBytes: Int
         public var enableDiskCache: Bool
         public var diskDirectory: URL?
+        /// Optional entry lifetime. `nil` keeps entries until LRU eviction.
+        public var timeToLive: TimeInterval?
+        /// Bounds metadata independently of byte budgets, including zero-byte entries.
+        public var maximumEntryCount: Int
 
         public init(
             memoryCapacityBytes: Int = 32 * 1024 * 1024,
             diskCapacityBytes: Int = 512 * 1024 * 1024,
             enableDiskCache: Bool = false,
-            diskDirectory: URL? = nil
+            diskDirectory: URL? = nil,
+            timeToLive: TimeInterval? = nil,
+            maximumEntryCount: Int = 4_096
         ) {
             self.memoryCapacityBytes = max(0, memoryCapacityBytes)
             self.diskCapacityBytes = max(0, diskCapacityBytes)
             self.enableDiskCache = enableDiskCache
             self.diskDirectory = diskDirectory
+            self.timeToLive = timeToLive.flatMap { $0.isFinite ? max(0, $0) : nil }
+            self.maximumEntryCount = max(1, maximumEntryCount)
         }
 
         @available(*, deprecated, message: "Use memoryCapacityBytes; the value is a byte budget.")

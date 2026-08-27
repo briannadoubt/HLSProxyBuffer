@@ -208,7 +208,9 @@ public final class ProxyHLSPlayer {
                 for: configuration.cachePolicy,
                 identifier: cacheDirectoryIdentifier
             ),
-            diskCapacityBytes: configuration.cachePolicy.diskCapacityBytes
+            diskCapacityBytes: configuration.cachePolicy.diskCapacityBytes,
+            timeToLive: configuration.cachePolicy.timeToLive,
+            maximumEntryCount: configuration.cachePolicy.maximumEntryCount
         )
         self.scheduler = SegmentPrefetchScheduler(configuration: .init(
             targetBufferSeconds: configuration.bufferPolicy.targetBufferSeconds,
@@ -1655,7 +1657,9 @@ public final class ProxyHLSPlayer {
                 for: configuration.cachePolicy,
                 identifier: cacheDirectoryIdentifier
             ),
-            diskCapacityBytes: configuration.cachePolicy.diskCapacityBytes
+            diskCapacityBytes: configuration.cachePolicy.diskCapacityBytes,
+            timeToLive: configuration.cachePolicy.timeToLive,
+            maximumEntryCount: configuration.cachePolicy.maximumEntryCount
         )
         await segmentFetcher.updateValidationPolicy(configuration.segmentValidation)
         let partBufferCount = configuration.lowLatencyPolicy.isEnabled ? configuration.lowLatencyPolicy.targetPartBufferCount : 0

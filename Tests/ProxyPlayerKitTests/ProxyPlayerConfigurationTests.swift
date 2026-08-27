@@ -32,4 +32,16 @@ final class ProxyPlayerConfigurationTests: XCTestCase {
 
         XCTAssertEqual(configuration.segmentRetryPolicy, policy)
     }
+
+    func testCachePolicyNormalizesTTLAndMetadataBound() {
+        let immediate = ProxyPlayerConfiguration.CachePolicy(
+            timeToLive: -5,
+            maximumEntryCount: 0
+        )
+        XCTAssertEqual(immediate.timeToLive, 0)
+        XCTAssertEqual(immediate.maximumEntryCount, 1)
+
+        let disabled = ProxyPlayerConfiguration.CachePolicy(timeToLive: .infinity)
+        XCTAssertNil(disabled.timeToLive)
+    }
 }

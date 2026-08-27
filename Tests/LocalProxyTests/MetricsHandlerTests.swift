@@ -44,6 +44,9 @@ final class MetricsHandlerTests: XCTestCase {
         XCTAssertTrue(body.contains("hlsproxy_segment_fetch_errors_total{category=\"http_server\"} 1"))
         XCTAssertTrue(body.contains("hlsproxy_segment_retry_outcomes_total{outcome=\"failure_after_retry\"} 1"))
         XCTAssertTrue(body.contains("hlsproxy_cache_hit_ratio 0.5"))
+        XCTAssertTrue(body.contains("hlsproxy_cache_namespace_hits_total{namespace=\"video\"} 1"))
+        XCTAssertTrue(body.contains("hlsproxy_cache_namespace_misses_total{namespace=\"video\"} 1"))
+        XCTAssertTrue(body.contains("hlsproxy_cache_namespace_evictions_total{namespace=\"audio\",tier=\"disk\"} 0"))
         XCTAssertTrue(body.contains("hlsproxy_live_edge_distance_seconds 2.5"))
         XCTAssertTrue(body.contains("hlsproxy_variant_switches_total{reason=\"buffer_depleted\"} 1"))
     }
