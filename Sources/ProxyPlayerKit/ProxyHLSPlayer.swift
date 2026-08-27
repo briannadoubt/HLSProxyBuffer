@@ -117,7 +117,8 @@ public final class ProxyHLSPlayer {
         PlayerState(
             status: status,
             bufferDepthSeconds: bufferDepthSeconds,
-            qualityDescription: qualityDescription
+            qualityDescription: qualityDescription,
+            livePlayback: livePlayback
         )
     }
     public private(set) var configuration: ProxyPlayerConfiguration
@@ -133,6 +134,8 @@ public final class ProxyHLSPlayer {
     public private(set) var playbackRate: Float = 1.0
     /// Fixed-memory operational telemetry. Changes participate in Observation.
     public private(set) var telemetrySnapshot = HLSStreamingTelemetry.Snapshot.empty
+    /// Typed live-edge and DVR state. `nil` for on-demand and stitched items.
+    public private(set) var livePlayback: LivePlaybackState?
 
     @ObservationIgnored private let logger: Logger
     @ObservationIgnored private let manifestProcessor = ManifestProcessor()
@@ -147,6 +150,7 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var manifestSession: URLSession
     @ObservationIgnored private var appliedNetworkPolicy: HLSOriginNetworkPolicy
     @ObservationIgnored private var currentPlaylist: MediaPlaylist?
+    @ObservationIgnored private var currentLiveWindow: HLSLiveWindow?
     @ObservationIgnored private var currentRewriteConfiguration: HLSRewriteConfiguration?
     @ObservationIgnored private var didPreparePlayerForCurrentLoad = false
     @ObservationIgnored private lazy var server = ProxyServer(router: router)
@@ -299,6 +303,9 @@ public final class ProxyHLSPlayer {
         quality: HLSRewriteConfiguration.QualityPolicy = .automatic
     ) async {
         clipStitchingError = nil
+        player?.currentItem?.cancelPendingSeeks()
+        currentLiveWindow = nil
+        livePlayback = nil
         sessionGeneration &+= 1
         let generation = sessionGeneration
         activeLoadTask?.cancel()
@@ -345,6 +352,9 @@ public final class ProxyHLSPlayer {
     /// and the `AVPlayerItem`; adopters only provide trusted media signatures.
     public func load(clips: [ProxyPlaybackClip]) async throws {
         clipStitchingError = nil
+        player?.currentItem?.cancelPendingSeeks()
+        currentLiveWindow = nil
+        livePlayback = nil
         sessionGeneration &+= 1
         let generation = sessionGeneration
         activeLoadTask?.cancel()
@@ -410,6 +420,58 @@ public final class ProxyHLSPlayer {
         }
     }
 
+    /// Seeks to the stream's recommended live position, honoring server
+    /// `HOLD-BACK`/`PART-HOLD-BACK` guidance when available.
+    public func jumpToLive() async throws {
+        guard let window = currentLiveWindow else {
+            throw LivePlaybackControlError.notLive
+        }
+        try await seek(secondsBehindLiveEdge: window.recommendedLiveEdgeDistanceSeconds)
+    }
+
+    /// Seeks to an exact distance behind the current live edge.
+    ///
+    /// The playlist model validates the requested DVR distance while
+    /// AVPlayer's current seekable range supplies the presentation-time map.
+    public func seek(secondsBehindLiveEdge distance: TimeInterval) async throws {
+        guard distance.isFinite, distance >= 0 else {
+            throw LivePlaybackControlError.invalidDistance
+        }
+        guard let window = currentLiveWindow else {
+            throw LivePlaybackControlError.notLive
+        }
+        guard distance <= window.durationSeconds else {
+            throw LivePlaybackControlError.outsideDVRWindow(
+                requested: distance,
+                maximum: window.durationSeconds
+            )
+        }
+        guard let player, let range = currentSeekableTimeRange() ?? fallbackLiveTimeRange() else {
+            throw LivePlaybackControlError.seekUnavailable
+        }
+
+        let generation = sessionGeneration
+        try Task.checkCancellation()
+        let rangeDuration = range.duration.seconds
+        guard rangeDuration.isFinite, rangeDuration >= distance else {
+            throw LivePlaybackControlError.outsideDVRWindow(
+                requested: distance,
+                maximum: max(0, rangeDuration.isFinite ? rangeDuration : 0)
+            )
+        }
+        let target = CMTimeSubtract(CMTimeRangeGetEnd(range), CMTime(
+            seconds: distance,
+            preferredTimescale: 600
+        ))
+        let finished = try await performLiveSeek(
+            player: player,
+            target: target,
+            generation: generation
+        )
+        guard finished else { throw LivePlaybackControlError.seekRejected }
+        publishLivePlayback(playbackTime: target.seconds)
+    }
+
     public func stop() {
         sessionGeneration &+= 1
         let loadTask = activeLoadTask
@@ -418,6 +480,7 @@ public final class ProxyHLSPlayer {
         cleanupTask?.cancel()
         shouldPlayWhenReady = false
         player?.pause()
+        player?.currentItem?.cancelPendingSeeks()
         removePlaybackTimeObserver()
         player = nil
         mediaSelectionTask?.cancel()
@@ -428,6 +491,8 @@ public final class ProxyHLSPlayer {
         abrSwitchInProgress = false
         latestBufferState = nil
         currentPlaylist = nil
+        currentLiveWindow = nil
+        livePlayback = nil
         currentRewriteConfiguration = nil
         Task { [telemetry] in await telemetry.updateLiveEdgeDistance(nil) }
         for task in renditionRefreshTasks.values { task.cancel() }
@@ -545,6 +610,7 @@ public final class ProxyHLSPlayer {
         masterPassthroughTags = playlistResult.masterPassthroughTags
         masterSessionKeys = playlistResult.masterSessionKeys
         currentPlaylist = playlist
+        updateLiveTimeline(for: playlist)
         updateKeyDiagnostics(for: playlist)
         await segmentCatalog.update(with: playlist, namespace: SegmentCatalog.Namespace.primary)
 
@@ -673,6 +739,7 @@ public final class ProxyHLSPlayer {
         // generated master, where the generic DRM policy could expose origins.
         masterSessionKeys = []
         currentPlaylist = playlist
+        updateLiveTimeline(for: playlist)
         updateKeyDiagnostics(for: playlist)
         await segmentCatalog.update(with: playlist, namespace: SegmentCatalog.Namespace.primary)
 
@@ -724,6 +791,7 @@ public final class ProxyHLSPlayer {
         }
         player?.defaultRate = playbackRate
         installPlaybackTimeObserver()
+        publishLivePlayback(playbackTime: player?.currentTime().seconds)
         applyActiveRenditionsToPlayer()
         if shouldPlayWhenReady {
             player?.play()
@@ -796,6 +864,7 @@ public final class ProxyHLSPlayer {
     }
 
     private func consumePlayedSegments(through seconds: TimeInterval) async {
+        publishLivePlayback(playbackTime: seconds)
         let played = playbackTimeline.last(where: { $0.endTime <= seconds })?.sequence
         guard let played, played != lastPlaybackSequence else { return }
         lastPlaybackSequence = played
@@ -1732,6 +1801,7 @@ public final class ProxyHLSPlayer {
         } else {
             extendPlaybackTimeline(with: playlist)
         }
+        updateLiveTimeline(for: playlist, updatePlaybackPosition: true)
         updateKeyDiagnostics(for: playlist)
         await segmentCatalog.update(with: playlist, namespace: SegmentCatalog.Namespace.primary)
         await scheduler.updatePlaylist(playlist)
@@ -2063,9 +2133,134 @@ public final class ProxyHLSPlayer {
         status = state.status
         bufferDepthSeconds = state.bufferDepthSeconds
         qualityDescription = state.qualityDescription
+        let snapshot = self.state
         for continuation in stateContinuations.values {
-            continuation.yield(state)
+            continuation.yield(snapshot)
         }
+    }
+
+    private func updateLiveTimeline(
+        for playlist: MediaPlaylist,
+        updatePlaybackPosition: Bool = false
+    ) {
+        switch HLSLiveTimeline.state(for: playlist) {
+        case .videoOnDemand:
+            currentLiveWindow = nil
+            setLivePlayback(nil)
+        case .unavailable(let reason):
+            currentLiveWindow = nil
+            setLivePlayback(LivePlaybackState(seekability: .unavailable(reason)))
+        case .available(let window):
+            currentLiveWindow = window
+            if updatePlaybackPosition {
+                publishLivePlayback(playbackTime: player?.currentTime().seconds)
+            } else {
+                setLivePlayback(LivePlaybackState(
+                    seekability: .dvr(
+                        maximumSecondsBehindLiveEdge: window.durationSeconds
+                    ),
+                    window: window
+                ))
+            }
+        }
+    }
+
+    private func publishLivePlayback(playbackTime: TimeInterval?) {
+        guard let window = currentLiveWindow else { return }
+        let range = currentSeekableTimeRange() ?? fallbackLiveTimeRange()
+        let rangeDuration = range?.duration.seconds
+        let maximumDistance: TimeInterval
+        if let rangeDuration, rangeDuration.isFinite, rangeDuration > 0 {
+            maximumDistance = min(window.durationSeconds, rangeDuration)
+        } else {
+            maximumDistance = window.durationSeconds
+        }
+        let seekability: LivePlaybackState.Seekability = maximumDistance > 0
+            ? .dvr(maximumSecondsBehindLiveEdge: maximumDistance)
+            : .liveOnly
+
+        let distance: TimeInterval?
+        if let range,
+           let playbackTime,
+           playbackTime.isFinite,
+           CMTimeRangeGetEnd(range).seconds.isFinite {
+            distance = min(
+                window.durationSeconds,
+                max(0, CMTimeRangeGetEnd(range).seconds - playbackTime)
+            )
+        } else {
+            distance = nil
+        }
+        setLivePlayback(LivePlaybackState(
+            seekability: seekability,
+            window: window,
+            liveEdgeDistanceSeconds: distance,
+            playheadProgramDateTime: distance.flatMap {
+                window.programDate(secondsBehindLiveEdge: $0)
+            }
+        ))
+    }
+
+    private func setLivePlayback(_ value: LivePlaybackState?) {
+        guard livePlayback != value else { return }
+        livePlayback = value
+        let snapshot = state
+        for continuation in stateContinuations.values {
+            continuation.yield(snapshot)
+        }
+    }
+
+    private func currentSeekableTimeRange() -> CMTimeRange? {
+        guard let value = player?.currentItem?.seekableTimeRanges.last else { return nil }
+        let range = value.timeRangeValue
+        guard range.isValid, !range.isEmpty else { return nil }
+        return range
+    }
+
+    private func fallbackLiveTimeRange() -> CMTimeRange? {
+        guard let playlist = currentPlaylist,
+              let firstSegment = playlist.segments.first,
+              let firstTimelineEntry = playbackTimeline.first(where: {
+                  $0.sequence == firstSegment.sequence
+              })
+        else { return nil }
+        let start = max(0, firstTimelineEntry.endTime - firstSegment.duration)
+        let completeEnd = playlist.segments.last.flatMap { lastSegment in
+            playbackTimeline.first(where: { $0.sequence == lastSegment.sequence })?.endTime
+        } ?? firstTimelineEntry.endTime
+        let trailingDuration = playlist.trailingParts.reduce(0) { $0 + $1.duration }
+        let end = completeEnd + trailingDuration
+        guard end > start else { return nil }
+        return CMTimeRange(
+            start: CMTime(seconds: start, preferredTimescale: 600),
+            duration: CMTime(seconds: end - start, preferredTimescale: 600)
+        )
+    }
+
+    private func performLiveSeek(
+        player: AVPlayer,
+        target: CMTime,
+        generation: UInt64
+    ) async throws -> Bool {
+        // AVPlayer can transiently reject an otherwise valid seek while a new
+        // HLS item is establishing its timebase. Keep this wait bounded and
+        // generation checked so feed focus changes cancel it promptly.
+        for attempt in 0..<40 {
+            try ensureActiveSession(generation)
+            player.currentItem?.cancelPendingSeeks()
+            let finished = await withCheckedContinuation { continuation in
+                player.seek(
+                    to: target,
+                    toleranceBefore: .zero,
+                    toleranceAfter: .zero
+                ) { continuation.resume(returning: $0) }
+            }
+            try ensureActiveSession(generation)
+            if finished { return true }
+            guard attempt < 39 else { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        return false
     }
 
     private func ensureActiveSession(_ generation: UInt64) throws {
@@ -2078,6 +2273,7 @@ public final class ProxyHLSPlayer {
     public static let supportedPlaybackRateRange: ClosedRange<Float> = 0.5...2.0
     public private(set) var playbackRate: Float = 1.0
     public private(set) var clipStitchingError: HLSClipStitchingError?
+    public private(set) var livePlayback: LivePlaybackState?
 
     public init() {}
     public func load(from remoteURL: URL, quality: HLSRewriteConfiguration.QualityPolicy = .automatic) async {}
@@ -2090,6 +2286,12 @@ public final class ProxyHLSPlayer {
     }
     public func play() {}
     public func pause() {}
+    public func jumpToLive() async throws {
+        throw LivePlaybackControlError.notLive
+    }
+    public func seek(secondsBehindLiveEdge: TimeInterval) async throws {
+        throw LivePlaybackControlError.notLive
+    }
     public func setPlaybackRate(_ rate: Float) {
         guard !rate.isNaN else {
             playbackRate = 1.0

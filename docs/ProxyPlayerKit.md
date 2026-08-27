@@ -26,6 +26,31 @@ struct StreamView: View {
 
 Imperative consumers can use `player.stateUpdates()`. It returns a bounded `AsyncStream<PlayerState>` that immediately yields the current snapshot and then delivers ordered updates without polling. Cancel the consuming task when its owner disappears.
 
+## Live edge and DVR
+
+Live manifests publish `player.livePlayback` through the same Observation model
+and as `PlayerState.livePlayback` on the bounded state stream. The typed state
+contains the current media-sequence window, duration, PDT wall-clock range,
+discontinuity information, recommended server hold-back, live-edge distance,
+and whether the window is live-only, DVR-seekable, or invalid. It is `nil` for
+VOD and stitched timelines.
+
+```swift
+await player.load(from: liveURL)
+
+if case .dvr(let maximum)? = player.livePlayback?.seekability {
+    try await player.seek(secondsBehindLiveEdge: min(30, maximum))
+}
+
+// Seeks to HOLD-BACK/PART-HOLD-BACK, not an unsafe zero-latency position.
+try await player.jumpToLive()
+```
+
+Both controls are generation checked, cancel superseded AVPlayer seeks, and
+return `LivePlaybackControlError` for VOD, invalid distances, unavailable
+ranges, out-of-window requests, or rejected seeks. Callers never translate
+playlist sequences, partial segments, or AVFoundation time ranges themselves.
+
 ## Playback Rate
 
 `playbackRate` is observable and records the preferred forward-playback speed. Use `setPlaybackRate(_:)` to select a rate; values are clamped to `ProxyHLSPlayer.supportedPlaybackRateRange` (`0.5...2.0`), and `NaN` restores normal speed.
@@ -116,6 +141,12 @@ struct FeedPager: View {
 ```
 
 Every time the visible index changes the controller reassigns roles, serializes configuration before loading, and emits telemetry via `FeedBufferTelemetry`. It consumes each player's state stream rather than polling, retries failed warm loads with capped exponential backoff, and applies each descriptor's memory estimate as a real cache byte cap.
+
+The automatic `FeedCoordinator` validates `.live` sources with the same
+`HLSLiveTimeline` model and carries the resulting `HLSLiveWindow` in
+`FeedPreparedItem`. The `.live` policy prepares the newest segments, keeps disk
+reuse disabled, and retains the coordinator's existing concurrency and
+cancellation bounds during rapid focus changes.
 
 ## UIKit / AppKit Bridging
 

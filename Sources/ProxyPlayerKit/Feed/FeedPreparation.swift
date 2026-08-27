@@ -38,6 +38,8 @@ public struct FeedPreparedItem: Sendable, Equatable {
     public let preparedByteCount: Int
     public let cacheHitCount: Int
     public let originFetchCount: Int
+    /// Validated live-window metadata for `.live` feed sources.
+    public let liveWindow: HLSLiveWindow?
 
     public init(
         itemID: FeedItemID,
@@ -48,7 +50,8 @@ public struct FeedPreparedItem: Sendable, Equatable {
         preparedResourceCount: Int,
         preparedByteCount: Int,
         cacheHitCount: Int,
-        originFetchCount: Int
+        originFetchCount: Int,
+        liveWindow: HLSLiveWindow? = nil
     ) {
         self.itemID = itemID
         self.generation = generation
@@ -59,6 +62,7 @@ public struct FeedPreparedItem: Sendable, Equatable {
         self.preparedByteCount = max(0, preparedByteCount)
         self.cacheHitCount = max(0, cacheHitCount)
         self.originFetchCount = max(0, originFetchCount)
+        self.liveWindow = liveWindow
     }
 }
 
@@ -79,6 +83,8 @@ public enum FeedPreparationError: Error, Equatable, LocalizedError, Sendable {
     case manifestCycle(URL)
     case manifestDepthExceeded(URL)
     case noPlayableVariant(URL)
+    case expectedLivePlaylist(FeedItemID)
+    case invalidLiveWindow(FeedItemID, HLSLiveTimeline.UnavailabilityReason)
 
     public var errorDescription: String? {
         switch self {
@@ -90,6 +96,10 @@ public enum FeedPreparationError: Error, Equatable, LocalizedError, Sendable {
             "Manifest nesting exceeds the supported depth at: \(url.absoluteString)"
         case .noPlayableVariant(let url):
             "Master manifest has no playable variant: \(url.absoluteString)"
+        case .expectedLivePlaylist(let itemID):
+            "Expected a live playlist for feed item: \(itemID)"
+        case .invalidLiveWindow(let itemID, let reason):
+            "Invalid live window for feed item \(itemID): \(String(describing: reason))"
         }
     }
 }
@@ -273,6 +283,20 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
             )]
         }
 
+        let liveWindow: HLSLiveWindow?
+        if sourceKind == .live, let playlist = resolvedPlaylists.first?.playlist {
+            switch HLSLiveTimeline.state(for: playlist) {
+            case .available(let window):
+                liveWindow = window
+            case .videoOnDemand:
+                throw FeedPreparationError.expectedLivePlaylist(request.item.id)
+            case .unavailable(let reason):
+                throw FeedPreparationError.invalidLiveWindow(request.item.id, reason)
+            }
+        } else {
+            liveWindow = nil
+        }
+
         var resources: [Resource] = []
         var seenResourceKeys: Set<String> = []
         var leadingSegmentCount = 0
@@ -346,7 +370,8 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
             preparedResourceCount: outcomes.count,
             preparedByteCount: outcomes.reduce(0) { $0 + $1.byteCount },
             cacheHitCount: manifestCacheHits + outcomes.reduce(0) { $0 + $1.cacheHitCount },
-            originFetchCount: manifestOriginFetches + outcomes.reduce(0) { $0 + $1.originFetchCount }
+            originFetchCount: manifestOriginFetches + outcomes.reduce(0) { $0 + $1.originFetchCount },
+            liveWindow: liveWindow
         )
     }
 

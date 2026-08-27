@@ -157,9 +157,12 @@ override groups cover:
 - low-power reductions to speculative work.
 
 Existing validated network, retry, telemetry, cache, and player presets remain
-the primitives underneath this policy. HLS-10 supplies stitched sources;
-HLS-11 supplies live-edge and DVR state. Both flow through HLS-16 planning and
-HLS-17 resource ownership.
+the primitives underneath this policy. HLS-10 supplies stitched sources.
+HLS-11 supplies a shared live-timeline model that validates feed preparation,
+publishes live-edge/DVR state through Observation and bounded `AsyncStream`
+snapshots, and maps high-level jump/seek controls onto the active AVPlayer
+item. Both capabilities flow through HLS-16 planning and HLS-17 resource
+ownership.
 
 ## Measurement contract
 
@@ -187,7 +190,7 @@ machine-readable run summary.
 - HLS-15: repository-owned media, controllable local origin, and replayable
   paging/scroll traces.
 - HLS-10: executable stitching contract and real routes.
-- HLS-11: live edge, DVR windows, and feed-compatible controls.
+- HLS-11: live edge, DVR windows, and feed-compatible controls (implemented).
 - HLS-16: bounded predictive coordination and obsolete-work cancellation.
 - HLS-17: pooled resources, seamless handoff, and the simple public API.
 - HLS-18: feed-quality and resource instrumentation.

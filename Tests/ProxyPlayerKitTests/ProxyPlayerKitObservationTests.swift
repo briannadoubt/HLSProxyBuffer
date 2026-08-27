@@ -109,5 +109,68 @@ final class ProxyPlayerKitObservationTests: XCTestCase {
         XCTAssertEqual(player.status, .idle)
         XCTAssertNil(player.player)
     }
+
+    func testLiveWindowIsObservableStreamedAndControlsRejectInvalidDVRRequests() async throws {
+        let origin = try MockOriginServer(
+            segmentCount: 4,
+            segmentDuration: 1,
+            isLive: true
+        )
+        try await origin.start()
+        defer { origin.stop() }
+        let player = ProxyHLSPlayer(configuration: .init(
+            bufferPolicy: .init(
+                targetBufferSeconds: 1,
+                maxPrefetchSegments: 2,
+                hideUntilBuffered: false,
+                refreshInterval: 30
+            ),
+            allowInsecureManifests: true
+        ))
+        let observed = expectation(description: "Live Observation state changed")
+        withObservationTracking {
+            _ = player.livePlayback
+        } onChange: {
+            observed.fulfill()
+        }
+        let streamed = expectation(description: "Live state streamed")
+        let streamTask = Task { @MainActor in
+            for await state in player.stateUpdates() where state.livePlayback?.window != nil {
+                streamed.fulfill()
+                return
+            }
+        }
+
+        await player.load(from: origin.manifestURL)
+        await fulfillment(of: [observed, streamed], timeout: 5)
+
+        let live = try XCTUnwrap(player.livePlayback)
+        XCTAssertEqual(live.window?.mediaSequenceRange, 1...4)
+        XCTAssertEqual(live.window?.durationSeconds, 4)
+        guard case .dvr(let maximumDistance) = live.seekability else {
+            return XCTFail("Expected a typed DVR window")
+        }
+        XCTAssertEqual(maximumDistance, 4)
+
+        do {
+            try await player.seek(secondsBehindLiveEdge: -1)
+            XCTFail("Negative DVR distance must fail")
+        } catch {
+            XCTAssertEqual(error as? LivePlaybackControlError, .invalidDistance)
+        }
+        do {
+            try await player.seek(secondsBehindLiveEdge: 5)
+            XCTFail("Out-of-window DVR distance must fail")
+        } catch {
+            XCTAssertEqual(
+                error as? LivePlaybackControlError,
+                .outsideDVRWindow(requested: 5, maximum: 4)
+            )
+        }
+
+        await player.stopAndWait()
+        streamTask.cancel()
+        XCTAssertNil(player.livePlayback)
+    }
 }
 #endif

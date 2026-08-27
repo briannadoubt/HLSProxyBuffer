@@ -278,6 +278,78 @@ final class FeedCoordinatorTests: XCTestCase {
             )
         }
     }
+
+    func testLivePolicyPreparationPublishesValidatedDVRWindow() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        defer { origin.stop() }
+        var policy = FeedPlaybackPolicy.preset(.live)
+        policy.prefetch.aheadItemCount = 0
+        policy.budget.maximumResidentItems = 1
+        let backend = try HLSFeedPreparationBackend(
+            policy: policy,
+            allowsInsecureManifests: true
+        )
+        let liveItem = FeedPlaybackItem(
+            id: "fixture-live",
+            source: .stream(
+                url: origin.fixturePlaylistURL(named: "live"),
+                kind: .live
+            ),
+            estimatedPreparationBytes: 256 * 1_024
+        )
+
+        let prepared = try await backend.prepare(.init(
+            item: liveItem,
+            generation: .init(rawValue: 20),
+            role: .focused,
+            maximumLeadingSegments: 2,
+            maximumConcurrentFetches: 2
+        ))
+        XCTAssertEqual(prepared.leadingSegmentCount, 2)
+        XCTAssertEqual(prepared.liveWindow?.mediaSequenceRange, 105...107)
+        XCTAssertEqual(prepared.liveWindow?.durationSeconds, 3)
+
+        let coordinator = try FeedCoordinator(
+            items: [liveItem],
+            policy: policy,
+            backend: backend
+        )
+        _ = try await coordinator.submit(signal(
+            generation: 22,
+            focused: liveItem.id
+        ))
+        let settled = await coordinator.waitUntilIdle()
+        guard case .ready(let coordinated)? = settled.entries.first?.status else {
+            return XCTFail("Expected the live feed item to be ready")
+        }
+        XCTAssertEqual(coordinated.liveWindow?.mediaSequenceRange, 105...107)
+        XCTAssertLessThanOrEqual(settled.maximumObservedActivePreparations, 1)
+
+        let mislabeledVOD = FeedPlaybackItem(
+            id: "mislabeled-vod",
+            source: .stream(
+                url: origin.fixturePlaylistURL(named: "short-a"),
+                kind: .live
+            ),
+            estimatedPreparationBytes: 256 * 1_024
+        )
+        do {
+            _ = try await backend.prepare(.init(
+                item: mislabeledVOD,
+                generation: .init(rawValue: 21),
+                role: .focused,
+                maximumLeadingSegments: 1,
+                maximumConcurrentFetches: 2
+            ))
+            XCTFail("A live feed source must resolve to a live playlist")
+        } catch {
+            XCTAssertEqual(
+                error as? FeedPreparationError,
+                .expectedLivePlaylist(mislabeledVOD.id)
+            )
+        }
+    }
 #endif
 }
 

@@ -18,7 +18,8 @@ final class MockOriginServer: @unchecked Sendable {
         mediaSequence: Int = 1,
         segmentDuration: TimeInterval = 4,
         segmentSize: Int = 1_024,
-        keyURI: URL? = nil
+        keyURI: URL? = nil,
+        isLive: Bool = false
     ) throws {
         self.mediaSequence = mediaSequence
         self.segmentSize = segmentSize
@@ -33,6 +34,10 @@ final class MockOriginServer: @unchecked Sendable {
         if let keyURI {
             manifestLines.append("#EXT-X-KEY:METHOD=AES-128,URI=\"\(keyURI.absoluteString)\",IV=0x1")
         }
+        if isLive {
+            manifestLines.append("#EXT-X-SERVER-CONTROL:HOLD-BACK=\(segmentDuration * 3)")
+            manifestLines.append("#EXT-X-PROGRAM-DATE-TIME:2026-08-27T05:00:00.000Z")
+        }
 
         var storage: [String: Data] = [:]
         for index in 0..<segmentCount {
@@ -42,7 +47,9 @@ final class MockOriginServer: @unchecked Sendable {
             storage["/segment-\(sequence).ts"] = Data(repeating: UInt8(sequence % 255), count: segmentSize)
         }
 
-        manifestLines.append("#EXT-X-ENDLIST")
+        if !isLive {
+            manifestLines.append("#EXT-X-ENDLIST")
+        }
         self.manifest = manifestLines.joined(separator: "\n")
         self.segments = storage
     }
