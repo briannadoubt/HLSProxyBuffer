@@ -96,21 +96,40 @@ private struct FeedDemoHeader: View {
             }
             Spacer()
             FeedDemoStatusPill(status: status)
-            Toggle(
-                isOn: Binding(
-                    get: { isLowPowerModeEnabled },
-                    set: { value in onLowPowerChange(value) }
-                )
-            ) {
-                Label {
-                    Text("Low power", bundle: #bundle)
-                } icon: {
-                    Image(systemName: "leaf.fill")
-                }
-            }
-            .toggleStyle(.button)
-            .accessibilityIdentifier("low-power-toggle")
+            FeedDemoLowPowerToggle(
+                isEnabled: isLowPowerModeEnabled,
+                onChange: onLowPowerChange
+            )
         }
+    }
+}
+
+private struct FeedDemoLowPowerToggle: View {
+    let isEnabled: Bool
+    let onChange: @MainActor @Sendable (Bool) -> Void
+
+    var body: some View {
+#if os(tvOS)
+        toggle
+#else
+        toggle.toggleStyle(.button)
+#endif
+    }
+
+    private var toggle: some View {
+        Toggle(
+            isOn: Binding(
+                get: { isEnabled },
+                set: { value in onChange(value) }
+            )
+        ) {
+            Label {
+                Text("Low power", bundle: #bundle)
+            } icon: {
+                Image(systemName: "leaf.fill")
+            }
+        }
+        .accessibilityIdentifier("low-power-toggle")
     }
 }
 
