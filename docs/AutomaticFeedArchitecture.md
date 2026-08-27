@@ -56,11 +56,32 @@ accepted plan obeys these invariants:
 6. Stable IDs, rather than array offsets or view identities, own work and cache
    reuse.
 
-HLS-16 will enforce this plan using actors and structured concurrency. Each
-result carries its generation; a result may commit only when it still matches
-the coordinator's active generation. Cancellation is cooperative but the
-coordinator must detach ownership immediately, record late cancellation, and
-prevent stale publication.
+`FeedCoordinator` enforces the plan as the UI- and player-independent runtime
+boundary. The public actor owns the current generation, bounded admission,
+structured tasks, cancellation accounting, readiness reuse, and a
+newest-snapshot `AsyncStream`. Each result carries its generation and policy
+revision and may commit only while both remain current. A new generation first
+cancels obsolete work; cancellation-pending tasks continue to occupy their
+preparation slots until they acknowledge cancellation, so a rapid reversal can
+never create a temporary task-budget spike. The injected monotonic clock
+records acknowledgement latency and the 100 ms contract without wall-clock
+test sleeps.
+
+`HLSFeedPreparationBackend` is the production preparation boundary. It resolves
+VOD, live, master/variant, and compatible clip-sequence manifests, selects the
+startup quality profile, and fetches only the leading resources permitted by
+the coordinator. Manifest, initialization-map, encryption-key, and segment
+lookups share one memory/disk cache. All misses pass through one
+cancellation-aware global/per-origin limiter and the validated manifest and
+segment retry policies. Live streams prepare the newest permitted suffix;
+VOD and stitched sources prepare from their leading edge.
+
+Readiness is reusable across navigation generations, but reused values are
+rebased to the active generation before publication. Replaced item IDs retain
+readiness only when their complete source and planning identity are unchanged.
+Policy and low-power changes invalidate admitted work by policy revision,
+reconfigure owned networking/cache primitives, and replan the last viewport
+observation under the new hard caps.
 
 Run the executable release gate with:
 
@@ -155,3 +176,20 @@ machine-readable run summary.
   at least 99% ready handoff success, bounded resource occupancy, and sanitizer,
   release, simulator, and hosted CI evidence.
 - HLS-12: retire superseded PR #4 only after every gate above is green.
+
+## Coordinator verification
+
+The focused coordinator suite covers a 75 ms injected-clock cancellation
+acknowledgement, immediate focus reversal, stale-publication rejection,
+generation-correct warm reuse, low-power caps, typed catalog failures, segment
+retry, per-origin serialization, and both memory and cross-backend disk reuse.
+The stress suite drives all seven standard traces (532 observations) through
+the actor and asserts item, byte, and preparation-task high-water marks at every
+step.
+
+```sh
+swift test --filter FeedCoordinator
+```
+
+The full repository, Thread Sanitizer, warning-free release, simulator, and
+hosted CI gates remain mandatory before merge.
