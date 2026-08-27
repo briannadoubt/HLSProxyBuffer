@@ -24,6 +24,10 @@ let package = Package(
             name: "LocalProxy",
             targets: ["LocalProxy"]
         ),
+        .executable(
+            name: "HLSProxyFeedDemo",
+            targets: ["HLSProxyFeedDemo"]
+        ),
     ],
     targets: [
         .target(
@@ -51,6 +55,17 @@ let package = Package(
             ],
             path: "Benchmarks/HLSProxyBenchmarks"
         ),
+        .executableTarget(
+            name: "HLSProxyFeedDemo",
+            dependencies: [
+                "HLSCore",
+                "LocalProxy",
+                "ProxyPlayerKit",
+            ],
+            path: "Demo/HLSProxyFeedDemo",
+            exclude: ["Tests"],
+            resources: [.copy("Fixtures")]
+        ),
         .testTarget(
             name: "HLSCoreTests",
             dependencies: ["HLSCore"],
@@ -70,6 +85,14 @@ let package = Package(
                 "HLSCore",
             ],
             resources: [.copy("Fixtures")]
+        ),
+        .testTarget(
+            name: "HLSProxyFeedDemoTests",
+            dependencies: [
+                "HLSProxyFeedDemo",
+                "ProxyPlayerKit",
+            ],
+            path: "Demo/HLSProxyFeedDemo/Tests"
         ),
     ]
 )

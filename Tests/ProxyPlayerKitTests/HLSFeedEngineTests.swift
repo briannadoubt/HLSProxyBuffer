@@ -6,6 +6,62 @@ import XCTest
 
 @MainActor
 final class HLSFeedEngineTests: XCTestCase {
+    func testPublicInitializerKeepsCleartextRestrictedToExplicitLoopbackFixtures() async throws {
+        let remoteURL = try XCTUnwrap(URL(string: "http://media.example/playlist.m3u8"))
+        let remoteItem = FeedPlaybackItem(
+            id: "remote-http",
+            source: .stream(url: remoteURL, kind: .videoOnDemand),
+            estimatedPreparationBytes: 1_024
+        )
+        XCTAssertThrowsError(try HLSFeedEngine(
+            items: [remoteItem],
+            policy: .preset(.shortFormFeed),
+            sourceTransportPolicy: .allowLoopbackHTTP
+        )) { error in
+            XCTAssertEqual(error as? HLSFeedEngineError, .disallowedSourceURL(remoteURL))
+        }
+
+        let deceptiveURL = try XCTUnwrap(URL(string: "http://127.example/playlist.m3u8"))
+        let deceptiveItem = FeedPlaybackItem(
+            id: "deceptive-loopback",
+            source: .stream(url: deceptiveURL, kind: .videoOnDemand),
+            estimatedPreparationBytes: 1_024
+        )
+        XCTAssertThrowsError(try HLSFeedEngine(
+            items: [deceptiveItem],
+            policy: .preset(.shortFormFeed),
+            sourceTransportPolicy: .allowLoopbackHTTP
+        )) { error in
+            XCTAssertEqual(error as? HLSFeedEngineError, .disallowedSourceURL(deceptiveURL))
+        }
+
+        let loopbackURL = try XCTUnwrap(URL(string: "http://127.0.0.1:43210/playlist.m3u8"))
+        let loopbackItem = FeedPlaybackItem(
+            id: "loopback-http",
+            source: .stream(url: loopbackURL, kind: .videoOnDemand),
+            estimatedPreparationBytes: 1_024
+        )
+        XCTAssertThrowsError(try HLSFeedEngine(
+            items: [loopbackItem],
+            policy: .preset(.shortFormFeed)
+        )) { error in
+            XCTAssertEqual(error as? HLSFeedEngineError, .disallowedSourceURL(loopbackURL))
+        }
+
+        let engine = try HLSFeedEngine(
+            items: [loopbackItem],
+            policy: .preset(.shortFormFeed),
+            sourceTransportPolicy: .allowLoopbackHTTP
+        )
+        do {
+            _ = try await engine.replaceItems([remoteItem])
+            XCTFail("Replacement items must retain the engine's transport boundary")
+        } catch {
+            XCTAssertEqual(error as? HLSFeedEngineError, .disallowedSourceURL(remoteURL))
+        }
+        await engine.stop()
+    }
+
     func testPoolIsBoundedAndReadyDestinationHandoffUsesWarmSession() async throws {
         let items = makeItems(count: 5)
         let policy = try makePolicy(maximumPlayerCount: 2)
@@ -259,6 +315,28 @@ final class HLSFeedEngineTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(telemetry.snapshot.resources.maximumPlayerPoolOccupancy, 2)
     }
 
+    func testFirstFrameAndHandoffWaitForPlatformPlaybackToActuallyStart() async throws {
+        let items = makeItems(count: 1)
+        let policy = try makePolicy(maximumPlayerCount: 1, prefetchItemCount: 0)
+        let factory = FakeFeedSessionFactory(usesUnstartedPlatformPlayer: true)
+        let engine = try makeEngine(items: items, policy: policy, factory: factory)
+
+        try await engine.update(signal(generation: 1, focused: items[0].id))
+        let settled = await engine.waitUntilSettled()
+
+        XCTAssertEqual(settled.activeItemID, items[0].id)
+        XCTAssertEqual(settled.playback(for: items[0].id)?.hasStartedPlayback, false)
+        XCTAssertEqual(engine.telemetry.snapshot.firstFrameCount, 0)
+        XCTAssertEqual(engine.telemetry.snapshot.handoffSuccessCount, 0)
+
+        await engine.stop()
+        let handoffAttempts = engine.telemetry.snapshot.paths.reduce(UInt64(0)) {
+            $0 + $1.handoffAttemptCount
+        }
+        XCTAssertEqual(handoffAttempts, 1)
+        XCTAssertEqual(engine.telemetry.snapshot.handoffSuccessCount, 0)
+    }
+
     func testTelemetryCapturesFocusedPlaybackStallsAndCancellationOutcomes() async throws {
         let items = makeItems(count: 3)
         let policy = try makePolicy(maximumPlayerCount: 1, prefetchItemCount: 0)
@@ -447,21 +525,25 @@ private extension FeedPlaybackSource {
 private final class FakeFeedSessionFactory {
     let loadDelay: Duration
     let failingItemIDs: Set<FeedItemID>
+    let usesUnstartedPlatformPlayer: Bool
     private(set) var sessions: [FakeFeedPlayerSession] = []
 
     init(
         loadDelay: Duration = .zero,
-        failingItemIDs: Set<FeedItemID> = []
+        failingItemIDs: Set<FeedItemID> = [],
+        usesUnstartedPlatformPlayer: Bool = false
     ) {
         self.loadDelay = loadDelay
         self.failingItemIDs = failingItemIDs
+        self.usesUnstartedPlatformPlayer = usesUnstartedPlatformPlayer
     }
 
     func make(configuration: ProxyPlayerConfiguration) -> FakeFeedPlayerSession {
         let session = FakeFeedPlayerSession(
             configuration: configuration,
             loadDelay: loadDelay,
-            failingItemIDs: failingItemIDs
+            failingItemIDs: failingItemIDs,
+            platformPlayer: usesUnstartedPlatformPlayer ? AVPlayer() : nil
         )
         sessions.append(session)
         return session
@@ -475,7 +557,7 @@ private final class FakeFeedSessionFactory {
 @MainActor
 private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     private(set) var state = PlayerState()
-    var feedPlatformPlayer: AVPlayer? { nil }
+    let feedPlatformPlayer: AVPlayer?
     private(set) var configuration: ProxyPlayerConfiguration
     private(set) var loadedItemID: FeedItemID?
     private(set) var loadedStreamKind: FeedStreamKind?
@@ -495,11 +577,13 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     init(
         configuration: ProxyPlayerConfiguration,
         loadDelay: Duration,
-        failingItemIDs: Set<FeedItemID>
+        failingItemIDs: Set<FeedItemID>,
+        platformPlayer: AVPlayer?
     ) {
         self.configuration = configuration
         self.loadDelay = loadDelay
         self.failingItemIDs = failingItemIDs
+        self.feedPlatformPlayer = platformPlayer
     }
 
     func stateUpdates() -> AsyncStream<PlayerState> {

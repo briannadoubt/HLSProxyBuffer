@@ -428,8 +428,14 @@ final class FeedFixtureOrigin: @unchecked Sendable {
     }
 
     private static func loadResources() throws -> [String: Resource] {
-        guard let root = Bundle.module.resourceURL?.appendingPathComponent("Fixtures", isDirectory: true),
-              let enumerator = FileManager.default.enumerator(
+        guard let resourceRoot = Bundle.module.resourceURL?.appendingPathComponent(
+            "Fixtures",
+            isDirectory: true
+        ) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let root = resourceRoot.standardizedFileURL.resolvingSymlinksInPath()
+        guard let enumerator = FileManager.default.enumerator(
                 at: root,
                 includingPropertiesForKeys: [.isRegularFileKey],
                 options: [.skipsHiddenFiles]
@@ -440,13 +446,19 @@ final class FeedFixtureOrigin: @unchecked Sendable {
 
         var result: [String: Resource] = [:]
         for case let fileURL as URL in enumerator {
-            let values = try fileURL.resourceValues(forKeys: [.isRegularFileKey])
+            let resolvedFileURL = fileURL.standardizedFileURL.resolvingSymlinksInPath()
+            let values = try resolvedFileURL.resourceValues(forKeys: [.isRegularFileKey])
             guard values.isRegularFile == true else { continue }
-            let relativePath = String(fileURL.path.dropFirst(root.path.count))
-            let data = try Data(contentsOf: fileURL)
+            let rootComponents = root.pathComponents
+            let fileComponents = resolvedFileURL.pathComponents
+            guard fileComponents.starts(with: rootComponents) else { continue }
+            let relativeComponents = fileComponents.dropFirst(rootComponents.count)
+            guard !relativeComponents.isEmpty else { continue }
+            let relativePath = "/" + relativeComponents.joined(separator: "/")
+            let data = try Data(contentsOf: resolvedFileURL)
             result[relativePath] = Resource(
                 data: data,
-                contentType: contentType(for: fileURL.pathExtension),
+                contentType: contentType(for: resolvedFileURL.pathExtension),
                 etag: etag(for: data)
             )
         }

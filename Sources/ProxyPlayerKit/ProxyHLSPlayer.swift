@@ -1569,7 +1569,11 @@ public final class ProxyHLSPlayer {
     private func streamAttributes(for variant: VariantPlaylist?) -> String {
         var attributes: [String] = []
         let data = variant?.attributes
-        attributes.append("BANDWIDTH=\(data?.bandwidth ?? 0)")
+        // A media-playlist source has no master-level bandwidth metadata, but
+        // EXT-X-STREAM-INF still requires a positive peak bandwidth. AVPlayer
+        // rejects BANDWIDTH=0 before requesting the rewritten media playlist.
+        let bandwidth = max(1, data?.bandwidth ?? 1_000_000)
+        attributes.append("BANDWIDTH=\(bandwidth)")
         if let average = data?.averageBandwidth {
             attributes.append("AVERAGE-BANDWIDTH=\(average)")
         }
