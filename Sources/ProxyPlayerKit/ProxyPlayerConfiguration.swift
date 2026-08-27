@@ -122,6 +122,7 @@ public struct ProxyPlayerConfiguration: Sendable, Equatable {
     public var lowLatencyPolicy: LowLatencyPolicy
     public var networkPolicy: HLSOriginNetworkPolicy
     public var manifestRetryPolicy: HLSManifestFetcher.RetryPolicy
+    public var segmentRetryPolicy: HLSSegmentFetcher.RetryPolicy
     public var segmentValidation: HLSSegmentFetcher.ValidationPolicy
     public var upcomingPlaylists: [MediaPlaylist]
     public var allowInsecureManifests: Bool
@@ -136,6 +137,7 @@ public struct ProxyPlayerConfiguration: Sendable, Equatable {
         lowLatencyPolicy: LowLatencyPolicy = .init(),
         networkPolicy: HLSOriginNetworkPolicy = .default,
         manifestRetryPolicy: HLSManifestFetcher.RetryPolicy = .default,
+        segmentRetryPolicy: HLSSegmentFetcher.RetryPolicy = .default,
         segmentValidation: HLSSegmentFetcher.ValidationPolicy = .init(),
         upcomingPlaylists: [MediaPlaylist] = [],
         allowInsecureManifests: Bool = false,
@@ -149,6 +151,7 @@ public struct ProxyPlayerConfiguration: Sendable, Equatable {
         self.lowLatencyPolicy = lowLatencyPolicy
         self.networkPolicy = networkPolicy
         self.manifestRetryPolicy = manifestRetryPolicy
+        self.segmentRetryPolicy = segmentRetryPolicy
         self.segmentValidation = segmentValidation
         self.upcomingPlaylists = upcomingPlaylists
         self.allowInsecureManifests = allowInsecureManifests
