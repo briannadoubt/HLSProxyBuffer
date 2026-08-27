@@ -46,6 +46,35 @@ boundaries operators should plan around.
   Network.framework completion callbacks. A segment is still materialized as
   `Data` once so it can be validated and cached; byte budgets bound residency.
 
+## Origin network policy
+
+`ProxyPlayerConfiguration.networkPolicy` applies one `HLSOriginNetworkPolicy`
+to origin manifests, playlist refreshes, auxiliary resources, and media
+segments. It controls request and resource timeouts, connectivity waiting,
+constrained and expensive network access, and the URLSession connection limit
+per host. Internally created sessions are ephemeral and disable URL loading's
+response cache because HLSProxyBuffer owns its media cache.
+
+```swift
+let configuration = ProxyPlayerConfiguration(
+    networkPolicy: .init(
+        requestTimeout: 12,
+        resourceTimeout: 45,
+        waitsForConnectivity: true,
+        allowsConstrainedNetworkAccess: true,
+        allowsExpensiveNetworkAccess: true,
+        maximumConnectionsPerHost: 6
+    )
+)
+```
+
+`HLSManifestFetcher`, `HLSSegmentFetcher`, and `PlaylistRefreshController`
+still accept injected `URLSession` instances for deterministic tests and custom
+authentication. When a session is injected, its session-level connectivity and
+connection settings remain authoritative; the policy still supplies each HLS
+request's timeout. HLSProxyBuffer does not expose HTTP-version or preferred-
+interface switches because URLSession cannot reliably guarantee those choices.
+
 ## Operational boundaries
 
 - Origin manifests default to HTTPS. Enabling insecure manifests is an explicit

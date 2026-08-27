@@ -62,17 +62,20 @@ public struct HLSManifestFetcher: Sendable, HLSManifestSource {
     private let url: URL
     private let session: URLSession
     private let retryPolicy: RetryPolicy
+    private let networkPolicy: HLSOriginNetworkPolicy
     private let logger: Logger
 
     public init(
         url: URL,
-        session: URLSession = .shared,
+        session: URLSession? = nil,
         retryPolicy: RetryPolicy = .default,
+        networkPolicy: HLSOriginNetworkPolicy = .default,
         logger: Logger = DefaultLogger()
     ) {
         self.url = url
-        self.session = session
+        self.session = session ?? networkPolicy.makeURLSession()
         self.retryPolicy = retryPolicy
+        self.networkPolicy = networkPolicy
         self.logger = logger
     }
 
@@ -119,7 +122,7 @@ public struct HLSManifestFetcher: Sendable, HLSManifestSource {
 
     private func fetchOnce(from url: URL, requestTimeout: TimeInterval?) async throws -> String {
         var request = URLRequest(url: url)
-        request.timeoutInterval = requestTimeout ?? 15
+        request.timeoutInterval = requestTimeout ?? networkPolicy.requestTimeout
         request.cachePolicy = .reloadIgnoringLocalCacheData
 
         let (data, response) = try await session.data(for: request)
