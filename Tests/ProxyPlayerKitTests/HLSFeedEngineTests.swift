@@ -199,6 +199,121 @@ final class HLSFeedEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    func testTelemetryCapturesColdAndWarmFirstFrameHandoffsAndResources() async throws {
+        let items = makeItems(count: 3)
+        let policy = try makePolicy(maximumPlayerCount: 2)
+        let factory = FakeFeedSessionFactory()
+        let telemetry = HLSFeedTelemetry()
+        let engine = try makeEngine(
+            items: items,
+            policy: policy,
+            factory: factory,
+            telemetry: telemetry
+        )
+
+        try await engine.update(signal(generation: 1, focused: items[0].id))
+        var engineSnapshot = await engine.waitUntilSettled()
+        let warmID = try XCTUnwrap(engineSnapshot.playbacks.first { $0.phase == .warm }?.itemID)
+        try await engine.update(signal(generation: 2, focused: warmID))
+        engineSnapshot = await engine.waitUntilSettled()
+
+        let coldFocusedVOD = HLSFeedTelemetry.Path(
+            reuse: .cold,
+            intent: .focused,
+            mediaKind: .videoOnDemand
+        )
+        let warmFocusedVOD = HLSFeedTelemetry.Path(
+            reuse: .warm,
+            intent: .focused,
+            mediaKind: .videoOnDemand
+        )
+        XCTAssertEqual(engineSnapshot.activeItemID, warmID)
+        XCTAssertEqual(
+            telemetry.snapshot.metrics(for: coldFocusedVOD)?.firstFrameLatency.count,
+            1
+        )
+        XCTAssertEqual(
+            telemetry.snapshot.metrics(for: coldFocusedVOD)?.handoffSuccessCount,
+            1
+        )
+        XCTAssertEqual(
+            telemetry.snapshot.metrics(for: warmFocusedVOD)?.firstFrameLatency.count,
+            1
+        )
+        XCTAssertEqual(
+            telemetry.snapshot.metrics(for: warmFocusedVOD)?.handoffReadyCount,
+            1
+        )
+        XCTAssertEqual(
+            telemetry.snapshot.resources.playerPoolOccupancy,
+            engineSnapshot.poolOccupancy
+        )
+        XCTAssertEqual(
+            telemetry.snapshot.resources.proxyPoolOccupancy,
+            engineSnapshot.allocatedPlayerCount
+        )
+
+        await engine.stop()
+        XCTAssertEqual(telemetry.snapshot.resources.playerPoolOccupancy, 0)
+        XCTAssertEqual(telemetry.snapshot.resources.proxyPoolOccupancy, 0)
+        XCTAssertGreaterThanOrEqual(telemetry.snapshot.resources.maximumPlayerPoolOccupancy, 2)
+    }
+
+    func testTelemetryCapturesFocusedPlaybackStallsAndCancellationOutcomes() async throws {
+        let items = makeItems(count: 3)
+        let policy = try makePolicy(maximumPlayerCount: 1, prefetchItemCount: 0)
+        let factory = FakeFeedSessionFactory(loadDelay: .milliseconds(100))
+        let telemetry = HLSFeedTelemetry()
+        let engine = try makeEngine(
+            items: items,
+            policy: policy,
+            factory: factory,
+            telemetry: telemetry
+        )
+
+        try await engine.update(signal(generation: 1, focused: items[0].id))
+        for _ in 0..<100 where engine.snapshot.activeLoadCount == 0 {
+            await Task.yield()
+        }
+        XCTAssertEqual(engine.snapshot.activeLoadCount, 1)
+        try await engine.update(signal(generation: 2, focused: items[1].id))
+        _ = await engine.waitUntilSettled()
+        let session = try XCTUnwrap(factory.session(loadedWith: items[1].id))
+        XCTAssertEqual(engine.snapshot.playback(for: items[1].id)?.phase, .focused)
+        XCTAssertEqual(engine.snapshot.playback(for: items[1].id)?.state.status, .ready)
+        for _ in 0..<100 where session.activeStateObserverCount == 0 {
+            await Task.yield()
+        }
+        XCTAssertEqual(
+            session.activeStateObserverCount,
+            1,
+            "load=\(session.loadCount) stop=\(session.stopCount) sessions=\(factory.sessions.count)"
+        )
+        session.beginBuffering()
+        for _ in 0..<20 where engine.snapshot.playback(for: items[1].id)?.state.status != .buffering {
+            await Task.yield()
+        }
+        XCTAssertEqual(engine.snapshot.playback(for: items[1].id)?.state.status, .buffering)
+        session.recoverPlayback()
+        for _ in 0..<20 where telemetry.snapshot.stallCount == 0 {
+            await Task.yield()
+        }
+
+        XCTAssertGreaterThanOrEqual(
+            telemetry.snapshot.cancellationCount,
+            1,
+            String(describing: telemetry.snapshot)
+        )
+        XCTAssertEqual(telemetry.snapshot.stallCount, 1)
+
+        session.beginBuffering()
+        for _ in 0..<20 where engine.snapshot.playback(for: items[1].id)?.state.status != .buffering {
+            await Task.yield()
+        }
+        await engine.stop()
+        XCTAssertEqual(telemetry.snapshot.stallCount, 2, "stop must close an in-flight stall")
+    }
+
     func testFiveHundredTransitionsLeaveNoTasksObserversOrListeners() async throws {
         let items = makeItems(count: 11)
         let policy = try makePolicy(maximumPlayerCount: 2)
@@ -225,12 +340,17 @@ final class HLSFeedEngineTests: XCTestCase {
         XCTAssertLessThanOrEqual(factory.sessions.count, 2)
         XCTAssertTrue(factory.sessions.allSatisfy { $0.activeStateObserverCount == 0 })
         XCTAssertTrue(factory.sessions.allSatisfy { $0.isStopped })
+        let summary = try engine.telemetry.machineReadableSummary()
+        let decoded = try JSONDecoder().decode(HLSFeedTelemetry.Snapshot.self, from: summary)
+        XCTAssertEqual(decoded, engine.telemetry.snapshot)
+        XCTAssertGreaterThanOrEqual(decoded.handoffSuccessCount, 500)
     }
 
     private func makeEngine(
         items: [FeedPlaybackItem],
         policy: FeedPlaybackPolicy,
-        factory: FakeFeedSessionFactory
+        factory: FakeFeedSessionFactory,
+        telemetry: HLSFeedTelemetry? = nil
     ) throws -> HLSFeedEngine {
         let backend = ImmediateFeedPreparationBackend()
         let coordinator = try FeedCoordinator(items: items, policy: policy, backend: backend)
@@ -238,7 +358,8 @@ final class HLSFeedEngineTests: XCTestCase {
             items: items,
             policy: policy,
             coordinator: coordinator,
-            sessionFactory: { configuration in factory.make(configuration: configuration) }
+            sessionFactory: { configuration in factory.make(configuration: configuration) },
+            telemetry: telemetry ?? HLSFeedTelemetry()
         )
     }
 
@@ -449,6 +570,14 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
 
     func failCurrentPlayback(message: String) {
         transition(to: PlayerState(status: .failed(message)))
+    }
+
+    func beginBuffering() {
+        transition(to: PlayerState(status: .buffering))
+    }
+
+    func recoverPlayback() {
+        transition(to: PlayerState(status: .ready, bufferDepthSeconds: 2))
     }
 
     private func transition(to state: PlayerState) {

@@ -653,6 +653,9 @@ private extension FeedPreparedItem {
             preparedByteCount: preparedByteCount,
             cacheHitCount: cacheHitCount,
             originFetchCount: originFetchCount,
+            cacheHitByteCount: cacheHitByteCount,
+            originFetchByteCount: originFetchByteCount,
+            isPreparationReuse: true,
             liveWindow: liveWindow
         )
     }

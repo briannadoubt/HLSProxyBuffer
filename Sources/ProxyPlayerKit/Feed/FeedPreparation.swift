@@ -38,6 +38,11 @@ public struct FeedPreparedItem: Sendable, Equatable {
     public let preparedByteCount: Int
     public let cacheHitCount: Int
     public let originFetchCount: Int
+    public let cacheHitByteCount: Int
+    public let originFetchByteCount: Int
+    /// `true` when the coordinator satisfied this generation from its bounded
+    /// preparation cache without asking the backend to prepare it again.
+    public let isPreparationReuse: Bool
     /// Validated live-window metadata for `.live` feed sources.
     public let liveWindow: HLSLiveWindow?
 
@@ -51,6 +56,9 @@ public struct FeedPreparedItem: Sendable, Equatable {
         preparedByteCount: Int,
         cacheHitCount: Int,
         originFetchCount: Int,
+        cacheHitByteCount: Int = 0,
+        originFetchByteCount: Int = 0,
+        isPreparationReuse: Bool = false,
         liveWindow: HLSLiveWindow? = nil
     ) {
         self.itemID = itemID
@@ -62,6 +70,9 @@ public struct FeedPreparedItem: Sendable, Equatable {
         self.preparedByteCount = max(0, preparedByteCount)
         self.cacheHitCount = max(0, cacheHitCount)
         self.originFetchCount = max(0, originFetchCount)
+        self.cacheHitByteCount = max(0, cacheHitByteCount)
+        self.originFetchByteCount = max(0, originFetchByteCount)
+        self.isPreparationReuse = isPreparationReuse
         self.liveWindow = liveWindow
     }
 }
@@ -117,6 +128,8 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
         let manifestURLs: [URL]
         let cacheHitCount: Int
         let originFetchCount: Int
+        let cacheHitByteCount: Int
+        let originFetchByteCount: Int
     }
 
     private struct Resource: Hashable, Sendable {
@@ -129,6 +142,8 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
         let byteCount: Int
         let cacheHitCount: Int
         let originFetchCount: Int
+        let cacheHitByteCount: Int
+        let originFetchByteCount: Int
     }
 
     private var policy: FeedPlaybackPolicy
@@ -253,7 +268,9 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
                     playlist: playlist,
                     manifestURLs: [url],
                     cacheHitCount: loaded.cacheHitCount,
-                    originFetchCount: loaded.originFetchCount
+                    originFetchCount: loaded.originFetchCount,
+                    cacheHitByteCount: loaded.cacheHitByteCount,
+                    originFetchByteCount: loaded.originFetchByteCount
                 )
             } else {
                 resolved = try await resolveMediaPlaylist(
@@ -279,7 +296,13 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
                 playlist: stitched,
                 manifestURLs: resolvedPlaylists.flatMap(\.manifestURLs),
                 cacheHitCount: resolvedPlaylists.reduce(0) { $0 + $1.cacheHitCount },
-                originFetchCount: resolvedPlaylists.reduce(0) { $0 + $1.originFetchCount }
+                originFetchCount: resolvedPlaylists.reduce(0) { $0 + $1.originFetchCount },
+                cacheHitByteCount: resolvedPlaylists.reduce(0) {
+                    $0 + $1.cacheHitByteCount
+                },
+                originFetchByteCount: resolvedPlaylists.reduce(0) {
+                    $0 + $1.originFetchByteCount
+                }
             )]
         }
 
@@ -361,6 +384,8 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
         let manifestURLs = resolvedPlaylists.flatMap(\.manifestURLs)
         let manifestCacheHits = resolvedPlaylists.reduce(0) { $0 + $1.cacheHitCount }
         let manifestOriginFetches = resolvedPlaylists.reduce(0) { $0 + $1.originFetchCount }
+        let manifestCacheHitBytes = resolvedPlaylists.reduce(0) { $0 + $1.cacheHitByteCount }
+        let manifestOriginBytes = resolvedPlaylists.reduce(0) { $0 + $1.originFetchByteCount }
         return FeedPreparedItem(
             itemID: request.item.id,
             generation: request.generation,
@@ -371,6 +396,12 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
             preparedByteCount: outcomes.reduce(0) { $0 + $1.byteCount },
             cacheHitCount: manifestCacheHits + outcomes.reduce(0) { $0 + $1.cacheHitCount },
             originFetchCount: manifestOriginFetches + outcomes.reduce(0) { $0 + $1.originFetchCount },
+            cacheHitByteCount: manifestCacheHitBytes + outcomes.reduce(0) {
+                $0 + $1.cacheHitByteCount
+            },
+            originFetchByteCount: manifestOriginBytes + outcomes.reduce(0) {
+                $0 + $1.originFetchByteCount
+            },
             liveWindow: liveWindow
         )
     }
@@ -400,7 +431,9 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
                 playlist: playlist,
                 manifestURLs: [url],
                 cacheHitCount: loaded.cacheHitCount,
-                originFetchCount: loaded.originFetchCount
+                originFetchCount: loaded.originFetchCount,
+                cacheHitByteCount: loaded.cacheHitByteCount,
+                originFetchByteCount: loaded.originFetchByteCount
             )
         }
 
@@ -420,20 +453,28 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
             playlist: nested.playlist,
             manifestURLs: [url] + nested.manifestURLs,
             cacheHitCount: loaded.cacheHitCount + nested.cacheHitCount,
-            originFetchCount: loaded.originFetchCount + nested.originFetchCount
+            originFetchCount: loaded.originFetchCount + nested.originFetchCount,
+            cacheHitByteCount: loaded.cacheHitByteCount + nested.cacheHitByteCount,
+            originFetchByteCount: loaded.originFetchByteCount + nested.originFetchByteCount
         )
     }
 
     private func loadManifest(
         from url: URL
-    ) async throws -> (manifest: HLSManifest, cacheHitCount: Int, originFetchCount: Int) {
+    ) async throws -> (
+        manifest: HLSManifest,
+        cacheHitCount: Int,
+        originFetchCount: Int,
+        cacheHitByteCount: Int,
+        originFetchByteCount: Int
+    ) {
         guard allowsInsecureManifests || url.scheme?.lowercased() == "https" else {
             throw HLSManifestFetcher.FetchError.insecureScheme
         }
         let key = "manifest-\(url.absoluteString)"
         if let data = await cache.get(key),
            let text = String(data: data, encoding: .utf8) {
-            return (try parser.parse(text, baseURL: url), 1, 0)
+            return (try parser.parse(text, baseURL: url), 1, 0, data.count, 0)
         }
 
         let currentPolicy = policy
@@ -452,13 +493,20 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
             )
         }
         try Task.checkCancellation()
-        await cache.put(Data(text.utf8), for: key)
-        return (try parser.parse(text, baseURL: url), 0, 1)
+        let data = Data(text.utf8)
+        await cache.put(data, for: key)
+        return (try parser.parse(text, baseURL: url), 0, 1, 0, data.count)
     }
 
     private func fetch(_ resource: Resource) async throws -> ResourceOutcome {
         if let data = await cache.get(resource.key) {
-            return ResourceOutcome(byteCount: data.count, cacheHitCount: 1, originFetchCount: 0)
+            return ResourceOutcome(
+                byteCount: data.count,
+                cacheHitCount: 1,
+                originFetchCount: 0,
+                cacheHitByteCount: data.count,
+                originFetchByteCount: 0
+            )
         }
 
         let source = segmentSource
@@ -467,7 +515,13 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
         }
         try Task.checkCancellation()
         await cache.put(data, for: resource.key)
-        return ResourceOutcome(byteCount: data.count, cacheHitCount: 0, originFetchCount: 1)
+        return ResourceOutcome(
+            byteCount: data.count,
+            cacheHitCount: 0,
+            originFetchCount: 1,
+            cacheHitByteCount: 0,
+            originFetchByteCount: data.count
+        )
     }
 
     private func selectVariant(
