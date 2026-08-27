@@ -172,6 +172,57 @@ public actor HLSSegmentFetcher: SegmentSource {
         }
     }
 
+    public enum FetchErrorCategory: String, CaseIterable, Hashable, Sendable {
+        case timeout
+        case dns
+        case connectivity
+        case rateLimited = "rate_limited"
+        case httpClient = "http_client"
+        case httpServer = "http_server"
+        case invalidResponse = "invalid_response"
+        case emptyBody = "empty_body"
+        case rangeValidation = "range_validation"
+        case checksum
+        case cancelled
+        case other
+    }
+
+    public enum RetryOutcome: String, CaseIterable, Hashable, Sendable {
+        case successWithoutRetry = "success_without_retry"
+        case successAfterRetry = "success_after_retry"
+        case failureWithoutRetry = "failure_without_retry"
+        case failureAfterRetry = "failure_after_retry"
+        case cancelled
+    }
+
+    public struct FetchEvent: Equatable, Sendable {
+        public let url: URL
+        public let duration: TimeInterval
+        public let byteCount: Int
+        public let attemptCount: Int
+        public let retryCount: Int
+        public let retryOutcome: RetryOutcome
+        public let errorCategory: FetchErrorCategory?
+
+        public init(
+            url: URL,
+            duration: TimeInterval,
+            byteCount: Int,
+            attemptCount: Int,
+            retryCount: Int,
+            retryOutcome: RetryOutcome,
+            errorCategory: FetchErrorCategory?
+        ) {
+            self.url = url
+            self.duration = duration.isFinite ? max(0, duration) : 0
+            self.byteCount = max(0, byteCount)
+            self.attemptCount = max(1, attemptCount)
+            self.retryCount = max(0, retryCount)
+            self.retryOutcome = retryOutcome
+            self.errorCategory = errorCategory
+        }
+    }
+
     public enum FetchError: Error {
         case invalidResponse
         case httpStatus(Int)
@@ -189,6 +240,7 @@ public actor HLSSegmentFetcher: SegmentSource {
     private let retryClock: RetryClock
     private let retryJitterSource: RetryJitterSource
     private var metricsHandler: (@Sendable (FetchMetrics) async -> Void)?
+    private var eventHandler: (@Sendable (FetchEvent) async -> Void)?
     private var latestMetricsValue: FetchMetrics?
     private var inFlight: [FetchKey: InFlight] = [:]
 
@@ -259,6 +311,10 @@ public actor HLSSegmentFetcher: SegmentSource {
 
     public func onMetrics(_ handler: (@Sendable (FetchMetrics) async -> Void)?) {
         metricsHandler = handler
+    }
+
+    public func onEvent(_ handler: (@Sendable (FetchEvent) async -> Void)?) {
+        eventHandler = handler
     }
 
     public func latestMetrics() -> FetchMetrics? {
@@ -345,6 +401,14 @@ public actor HLSSegmentFetcher: SegmentSource {
                 if let metricsHandler {
                     await metricsHandler(metrics)
                 }
+                await emitEvent(
+                    url: url,
+                    start: start,
+                    byteCount: data.count,
+                    attemptCount: attempt,
+                    outcome: attempt > 1 ? .successAfterRetry : .successWithoutRetry,
+                    errorCategory: nil
+                )
                 return data
             } catch {
                 let failure = error as? AttemptFailure
@@ -352,11 +416,27 @@ public actor HLSSegmentFetcher: SegmentSource {
                 if Task.isCancelled
                     || underlying is CancellationError
                     || (underlying as? URLError)?.code == .cancelled {
+                    await emitEvent(
+                        url: url,
+                        start: start,
+                        byteCount: 0,
+                        attemptCount: attempt,
+                        outcome: .cancelled,
+                        errorCategory: .cancelled
+                    )
                     throw CancellationError()
                 }
 
                 guard attempt < retryPolicy.maxAttempts,
                       isRetryable(underlying) else {
+                    await emitEvent(
+                        url: url,
+                        start: start,
+                        byteCount: 0,
+                        attemptCount: attempt,
+                        outcome: attempt > 1 ? .failureAfterRetry : .failureWithoutRetry,
+                        errorCategory: errorCategory(for: underlying)
+                    )
                     throw underlying
                 }
 
@@ -365,8 +445,24 @@ public actor HLSSegmentFetcher: SegmentSource {
                     retryAfter: failure?.retryAfter,
                     jitterSample: retryJitterSource.nextValue()
                 )
-                try Task.checkCancellation()
-                try await retryClock.sleep(for: delay)
+                do {
+                    try Task.checkCancellation()
+                    try await retryClock.sleep(for: delay)
+                } catch {
+                    let wasCancelled = Task.isCancelled || error is CancellationError
+                    await emitEvent(
+                        url: url,
+                        start: start,
+                        byteCount: 0,
+                        attemptCount: attempt,
+                        outcome: wasCancelled ? .cancelled : .failureAfterRetry,
+                        errorCategory: wasCancelled ? .cancelled : .other
+                    )
+                    if wasCancelled {
+                        throw CancellationError()
+                    }
+                    throw error
+                }
             }
         }
 
@@ -420,6 +516,69 @@ public actor HLSSegmentFetcher: SegmentSource {
              .checksumMismatch:
             return true
         }
+    }
+
+    private func errorCategory(for error: Error) -> FetchErrorCategory {
+        if error is CancellationError {
+            return .cancelled
+        }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut:
+                return .timeout
+            case .cannotFindHost, .dnsLookupFailed:
+                return .dns
+            case .cannotConnectToHost,
+                 .networkConnectionLost,
+                 .notConnectedToInternet,
+                 .internationalRoamingOff,
+                 .callIsActive,
+                 .dataNotAllowed,
+                 .cannotLoadFromNetwork,
+                 .backgroundSessionWasDisconnected:
+                return .connectivity
+            case .cancelled:
+                return .cancelled
+            default:
+                return .other
+            }
+        }
+        guard let fetchError = error as? FetchError else { return .other }
+        switch fetchError {
+        case .httpStatus(let statusCode):
+            if statusCode == 408 { return .timeout }
+            if statusCode == 429 { return .rateLimited }
+            if (500...599).contains(statusCode) { return .httpServer }
+            return .httpClient
+        case .invalidResponse:
+            return .invalidResponse
+        case .emptyBody:
+            return .emptyBody
+        case .lengthMismatch, .invalidContentRange:
+            return .rangeValidation
+        case .checksumMismatch:
+            return .checksum
+        }
+    }
+
+    private func emitEvent(
+        url: URL,
+        start: Date,
+        byteCount: Int,
+        attemptCount: Int,
+        outcome: RetryOutcome,
+        errorCategory: FetchErrorCategory?
+    ) async {
+        guard let eventHandler else { return }
+        await eventHandler(FetchEvent(
+            url: url,
+            duration: max(0, retryClock.now().timeIntervalSince(start)),
+            byteCount: byteCount,
+            attemptCount: attemptCount,
+            retryCount: max(0, attemptCount - 1),
+            retryOutcome: outcome,
+            errorCategory: errorCategory
+        ))
     }
 
     private func retryAfterDelay(from response: HTTPURLResponse) -> TimeInterval? {

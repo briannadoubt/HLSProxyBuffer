@@ -129,6 +129,8 @@ public final class ProxyHLSPlayer {
 
     /// The preferred forward-playback rate. Pausing does not reset this value.
     public private(set) var playbackRate: Float = 1.0
+    /// Fixed-memory operational telemetry. Changes participate in Observation.
+    public private(set) var telemetrySnapshot = HLSStreamingTelemetry.Snapshot.empty
 
     @ObservationIgnored private let logger: Logger
     @ObservationIgnored private let manifestProcessor = ManifestProcessor()
@@ -147,6 +149,7 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var didPreparePlayerForCurrentLoad = false
     @ObservationIgnored private lazy var server = ProxyServer(router: router)
     @ObservationIgnored private let diagnostics: ProxyPlayerDiagnostics
+    @ObservationIgnored private let telemetry: HLSStreamingTelemetry
     @ObservationIgnored private let throughputEstimator: ThroughputEstimator
     @ObservationIgnored private let adaptiveController: AdaptiveVariantController
     @ObservationIgnored private let cacheDirectoryIdentifier: String
@@ -168,6 +171,7 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var shouldPlayWhenReady = false
     @ObservationIgnored private var mediaSelectionTask: Task<Void, Never>?
     @ObservationIgnored private var initializationTask: Task<Void, Never>?
+    @ObservationIgnored private var telemetryObservationTask: Task<Void, Never>?
     @ObservationIgnored private var activeLoadTask: Task<Void, Error>?
     @ObservationIgnored private var cleanupTask: Task<Void, Never>?
     @ObservationIgnored private var renditionRefreshTasks: [String: Task<Void, Never>] = [:]
@@ -180,7 +184,8 @@ public final class ProxyHLSPlayer {
     public init(
         configuration: ProxyPlayerConfiguration = .init(),
         logger: Logger = ProxyPlayerLogger(),
-        diagnostics: ProxyPlayerDiagnostics = .init()
+        diagnostics: ProxyPlayerDiagnostics = .init(),
+        telemetry: HLSStreamingTelemetry = .init()
     ) {
         self.configuration = configuration
         self.appliedNetworkPolicy = configuration.networkPolicy
@@ -189,6 +194,7 @@ public final class ProxyHLSPlayer {
         self.cacheDirectoryIdentifier = cacheDirectoryIdentifier
         self.logger = logger
         self.diagnostics = diagnostics
+        self.telemetry = telemetry
         self.throughputEstimator = ThroughputEstimator(configuration: .init(window: configuration.abrPolicy.estimatorWindow))
         self.adaptiveController = AdaptiveVariantController(policy: Self.abrPolicy(from: configuration), logger: logger)
         self.segmentFetcher = HLSSegmentFetcher(
@@ -248,8 +254,23 @@ public final class ProxyHLSPlayer {
 
         initializationTask = Task {
             await segmentFetcher.onMetrics(makeSegmentMetricsHandler())
+            await segmentFetcher.onEvent { [telemetry] event in
+                await telemetry.recordFetch(event)
+            }
             await applyConfiguration()
         }
+        telemetryObservationTask = Task { @MainActor [weak self, telemetry, diagnostics] in
+            let updates = await telemetry.updates()
+            for await snapshot in updates {
+                guard let self else { break }
+                telemetrySnapshot = snapshot
+                diagnostics.onTelemetryUpdated?(snapshot)
+            }
+        }
+    }
+
+    deinit {
+        telemetryObservationTask?.cancel()
     }
 
     /// Ordered player-state changes with bounded buffering for non-SwiftUI consumers.
@@ -262,6 +283,11 @@ public final class ProxyHLSPlayer {
                 Task { @MainActor in self?.stateContinuations.removeValue(forKey: id) }
             }
         }
+    }
+
+    /// Ordered, fixed-memory telemetry snapshots for non-Observation consumers.
+    public func telemetryUpdates() async -> AsyncStream<HLSStreamingTelemetry.Snapshot> {
+        await telemetry.updates()
     }
 
     public func load(
@@ -353,6 +379,7 @@ public final class ProxyHLSPlayer {
         latestBufferState = nil
         currentPlaylist = nil
         currentRewriteConfiguration = nil
+        Task { [telemetry] in await telemetry.updateLiveEdgeDistance(nil) }
         for task in renditionRefreshTasks.values { task.cancel() }
         renditionRefreshTasks.removeAll()
         let scheduler = scheduler
@@ -742,7 +769,7 @@ public final class ProxyHLSPlayer {
     }
 
     private func makeDebugHandler() -> ProxyRouter.Handler {
-        { @Sendable [weak self, cache, scheduler, playlistRefresher, throughputEstimator, adaptiveController] _ in
+        { @Sendable [weak self, cache, scheduler, playlistRefresher, throughputEstimator, adaptiveController, telemetry] _ in
             async let metricsTask = cache.metrics()
             async let bufferTask = scheduler.bufferState()
             async let refreshTask = playlistRefresher.metrics()
@@ -802,6 +829,15 @@ public final class ProxyHLSPlayer {
                 self?.configuration.lowLatencyPolicy.isEnabled ?? false
             }
 
+            await telemetry.updateCacheMetrics(metrics)
+            let streaming = await telemetry.snapshot()
+            let fetchErrors = Dictionary(uniqueKeysWithValues: streaming.fetchErrorCounts.map {
+                ($0.key.rawValue, $0.value)
+            })
+            let retryOutcomes = Dictionary(uniqueKeysWithValues: streaming.retryOutcomeCounts.map {
+                ($0.key.rawValue, $0.value)
+            })
+
             let payload: [String: Any] = [
                 "buffered_segments": bufferState.readySequences.count,
                 "prefetch_depth_seconds": bufferState.prefetchDepthSeconds,
@@ -824,7 +860,16 @@ public final class ProxyHLSPlayer {
                 "active_subtitle_rendition": renditionMetadata.1 ?? NSNull(),
                 "keys": keyMetadata,
                 "part_hold_back_seconds": partHoldBack ?? NSNull(),
-                "low_latency_mode": lowLatencyEnabled
+                "low_latency_mode": lowLatencyEnabled,
+                "segment_fetch_count": streaming.segmentFetchLatency.count,
+                "segment_fetch_latency_p50_seconds": streaming.segmentFetchLatency.approximateQuantile(0.5) ?? NSNull(),
+                "segment_fetch_latency_p95_seconds": streaming.segmentFetchLatency.approximateQuantile(0.95) ?? NSNull(),
+                "segment_fetch_errors": fetchErrors,
+                "segment_retry_outcomes": retryOutcomes,
+                "cache_hit_ratio": streaming.cacheHitRatio ?? NSNull(),
+                "live_edge_distance_seconds": streaming.liveEdgeDistanceSeconds ?? NSNull(),
+                "variant_switch_reasons": streaming.variantSwitchReasonCounts,
+                "latest_variant_switch_reason": streaming.latestVariantSwitchReason ?? NSNull()
             ]
             return HTTPResponse.json(payload)
         }
@@ -1468,7 +1513,11 @@ public final class ProxyHLSPlayer {
     }
 
     private func metricsHandler() -> ProxyRouter.Handler {
-        MetricsHandler(cache: cache, scheduler: scheduler).makeHandler()
+        MetricsHandler(
+            cache: cache,
+            scheduler: scheduler,
+            telemetry: telemetry
+        ).makeHandler()
     }
 
     private func refreshPlaylist(bufferState: BufferState) async {
@@ -1488,9 +1537,32 @@ public final class ProxyHLSPlayer {
     private func handleBufferStateChange(_ bufferState: BufferState, generation: UInt64) async {
         guard generation == sessionGeneration else { return }
         latestBufferState = bufferState
+        await updateLiveEdgeTelemetry(playedThrough: bufferState.playedThroughSequence)
         await updatePlaybackState(with: bufferState, generation: generation)
         guard generation == sessionGeneration else { return }
         await evaluateABR(bufferState: bufferState)
+    }
+
+    private func updateLiveEdgeTelemetry(playedThrough sequence: Int?) async {
+        guard let playlist = currentPlaylist, !playlist.isEndlist else {
+            await telemetry.updateLiveEdgeDistance(nil)
+            return
+        }
+        let floor: Int
+        if let sequence {
+            floor = sequence
+        } else {
+            floor = playlist.mediaSequence == Int.min
+                ? Int.min
+                : playlist.mediaSequence - 1
+        }
+        let segmentDistance = playlist.segments
+            .filter { $0.sequence > floor }
+            .reduce(0) { $0 + max(0, $1.duration) }
+        let partDistance = playlist.trailingParts
+            .filter { $0.parentSequence > floor }
+            .reduce(0) { $0 + max(0, $1.duration) }
+        await telemetry.updateLiveEdgeDistance(segmentDistance + partDistance)
     }
 
     private func startPlaylistRefresh(at url: URL, generation: UInt64) async {
@@ -1525,6 +1597,7 @@ public final class ProxyHLSPlayer {
         await scheduler.updatePlaylist(playlist)
         let bufferState = await scheduler.bufferState()
         latestBufferState = bufferState
+        await updateLiveEdgeTelemetry(playedThrough: bufferState.playedThroughSequence)
         await updatePlaybackState(with: bufferState, generation: generation)
         guard generation == sessionGeneration else { return }
         await evaluateABR(bufferState: bufferState)
@@ -1661,12 +1734,14 @@ public final class ProxyHLSPlayer {
 
     private func makeTelemetryHandler() -> (@Sendable (SegmentPrefetchScheduler.Telemetry) async -> Void) {
         let controller = adaptiveController
-        return { [weak self, logger, controller] telemetry in
+        let metrics = telemetry
+        return { [weak self, logger, controller, cache] schedulerTelemetry in
             logger.log(
-                "scheduled=\(telemetry.scheduledSequences) ready=\(telemetry.readyCount) parts=\(telemetry.readyPartCount) failures=\(telemetry.failureCount)",
+                "scheduled=\(schedulerTelemetry.scheduledSequences) ready=\(schedulerTelemetry.readyCount) parts=\(schedulerTelemetry.readyPartCount) failures=\(schedulerTelemetry.failureCount)",
                 category: .scheduler
             )
-            guard telemetry.failureCount > 0 else { return }
+            await metrics.updateCacheMetrics(cache.metrics())
+            guard schedulerTelemetry.failureCount > 0 else { return }
             await controller.registerFailure()
             guard let player = await MainActor.run(resultType: ProxyHLSPlayer?.self, body: { self }) else { return }
             await player.evaluateABR(bufferState: nil)
@@ -1763,6 +1838,7 @@ public final class ProxyHLSPlayer {
             latestBufferState = referenceState
             await refreshPlaylist(bufferState: referenceState)
             await updateMasterPlaylist()
+            await telemetry.recordVariantSwitch(reason: String(describing: reason))
             logger.log("ABR switched to variant \(variant.url.absoluteString) due to \(reason)", category: .player)
         } catch {
             logger.log("Failed to switch variant: \(error)", category: .player)

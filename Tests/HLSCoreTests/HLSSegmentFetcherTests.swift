@@ -168,6 +168,36 @@ final class HLSSegmentFetcherTests: XCTestCase {
         XCTAssertEqual(metrics?.retryCount, 2)
     }
 
+    func testEmitsTerminalEventsForRetrySuccessAndClientFailure() async throws {
+        SegmentFetcherURLProtocol.enqueue(error: URLError(.timedOut))
+        SegmentFetcherURLProtocol.enqueue(data: Data([0xA1]))
+        SegmentFetcherURLProtocol.enqueue(data: Data(), statusCode: 404)
+        let delays = RetryDelayRecorder()
+        let events = FetchEventRecorder()
+        let fetcher = makeFetcher(
+            retryPolicy: .init(maxAttempts: 2, initialDelay: 0, jitterRatio: 0),
+            retryClock: delays.clock
+        )
+        await fetcher.onEvent { event in events.append(event) }
+
+        _ = try await fetcher.fetchSegment(from: URL(string: "https://cdn.example.com/recovered.ts")!)
+        do {
+            _ = try await fetcher.fetchSegment(from: URL(string: "https://cdn.example.com/missing-event.ts")!)
+            XCTFail("Expected 404")
+        } catch {
+            guard case HLSSegmentFetcher.FetchError.httpStatus(404) = error else {
+                return XCTFail("Expected 404, got \(error)")
+            }
+        }
+
+        XCTAssertEqual(events.values.count, 2)
+        XCTAssertEqual(events.values[0].retryOutcome, .successAfterRetry)
+        XCTAssertEqual(events.values[0].attemptCount, 2)
+        XCTAssertNil(events.values[0].errorCategory)
+        XCTAssertEqual(events.values[1].retryOutcome, .failureWithoutRetry)
+        XCTAssertEqual(events.values[1].errorCategory, .httpClient)
+    }
+
     func testHonorsRetryAfterAndPreservesRangeAcrossAttempts() async throws {
         SegmentFetcherURLProtocol.enqueue(
             data: Data(),
@@ -385,6 +415,20 @@ private final class RetryDelayRecorder: Sendable {
 
     var delays: [TimeInterval] {
         state.withLock { $0.delays }
+    }
+}
+
+private final class FetchEventRecorder: Sendable {
+    private let storage = OSAllocatedUnfairLock(
+        initialState: [HLSSegmentFetcher.FetchEvent]()
+    )
+
+    var values: [HLSSegmentFetcher.FetchEvent] {
+        storage.withLock { $0 }
+    }
+
+    func append(_ event: HLSSegmentFetcher.FetchEvent) {
+        storage.withLock { $0.append(event) }
     }
 }
 

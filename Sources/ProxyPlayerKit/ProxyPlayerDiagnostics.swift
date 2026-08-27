@@ -19,6 +19,7 @@ public struct ProxyPlayerDiagnostics: Sendable {
     public var onQualityChanged: (@Sendable (VariantPlaylist) -> Void)?
     public var onRenditionChanged: (@Sendable (HLSManifest.Rendition.Kind, HLSManifest.Rendition?) -> Void)?
     public var onKeyMetadataChanged: (@Sendable ([KeyStatus]) -> Void)?
+    public var onTelemetryUpdated: (@Sendable (HLSStreamingTelemetry.Snapshot) -> Void)?
 
     public init(
         onPlaylistServed: (@Sendable () -> Void)? = nil,
@@ -26,7 +27,8 @@ public struct ProxyPlayerDiagnostics: Sendable {
         onPlaylistRefreshed: (@Sendable (PlaylistRefreshController.Metrics) -> Void)? = nil,
         onQualityChanged: (@Sendable (VariantPlaylist) -> Void)? = nil,
         onRenditionChanged: (@Sendable (HLSManifest.Rendition.Kind, HLSManifest.Rendition?) -> Void)? = nil,
-        onKeyMetadataChanged: (@Sendable ([KeyStatus]) -> Void)? = nil
+        onKeyMetadataChanged: (@Sendable ([KeyStatus]) -> Void)? = nil,
+        onTelemetryUpdated: (@Sendable (HLSStreamingTelemetry.Snapshot) -> Void)? = nil
     ) {
         self.onPlaylistServed = onPlaylistServed
         self.onSegmentServed = onSegmentServed
@@ -34,5 +36,6 @@ public struct ProxyPlayerDiagnostics: Sendable {
         self.onQualityChanged = onQualityChanged
         self.onRenditionChanged = onRenditionChanged
         self.onKeyMetadataChanged = onKeyMetadataChanged
+        self.onTelemetryUpdated = onTelemetryUpdated
     }
 }

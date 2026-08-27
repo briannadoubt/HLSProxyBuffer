@@ -115,6 +115,30 @@ and recovery behavior can be justified with production telemetry.
 - `ProxyPlayerLogger` uses the same structured backend and policy instead of
   writing directly to standard output.
 
+## Bounded streaming telemetry
+
+`HLSStreamingTelemetry` stores counters, scalar gauges, and a fixed histogram;
+it never retains request URLs, errors, or per-fetch samples. Histogram boundaries
+are normalized, sorted, and capped at 32. Quantiles are bucket-upper-bound
+approximations, and segment fetch duration includes retry backoff through the
+terminal success, failure, or cancellation.
+
+- Fetch failures use a closed category set (timeout, DNS, connectivity, HTTP,
+  validation, checksum, cancellation, or other). Retry counters describe the
+  terminal outcome once per single-flight request, not each attempt.
+- Cache hit ratio is cumulative hits divided by hits plus misses. The snapshot
+  reports no ratio before the first lookup; Prometheus renders that state as `0`.
+- Live-edge distance is an HLS media-duration estimate from the last consumed
+  sequence through completed segments and trailing parts. It is absent for VOD
+  and stopped players; it is not a wall-clock latency measurement.
+- Variant reason counters include successful switches only. Specific reason
+  cardinality is capped and excess values collapse into `other`.
+
+The same snapshot is available through the loopback `/metrics` and
+`/debug/status` routes, `ProxyHLSPlayer.telemetrySnapshot` via Observation,
+`telemetryUpdates()` via an `AsyncStream` buffered to the newest value, and
+`ProxyPlayerDiagnostics.onTelemetryUpdated` for injected diagnostics systems.
+
 ## Release verification
 
 Before release, run:
