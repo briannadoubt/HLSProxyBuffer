@@ -146,6 +146,64 @@ retires every attempt, and finishes the analytics stream. Standalone users may
 also feed sanitized adapters to `PlaybackAnalyticsTimeline`, but normal feed
 adopters only need the engine-owned stream.
 
+## Bounded delivery
+
+`PlaybackAnalyticsDelivery` is an actor-backed boundary between playback and an
+application-owned destination. Its two `record` overloads only perform bounded
+memory admission on the actor. They never call a sink and never perform disk or
+network I/O. One worker owns batching, retries, and export; optional spool I/O
+runs off the actor so a slow filesystem cannot hold up new playback records.
+
+```swift
+struct FleetSink: PlaybackAnalyticsSink {
+    func send(_ batch: PlaybackAnalyticsBatch) async throws {
+        // Map the typed records into the application's analytics SDK.
+        // Honor cancellation and return only when this batch is accepted.
+    }
+}
+
+let delivery = PlaybackAnalyticsDelivery(
+    sink: FleetSink(),
+    configuration: .init(
+        routineSamplingRate: 0.25,
+        memoryBudgetBytes: 512 * 1_024,
+        maximumBatchRecordCount: 64,
+        flushInterval: .seconds(5),
+        retryPolicy: .init(maximumAttempts: 3)
+    )
+)
+
+for await event in engine.analytics.events {
+    await delivery.record(event) // no sink, disk, or network await
+}
+```
+
+Every `PlaybackAnalyticsRecord` exposes its existing `RecordID` as
+`idempotencyID`, and every batch exposes those IDs in order. Delivery is
+at-least-once: a sink can accept a request whose response is then lost, or a
+spool-file delete can fail after acceptance, so a conforming destination must
+deduplicate by record ID. Batch boundaries are not identities and may change
+across retries or process launches.
+
+Routine sampling is deterministic from `RecordID`; important events and all
+summaries bypass sampling. When the memory queue is full, a higher-priority
+record evicts the oldest record at the lowest lower priority. A routine record
+never displaces another record, and a critical summary is dropped only when no
+lower-priority record can make room. The disk spool applies the same rule,
+stores only typed records, uses one file per idempotency key, and is bounded by
+both bytes and record count. Its directory is application configuration and is
+never included in analytics data.
+
+`snapshot` and the newest-only `snapshots` stream expose queue/spool occupancy,
+sampling and priority drops, retries, export/spool failures, deliveries, and
+live/maximum task counts. Delivery health is local state; it is deliberately
+not emitted into the analytics pipeline, avoiding recursive failure reports.
+`flush()` performs one immediate best-effort pass. `shutdown(flushTimeout:)`
+stops admission, cancels the scheduled worker, attempts a deadline-bounded
+flush, spools or drops anything left, and finishes the health stream. Sink
+implementations must honor Swift task cancellation so that deadline and task
+bounds remain enforceable.
+
 ## Schema compatibility
 
 The schema uses `{major, minor}` versions.
