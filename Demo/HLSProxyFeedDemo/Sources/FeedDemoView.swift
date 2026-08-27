@@ -6,13 +6,156 @@ struct FeedDemoRootView: View {
     @State private var model = FeedDemoModel()
 
     var body: some View {
-        FeedDemoShell(model: model)
+        Group {
+            if ProcessInfo.processInfo.arguments.contains("--qualification-mode") {
+                FeedDemoQualificationView(model: model)
+            } else {
+                FeedDemoShell(model: model)
+            }
+        }
             .task {
                 await model.start()
             }
             .onDisappear {
                 Task { await model.stop() }
             }
+    }
+}
+
+private struct FeedDemoQualificationView: View {
+    let model: FeedDemoModel
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("HLS FEED QUALIFICATION", bundle: #bundle)
+                .font(.caption.bold())
+                .foregroundStyle(.mint)
+
+            if let engine = model.engine, let focused = model.focusedItemID {
+                HLSFeedVideo(engine: engine, itemID: focused)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(.black)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            HStack {
+                qualificationValue(
+                    title: "Focus",
+                    value: model.focusedItemID?.rawValue ?? "none",
+                    identifier: "qualification-focus"
+                )
+                qualificationValue(
+                    title: "Navigations",
+                    value: String(model.qualificationNavigationCount),
+                    identifier: "qualification-navigation-count"
+                )
+                qualificationValue(
+                    title: "Playback",
+                    value: playbackStatus,
+                    identifier: "qualification-playback-state"
+                )
+            }
+
+            HStack {
+                Button {
+                    Task { await model.markQualificationWarmup() }
+                } label: {
+                    Text("Mark warmup", bundle: #bundle)
+                }
+                .accessibilityIdentifier("qualification-mark-warmup")
+                .accessibilityValue(model.qualificationWarmupIsMarked ? "ready" : "pending")
+
+                Button {
+                    model.advanceQualification()
+                } label: {
+                    Text("Next", bundle: #bundle)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("qualification-next")
+
+                Button {
+                    Task { await model.finishQualification() }
+                } label: {
+                    Text("Finish", bundle: #bundle)
+                }
+                .accessibilityIdentifier("qualification-finish")
+            }
+
+            Text(qualificationResult)
+                .font(.headline.monospaced())
+                .foregroundStyle(model.qualificationReport?.passed == false ? .red : .green)
+                .accessibilityIdentifier("qualification-result")
+                .accessibilityValue(model.qualificationReport?.passed == true ? "PASS" : qualificationResult)
+
+            Text(verbatim: model.qualificationReport?.json ?? "pending")
+                .font(.system(size: 1))
+                .lineLimit(1)
+                .frame(height: 1)
+                .opacity(0.01)
+                .accessibilityIdentifier("qualification-report")
+                .accessibilityLabel("Qualification JSON")
+                .accessibilityValue(model.qualificationReport?.json ?? "pending")
+
+            Text(readinessStatus)
+                .font(.caption2)
+                .foregroundStyle(.white)
+                .accessibilityIdentifier("qualification-ready")
+                .accessibilityValue(readinessStatus)
+        }
+        .padding()
+        .background(Color.black, ignoresSafeAreaEdges: .all)
+        .tint(.mint)
+    }
+
+    private func qualificationValue(
+        title: LocalizedStringKey,
+        value: String,
+        identifier: String
+    ) -> some View {
+        VStack(spacing: 2) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.7))
+            Text(verbatim: value)
+                .font(.caption.monospaced())
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .accessibilityIdentifier(identifier)
+                .accessibilityValue(value)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var playbackStatus: String {
+        guard let focused = model.focusedItemID,
+              let playback = model.engineSnapshot.playback(for: focused)
+        else {
+            return "Starting"
+        }
+        if playback.hasStartedPlayback { return "Playing" }
+        return switch playback.phase {
+        case .loading: "Loading"
+        case .warm: "Warm"
+        case .focused: "Starting"
+        case .failed: "Failed"
+        }
+    }
+
+    private var readinessStatus: String {
+        switch model.status {
+        case .idle: "Idle"
+        case .starting: "Starting"
+        case .running: "Ready"
+        case .failed(let message): "Failed: \(message)"
+        }
+    }
+
+    private var qualificationResult: String {
+        guard let report = model.qualificationReport else { return "PENDING" }
+        return report.passed ? "PASS" : "FAIL: \(report.failures.joined(separator: "; "))"
     }
 }
 

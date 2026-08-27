@@ -393,10 +393,26 @@ final class HLSFeedEngineTests: XCTestCase {
     }
 
     func testFiveHundredTransitionsLeaveNoTasksObserversOrListeners() async throws {
+        struct EnduranceReport: Codable {
+            let transitionCount: Int
+            let maximumPlayerPoolOccupancy: Int
+            let maximumAllocatedPlayerCount: Int
+            let maximumPlayerPoolLimit: Int
+            let allocatedSessionCount: Int
+            let finalPoolOccupancy: Int
+            let finalAllocatedPlayerCount: Int
+            let finalActiveLoadCount: Int
+            let activeObserverCount: Int
+            let stoppedSessionCount: Int
+            let handoffAttemptCount: UInt64
+            let handoffSuccessCount: UInt64
+            let handoffSuccessRate: Double
+        }
         let items = makeItems(count: 11)
         let policy = try makePolicy(maximumPlayerCount: 2)
         let factory = FakeFeedSessionFactory()
         let engine = try makeEngine(items: items, policy: policy, factory: factory)
+        var maximumAllocatedPlayerCount = 0
 
         for step in 0..<500 {
             let focused = items[step % items.count].id
@@ -407,6 +423,11 @@ final class HLSFeedEngineTests: XCTestCase {
             ))
             let snapshot = await engine.waitUntilSettled()
             XCTAssertLessThanOrEqual(snapshot.poolOccupancy, 2)
+            XCTAssertLessThanOrEqual(snapshot.allocatedPlayerCount, 2)
+            maximumAllocatedPlayerCount = max(
+                maximumAllocatedPlayerCount,
+                snapshot.allocatedPlayerCount
+            )
             XCTAssertEqual(Set(snapshot.playbacks.map(\.itemID)).count, snapshot.playbacks.count)
         }
 
@@ -422,6 +443,29 @@ final class HLSFeedEngineTests: XCTestCase {
         let decoded = try JSONDecoder().decode(HLSFeedTelemetry.Snapshot.self, from: summary)
         XCTAssertEqual(decoded, engine.telemetry.snapshot)
         XCTAssertGreaterThanOrEqual(decoded.handoffSuccessCount, 500)
+        let handoffAttemptCount = decoded.paths.reduce(UInt64(0)) {
+            $0 &+ $1.handoffAttemptCount
+        }
+        let handoffSuccessRate = Double(decoded.handoffSuccessCount) / Double(handoffAttemptCount)
+        XCTAssertGreaterThanOrEqual(handoffSuccessRate, 0.99)
+        try QualificationArtifact.write(
+            EnduranceReport(
+                transitionCount: 500,
+                maximumPlayerPoolOccupancy: decoded.resources.maximumPlayerPoolOccupancy,
+                maximumAllocatedPlayerCount: maximumAllocatedPlayerCount,
+                maximumPlayerPoolLimit: policy.concurrency.maximumPlayerCount,
+                allocatedSessionCount: factory.sessions.count,
+                finalPoolOccupancy: engine.snapshot.poolOccupancy,
+                finalAllocatedPlayerCount: engine.snapshot.allocatedPlayerCount,
+                finalActiveLoadCount: engine.snapshot.activeLoadCount,
+                activeObserverCount: factory.sessions.reduce(0) { $0 + $1.activeStateObserverCount },
+                stoppedSessionCount: factory.sessions.filter(\.isStopped).count,
+                handoffAttemptCount: handoffAttemptCount,
+                handoffSuccessCount: decoded.handoffSuccessCount,
+                handoffSuccessRate: handoffSuccessRate
+            ),
+            named: "hls-feed-engine-endurance.json"
+        )
     }
 
     private func makeEngine(

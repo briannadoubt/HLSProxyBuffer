@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+QUALIFICATION_ARTIFACT_DIR="${HLS_CI_ARTIFACT_DIR:-$PWD/ci-artifacts}"
+mkdir -p "$QUALIFICATION_ARTIFACT_DIR"
+export HLS_CI_ARTIFACT_DIR="$QUALIFICATION_ARTIFACT_DIR"
+
 wait_for_simulator_boot() {
   local udid="$1"
   local timeout="${2:-180}"
@@ -48,6 +52,15 @@ if command -v xcodebuild >/dev/null 2>&1; then
       -destination "platform=iOS Simulator,id=$IOS_SIM_UDID" \
       -sdk iphonesimulator \
       build
+
+    echo "Running the Release-mode automatic feed UI qualification on $IOS_SIM_NAME..."
+    UI_RESULT_BUNDLE="$QUALIFICATION_ARTIFACT_DIR/HLSProxyFeedQualification-$(date +%s).xcresult"
+    xcodebuild \
+      -project Demo/HLSProxyFeedDemo/HLSProxyFeedDemoApp.xcodeproj \
+      -scheme HLSProxyFeedQualification \
+      -destination "platform=iOS Simulator,id=$IOS_SIM_UDID" \
+      -resultBundlePath "$UI_RESULT_BUNDLE" \
+      test
   else
     echo "iOS simulator build skipped (no $IOS_SIM_NAME available)."
   fi

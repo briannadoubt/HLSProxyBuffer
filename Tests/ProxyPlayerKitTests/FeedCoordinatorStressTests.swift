@@ -3,6 +3,22 @@ import XCTest
 @testable import ProxyPlayerKit
 
 final class FeedCoordinatorStressTests: XCTestCase {
+    private struct StressReport: Codable {
+        let transitionCount: Int
+        let maximumObservedActivePreparations: Int
+        let maximumConcurrentPreparationLimit: Int
+        let maximumResidentItemCount: Int
+        let maximumResidentItemLimit: Int
+        let maximumResidentEstimatedBytes: Int
+        let maximumResidentEstimatedByteLimit: Int
+        let cancellationRequestCount: Int
+        let cancellationAcknowledgementCount: Int
+        let cancellationMaximumMilliseconds: Double
+        let cancellationDeadlineMilliseconds: Double
+        let lateCancellationCount: Int
+        let discardedStaleResultCount: Int
+    }
+
     func testAllStandardTracesKeepCoordinatorWorkWithinHardBounds() async throws {
         let items = makeItems(count: 11)
         var policy = FeedPlaybackPolicy.preset(.shortFormFeed)
@@ -13,6 +29,8 @@ final class FeedCoordinatorStressTests: XCTestCase {
         let coordinator = try FeedCoordinator(items: items, policy: policy, backend: backend)
         var generation: UInt64 = 0
         var observationCount = 0
+        var maximumResidentItemCount = 0
+        var maximumResidentEstimatedBytes = 0
 
         for trace in FeedNavigationTrace.standardCatalog(itemCount: items.count) {
             for source in try trace.signals(for: items) {
@@ -27,6 +45,11 @@ final class FeedCoordinatorStressTests: XCTestCase {
                     observedAt: source.observedAt
                 )
                 let snapshot = try await coordinator.submit(signal)
+                maximumResidentItemCount = max(maximumResidentItemCount, snapshot.entries.count)
+                maximumResidentEstimatedBytes = max(
+                    maximumResidentEstimatedBytes,
+                    snapshot.residentEstimatedPreparationBytes
+                )
                 XCTAssertLessThanOrEqual(snapshot.activePreparationCount, 2)
                 XCTAssertLessThanOrEqual(snapshot.entries.count, 4)
                 XCTAssertLessThanOrEqual(
@@ -40,14 +63,43 @@ final class FeedCoordinatorStressTests: XCTestCase {
         }
 
         let settled = await coordinator.waitUntilIdle()
+        maximumResidentItemCount = max(maximumResidentItemCount, settled.entries.count)
+        maximumResidentEstimatedBytes = max(
+            maximumResidentEstimatedBytes,
+            settled.residentEstimatedPreparationBytes
+        )
         let backendMaximum = await backend.maximumObservedActiveCount()
         XCTAssertEqual(observationCount, 532)
         XCTAssertLessThanOrEqual(settled.maximumObservedActivePreparations, 2)
         XCTAssertLessThanOrEqual(backendMaximum, 2)
         XCTAssertGreaterThan(settled.cancellationRequestCount, 100)
+        XCTAssertEqual(
+            settled.cancellationAcknowledgementCount,
+            settled.cancellationRequestCount
+        )
         XCTAssertEqual(settled.lateCancellationCount, 0)
+        let cancellationMaximum = settled.maximumCancellationLatency?.seconds ?? 0
+        XCTAssertLessThanOrEqual(cancellationMaximum, 0.250)
         XCTAssertEqual(settled.generation, .init(rawValue: generation))
         XCTAssertTrue(settled.readyItemIDs.contains(try XCTUnwrap(settled.entries.first?.itemID)))
+        try QualificationArtifact.write(
+            StressReport(
+                transitionCount: observationCount,
+                maximumObservedActivePreparations: settled.maximumObservedActivePreparations,
+                maximumConcurrentPreparationLimit: policy.concurrency.maximumConcurrentPreparations,
+                maximumResidentItemCount: maximumResidentItemCount,
+                maximumResidentItemLimit: policy.budget.maximumResidentItems,
+                maximumResidentEstimatedBytes: maximumResidentEstimatedBytes,
+                maximumResidentEstimatedByteLimit: policy.budget.maximumEstimatedPreparationBytes,
+                cancellationRequestCount: settled.cancellationRequestCount,
+                cancellationAcknowledgementCount: settled.cancellationAcknowledgementCount,
+                cancellationMaximumMilliseconds: cancellationMaximum * 1_000,
+                cancellationDeadlineMilliseconds: 250,
+                lateCancellationCount: settled.lateCancellationCount,
+                discardedStaleResultCount: settled.discardedStaleResultCount
+            ),
+            named: "hls-feed-coordinator-stress.json"
+        )
     }
 }
 
@@ -95,5 +147,12 @@ private actor StressFeedPreparationBackend: FeedPreparing {
 
     func maximumObservedActiveCount() -> Int {
         maximumActiveCount
+    }
+}
+
+private extension Duration {
+    var seconds: TimeInterval {
+        let components = self.components
+        return Double(components.seconds) + Double(components.attoseconds) / 1e18
     }
 }

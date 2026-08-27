@@ -37,6 +37,9 @@ final class FeedDemoModel {
     private(set) var metrics = FeedDemoMetrics()
     private(set) var focusedItemID: FeedItemID?
     private(set) var isLowPowerModeEnabled = ProcessInfo.processInfo.isLowPowerModeEnabled
+    private(set) var qualificationNavigationCount = 0
+    private(set) var qualificationWarmupIsMarked = false
+    private(set) var qualificationReport: FeedDemoQualificationReport?
 
     @ObservationIgnored private let clock = ContinuousClock()
     @ObservationIgnored private var startedAt: ContinuousClock.Instant?
@@ -47,6 +50,9 @@ final class FeedDemoModel {
     @ObservationIgnored private var engineUpdatesTask: Task<Void, Never>?
     @ObservationIgnored private var telemetryTask: Task<Void, Never>?
     @ObservationIgnored private var signalTask: Task<Void, Never>?
+    @ObservationIgnored private var qualificationRequestedItemID: FeedItemID?
+    @ObservationIgnored private var qualificationWarmupNavigationCount: Int?
+    @ObservationIgnored private var qualificationWarmupMemoryBytes: Int?
 
     func start() async {
         guard origin == nil else { return }
@@ -84,6 +90,45 @@ final class FeedDemoModel {
 
     func requestFocus(_ itemID: FeedItemID) {
         submitSignal(requestedFocus: itemID)
+    }
+
+    func advanceQualification() {
+        guard !entries.isEmpty else { return }
+        let currentIndex = qualificationRequestedItemID
+            .flatMap { requested in entries.firstIndex { $0.id == requested } }
+            ?? entries.firstIndex { $0.id == focusedItemID }
+            ?? 0
+        let next = entries[(currentIndex + 1) % entries.count].id
+        let viewport = CGRect(x: 0, y: 0, width: 1, height: 1)
+        qualificationRequestedItemID = next
+        qualificationNavigationCount += 1
+        latestFrames = [next: viewport]
+        latestViewport = viewport
+        submitSignal(requestedFocus: next)
+    }
+
+    func markQualificationWarmup() async {
+        await settleQualification()
+        guard let engine else { return }
+        qualificationWarmupNavigationCount = qualificationNavigationCount
+        qualificationWarmupMemoryBytes = engine.telemetry.snapshot.resources.memoryResidentBytes
+        qualificationWarmupIsMarked = true
+        qualificationReport = nil
+    }
+
+    func finishQualification() async {
+        await settleQualification()
+        guard let engine else { return }
+        let measured = qualificationNavigationCount - (qualificationWarmupNavigationCount ?? 0)
+        qualificationReport = FeedDemoQualificationReport.make(
+            navigationCount: qualificationNavigationCount,
+            measuredNavigationCount: measured,
+            requestedItemID: qualificationRequestedItemID,
+            snapshot: engineSnapshot,
+            telemetry: engine.telemetry.snapshot,
+            policy: selectedMode.policy,
+            warmupMemoryBytes: qualificationWarmupMemoryBytes
+        )
     }
 
     func setLowPowerModeEnabled(_ isEnabled: Bool) async {
@@ -129,6 +174,12 @@ final class FeedDemoModel {
         entries = []
         engineSnapshot = .empty
         metrics = FeedDemoMetrics()
+        qualificationNavigationCount = 0
+        qualificationWarmupIsMarked = false
+        qualificationReport = nil
+        qualificationRequestedItemID = nil
+        qualificationWarmupNavigationCount = nil
+        qualificationWarmupMemoryBytes = nil
         status = .idle
     }
 
@@ -152,6 +203,12 @@ final class FeedDemoModel {
         engineSnapshot = .empty
         metrics = FeedDemoMetrics(playerLimit: policy.concurrency.maximumPlayerCount)
         focusedItemID = nil
+        qualificationNavigationCount = 0
+        qualificationWarmupIsMarked = false
+        qualificationReport = nil
+        qualificationRequestedItemID = nextEntries.first?.id
+        qualificationWarmupNavigationCount = nil
+        qualificationWarmupMemoryBytes = nil
         signalBuilder = FeedDemoSignalBuilder(orderedItemIDs: nextEntries.map(\.id))
         latestFrames = [:]
         latestViewport = .zero
@@ -228,6 +285,23 @@ final class FeedDemoModel {
                 self.status = .failed(error.localizedDescription)
             }
         }
+    }
+
+    private func settleQualification() async {
+        await signalTask?.value
+        guard let engine else { return }
+        engineSnapshot = await engine.waitUntilSettled()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while clock.now < deadline {
+            if let requested = qualificationRequestedItemID,
+               engine.snapshot.activeItemID == requested,
+               engine.snapshot.playback(for: requested)?.hasStartedPlayback == true {
+                break
+            }
+            try? await clock.sleep(for: .milliseconds(25))
+        }
+        engineSnapshot = engine.snapshot
+        refreshMetrics(engine: engine, policy: selectedMode.policy)
     }
 
     private func refreshMetrics(engine: HLSFeedEngine, policy: FeedPlaybackPolicy) {
