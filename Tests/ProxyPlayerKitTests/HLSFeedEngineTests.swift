@@ -78,6 +78,7 @@ final class HLSFeedEngineTests: XCTestCase {
         let warmID = try XCTUnwrap(snapshot.playbacks.first { $0.phase == .warm }?.itemID)
         let warmSession = try XCTUnwrap(factory.session(loadedWith: warmID))
         let loadCountBeforeHandoff = warmSession.loadCount
+        XCTAssertEqual(warmSession.preparationCount, 1)
         XCTAssertEqual(warmSession.playCount, 0, "speculative playback must remain paused")
 
         try await engine.update(signal(generation: 2, focused: warmID))
@@ -91,6 +92,11 @@ final class HLSFeedEngineTests: XCTestCase {
             "focus must reuse the already loaded player item"
         )
         XCTAssertEqual(warmSession.playCount, 1)
+        XCTAssertEqual(
+            warmSession.playBeforePreparationCount,
+            0,
+            "focus must not start before the media pipeline is primed"
+        )
         XCTAssertLessThanOrEqual(snapshot.maximumObservedPoolOccupancy, 2)
 
         await engine.stop()
@@ -148,6 +154,25 @@ final class HLSFeedEngineTests: XCTestCase {
         XCTAssertEqual(snapshot.failures.first?.itemID, items[0].id)
         XCTAssertTrue(factory.sessions.allSatisfy { $0.stopCount == 1 })
         XCTAssertTrue(factory.sessions.allSatisfy { $0.activeStateObserverCount == 0 })
+
+        await engine.stop()
+    }
+
+    func testPreparationFailureNeverPublishesAnUnprimedWarmLease() async throws {
+        let items = makeItems(count: 1)
+        let policy = try makePolicy(maximumPlayerCount: 1, prefetchItemCount: 0)
+        let factory = FakeFeedSessionFactory(failsPreparation: true)
+        let engine = try makeEngine(items: items, policy: policy, factory: factory)
+
+        try await engine.update(signal(generation: 1, focused: items[0].id))
+        let snapshot = await engine.waitUntilSettled()
+        await Task.yield()
+
+        XCTAssertEqual(snapshot.poolOccupancy, 0)
+        XCTAssertNil(snapshot.activeItemID)
+        XCTAssertEqual(snapshot.failures.first?.itemID, items[0].id)
+        XCTAssertEqual(factory.sessions.first?.preparationCount, 1)
+        XCTAssertEqual(factory.sessions.first?.playCount, 0)
 
         await engine.stop()
     }
@@ -569,16 +594,19 @@ private extension FeedPlaybackSource {
 private final class FakeFeedSessionFactory {
     let loadDelay: Duration
     let failingItemIDs: Set<FeedItemID>
+    let failsPreparation: Bool
     let usesUnstartedPlatformPlayer: Bool
     private(set) var sessions: [FakeFeedPlayerSession] = []
 
     init(
         loadDelay: Duration = .zero,
         failingItemIDs: Set<FeedItemID> = [],
+        failsPreparation: Bool = false,
         usesUnstartedPlatformPlayer: Bool = false
     ) {
         self.loadDelay = loadDelay
         self.failingItemIDs = failingItemIDs
+        self.failsPreparation = failsPreparation
         self.usesUnstartedPlatformPlayer = usesUnstartedPlatformPlayer
     }
 
@@ -587,6 +615,7 @@ private final class FakeFeedSessionFactory {
             configuration: configuration,
             loadDelay: loadDelay,
             failingItemIDs: failingItemIDs,
+            failsPreparation: failsPreparation,
             platformPlayer: usesUnstartedPlatformPlayer ? AVPlayer() : nil
         )
         sessions.append(session)
@@ -607,7 +636,9 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     private(set) var loadedStreamKind: FeedStreamKind?
     private(set) var loadedClipCount = 0
     private(set) var loadCount = 0
+    private(set) var preparationCount = 0
     private(set) var playCount = 0
+    private(set) var playBeforePreparationCount = 0
     private(set) var pauseCount = 0
     private(set) var stopCount = 0
     private(set) var restartCount = 0
@@ -616,17 +647,20 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
 
     private let loadDelay: Duration
     private let failingItemIDs: Set<FeedItemID>
+    private let failsPreparation: Bool
     private var continuations: [UUID: AsyncStream<PlayerState>.Continuation] = [:]
 
     init(
         configuration: ProxyPlayerConfiguration,
         loadDelay: Duration,
         failingItemIDs: Set<FeedItemID>,
+        failsPreparation: Bool,
         platformPlayer: AVPlayer?
     ) {
         self.configuration = configuration
         self.loadDelay = loadDelay
         self.failingItemIDs = failingItemIDs
+        self.failsPreparation = failsPreparation
         self.feedPlatformPlayer = platformPlayer
     }
 
@@ -672,7 +706,15 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
         isStopped = false
     }
 
-    func play() { playCount += 1 }
+    func prepareForImmediatePlayback() async -> Bool {
+        preparationCount += 1
+        return !failsPreparation
+    }
+
+    func play() {
+        playCount += 1
+        if preparationCount == 0 { playBeforePreparationCount += 1 }
+    }
     func pause() { pauseCount += 1 }
     func setPlaybackRate(_ rate: Float) {}
     func jumpToLive() async throws {}

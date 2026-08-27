@@ -218,10 +218,14 @@ Every stress runner must persist or attach
 JSON snapshot includes the exact storage bound and dropped/rejected consumer
 counts as well as distributions, counters, and resource high-water marks.
 
-The readiness timestamp is deliberately measured at the engine ownership
-boundary: the existing ready player item becomes focused and `play()` is
-issued. A UI may layer pixel-present timing on top of the typed event stream,
-but renderer scheduling is not mislabeled as proxy or player preparation.
+The first-frame timestamp is deliberately measured from accepted focus to the
+engine-owned AVPlayer entering its `.playing` time-control state. A predicted
+lease is not declared warm immediately after proxy readiness: the engine first
+waits for AVPlayer/AVPlayerItem readiness and completes cancellable async
+preroll. This moves media-pipeline loading and decode into the predictive
+preparation window while keeping renderer/player startup inside the measured
+handoff. A UI may layer pixel-present timing on top of the typed event stream,
+but proxy readiness alone is never mislabeled as completed playback.
 
 ## Delivery graph and gates
 

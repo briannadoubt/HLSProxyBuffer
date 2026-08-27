@@ -143,6 +143,9 @@ private final class InsecureFeedPlayerSession: HLSFeedPlayerSession {
     }
 
     func load(clips: [ProxyPlaybackClip]) async throws { try await player.load(clips: clips) }
+    func prepareForImmediatePlayback() async -> Bool {
+        await player.prepareForImmediatePlayback()
+    }
     func play() { player.play() }
     func pause() { player.pause() }
     func setPlaybackRate(_ rate: Float) { player.setPlaybackRate(rate) }
