@@ -41,7 +41,6 @@ final class PlaylistStoreTests: XCTestCase {
         let waiter = Task {
             await store.snapshot(waitingForMediaSequence: 20, part: nil, timeout: 0.08)
         }
-        try await Task.sleep(nanoseconds: 20_000_000)
         await store.update(playlist(sequence: 11))
 
         let result = await waiter.value
