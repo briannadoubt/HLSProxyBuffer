@@ -11,7 +11,25 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
-      - name: SwiftPM tests
-        run: swift test
+      - name: Release build with warnings as errors
+        run: swift build -c release -Xswiftc -warnings-as-errors
+      - name: Thread Sanitizer
+        run: |
+          mkdir -p ci-artifacts
+          # XCTest's performance-measurement harness crashes when its own
+          # Objective-C internals are instrumented by TSan on Xcode 26.6.
+          # The unsanitized suite below still runs every performance test;
+          # this gate sanitizes the complete correctness/concurrency suite.
+          swift test --sanitize=thread --skip '.*PerformanceTests' 2>&1 \
+            | tee ci-artifacts/thread-sanitizer.log
       - name: Run CI script
+        env:
+          HLS_CI_ARTIFACT_DIR: ${{ github.workspace }}/ci-artifacts
         run: bash Scripts/run-ci.sh
+      - name: Upload feed qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hls-feed-qualification-${{ github.run_id }}
+          path: ci-artifacts
+          if-no-files-found: error

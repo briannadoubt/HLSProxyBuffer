@@ -235,7 +235,7 @@ but renderer scheduling is not mislabeled as proxy or player preparation.
 - HLS-17: pooled resources, seamless handoff, and the simple public API
   (implemented).
 - HLS-18: feed-quality and resource instrumentation (implemented).
-- HLS-19: SwiftUI demo proving every policy and source class.
+- HLS-19: SwiftUI demo proving every policy and source class (implemented).
 - HLS-20: release qualification: 500 core transitions, 100 rapid UI
   navigations, p95 readiness/first-frame gates, at least 90% revisit cache hits,
   at least 99% ready handoff success, bounded resource occupancy, and sanitizer,

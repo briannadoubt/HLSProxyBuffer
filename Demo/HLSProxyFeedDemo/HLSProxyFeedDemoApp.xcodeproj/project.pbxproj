@@ -1,0 +1,496 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		04CCF75EB57068B2F1ED14A6 /* Fixtures in Resources */ = {isa = PBXBuildFile; fileRef = 1BC85C15EC5A307F9C358B7F /* Fixtures */; };
+		1DE9B45D7666EA9D0151D625 /* HLSProxyBuffer in Frameworks */ = {isa = PBXBuildFile; productRef = 5DEE21009CCC529C00077F4C /* HLSProxyBuffer */; };
+		24BBF26D7CA029F2478C676A /* FeedDemoSignalBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D8961D850963CA1AE629A41 /* FeedDemoSignalBuilder.swift */; };
+		3A4B88F3FB1D4088B8CF5424 /* FeedDemoQualification.swift in Sources */ = {isa = PBXBuildFile; fileRef = 303559D318E4BC284CE77C39 /* FeedDemoQualification.swift */; };
+		4CA4A9D9BAFEA3E2282CB320 /* HLSProxyFeedDemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B42E870069D71B1C9759E707 /* HLSProxyFeedDemoApp.swift */; };
+		69978CF3DA6A9351B357D379 /* FeedDemoFixtureOrigin.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBCFA5A19660D90ED78B1C54 /* FeedDemoFixtureOrigin.swift */; };
+		91A0D8AF5CB8CDAA46FFEAA7 /* HLSCore in Frameworks */ = {isa = PBXBuildFile; productRef = 80502095A6E48AA5E6AE3429 /* HLSCore */; };
+		9F7946F13905F8B630B68254 /* FeedDemoModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED56CD1BFEBDA23EED9467CF /* FeedDemoModel.swift */; };
+		EA6EB894E413243AB17B28AF /* LocalProxy in Frameworks */ = {isa = PBXBuildFile; productRef = D67AEB06DC86836A2F399214 /* LocalProxy */; };
+		EC1762B793C852234D09D4D0 /* HLSProxyFeedDemoAppUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A01534D45F570E145A974181 /* HLSProxyFeedDemoAppUITests.swift */; };
+		EE9E3F813235363BC13FFEC2 /* FeedDemoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5995C9797B54E0268FDBAE8C /* FeedDemoView.swift */; };
+		F6A8E81993610BE2C1C0077B /* FeedDemoCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF676DC7A09A1B5C505C422B /* FeedDemoCatalog.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		C506307CF043CBB616484888 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A12038A570941F4B34D03BB3 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0981B31CC1756508636FD459;
+			remoteInfo = HLSProxyFeedDemoApp;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		15A87D0CFA813634B16458E0 /* HLSProxyFeedDemoApp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = HLSProxyFeedDemoApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		1BC85C15EC5A307F9C358B7F /* Fixtures */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fixtures; sourceTree = SOURCE_ROOT; };
+		303559D318E4BC284CE77C39 /* FeedDemoQualification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoQualification.swift; sourceTree = "<group>"; };
+		5995C9797B54E0268FDBAE8C /* FeedDemoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoView.swift; sourceTree = "<group>"; };
+		5D8961D850963CA1AE629A41 /* FeedDemoSignalBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoSignalBuilder.swift; sourceTree = "<group>"; };
+		A01534D45F570E145A974181 /* HLSProxyFeedDemoAppUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HLSProxyFeedDemoAppUITests.swift; sourceTree = "<group>"; };
+		A6BF346592392AD7E75AB3D4 /* HLSProxyBuffer */ = {isa = PBXFileReference; lastKnownFileType = folder; name = HLSProxyBuffer; path = ../..; sourceTree = SOURCE_ROOT; };
+		B42E870069D71B1C9759E707 /* HLSProxyFeedDemoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HLSProxyFeedDemoApp.swift; sourceTree = "<group>"; };
+		C282D7878B2FFDF7BD31492B /* HLSProxyFeedDemoAppUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = HLSProxyFeedDemoAppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		CF676DC7A09A1B5C505C422B /* FeedDemoCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoCatalog.swift; sourceTree = "<group>"; };
+		EBCFA5A19660D90ED78B1C54 /* FeedDemoFixtureOrigin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoFixtureOrigin.swift; sourceTree = "<group>"; };
+		ED56CD1BFEBDA23EED9467CF /* FeedDemoModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoModel.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		73165842CBC213E01ACFBF67 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1DE9B45D7666EA9D0151D625 /* HLSProxyBuffer in Frameworks */,
+				91A0D8AF5CB8CDAA46FFEAA7 /* HLSCore in Frameworks */,
+				EA6EB894E413243AB17B28AF /* LocalProxy in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		265030D67E02C503504E5617 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				A6BF346592392AD7E75AB3D4 /* HLSProxyBuffer */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+		96E72947A3126168B3D119E4 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				15A87D0CFA813634B16458E0 /* HLSProxyFeedDemoApp.app */,
+				C282D7878B2FFDF7BD31492B /* HLSProxyFeedDemoAppUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		9EDE455FC587DA1F84874591 = {
+			isa = PBXGroup;
+			children = (
+				1BC85C15EC5A307F9C358B7F /* Fixtures */,
+				265030D67E02C503504E5617 /* Packages */,
+				D3630F783D034FB15F20BAAE /* Sources */,
+				E86E5D1FE6C7DBF7D2E68F31 /* UITests */,
+				96E72947A3126168B3D119E4 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		D3630F783D034FB15F20BAAE /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				CF676DC7A09A1B5C505C422B /* FeedDemoCatalog.swift */,
+				EBCFA5A19660D90ED78B1C54 /* FeedDemoFixtureOrigin.swift */,
+				ED56CD1BFEBDA23EED9467CF /* FeedDemoModel.swift */,
+				303559D318E4BC284CE77C39 /* FeedDemoQualification.swift */,
+				5D8961D850963CA1AE629A41 /* FeedDemoSignalBuilder.swift */,
+				5995C9797B54E0268FDBAE8C /* FeedDemoView.swift */,
+				B42E870069D71B1C9759E707 /* HLSProxyFeedDemoApp.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		E86E5D1FE6C7DBF7D2E68F31 /* UITests */ = {
+			isa = PBXGroup;
+			children = (
+				A01534D45F570E145A974181 /* HLSProxyFeedDemoAppUITests.swift */,
+			);
+			path = UITests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		0981B31CC1756508636FD459 /* HLSProxyFeedDemoApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 024D6C40129B1797F4DEA9EF /* Build configuration list for PBXNativeTarget "HLSProxyFeedDemoApp" */;
+			buildPhases = (
+				0BE795E35254ED715D7F89C7 /* Sources */,
+				C4F2EB9A172CDF9DB4AA0AE9 /* Resources */,
+				73165842CBC213E01ACFBF67 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = HLSProxyFeedDemoApp;
+			packageProductDependencies = (
+				5DEE21009CCC529C00077F4C /* HLSProxyBuffer */,
+				80502095A6E48AA5E6AE3429 /* HLSCore */,
+				D67AEB06DC86836A2F399214 /* LocalProxy */,
+			);
+			productName = HLSProxyFeedDemoApp;
+			productReference = 15A87D0CFA813634B16458E0 /* HLSProxyFeedDemoApp.app */;
+			productType = "com.apple.product-type.application";
+		};
+		B250B759D61143797FCA924D /* HLSProxyFeedDemoAppUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E6582B3C241D41D430B681A8 /* Build configuration list for PBXNativeTarget "HLSProxyFeedDemoAppUITests" */;
+			buildPhases = (
+				A2B2DC5DFAAF321A6725DD86 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5CCFAA8F7AAB6C55EFA31145 /* PBXTargetDependency */,
+			);
+			name = HLSProxyFeedDemoAppUITests;
+			packageProductDependencies = (
+			);
+			productName = HLSProxyFeedDemoAppUITests;
+			productReference = C282D7878B2FFDF7BD31492B /* HLSProxyFeedDemoAppUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A12038A570941F4B34D03BB3 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					0981B31CC1756508636FD459 = {
+						ProvisioningStyle = Automatic;
+					};
+					B250B759D61143797FCA924D = {
+						ProvisioningStyle = Automatic;
+						TestTargetID = 0981B31CC1756508636FD459;
+					};
+				};
+			};
+			buildConfigurationList = 6E8DE86C71587CEECF485D44 /* Build configuration list for PBXProject "HLSProxyFeedDemoApp" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 9EDE455FC587DA1F84874591;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				95881043783D718D612D11C8 /* XCLocalSwiftPackageReference "../.." */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 96E72947A3126168B3D119E4 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				0981B31CC1756508636FD459 /* HLSProxyFeedDemoApp */,
+				B250B759D61143797FCA924D /* HLSProxyFeedDemoAppUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		C4F2EB9A172CDF9DB4AA0AE9 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				04CCF75EB57068B2F1ED14A6 /* Fixtures in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		0BE795E35254ED715D7F89C7 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F6A8E81993610BE2C1C0077B /* FeedDemoCatalog.swift in Sources */,
+				69978CF3DA6A9351B357D379 /* FeedDemoFixtureOrigin.swift in Sources */,
+				9F7946F13905F8B630B68254 /* FeedDemoModel.swift in Sources */,
+				3A4B88F3FB1D4088B8CF5424 /* FeedDemoQualification.swift in Sources */,
+				24BBF26D7CA029F2478C676A /* FeedDemoSignalBuilder.swift in Sources */,
+				EE9E3F813235363BC13FFEC2 /* FeedDemoView.swift in Sources */,
+				4CA4A9D9BAFEA3E2282CB320 /* HLSProxyFeedDemoApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A2B2DC5DFAAF321A6725DD86 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EC1762B793C852234D09D4D0 /* HLSProxyFeedDemoAppUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		5CCFAA8F7AAB6C55EFA31145 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0981B31CC1756508636FD459 /* HLSProxyFeedDemoApp */;
+			targetProxy = C506307CF043CBB616484888 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		227C32C66B463189E6C5BEED /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		392D20B654ABBAF579F2F0BD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		3A4E36CE46E500338A803A19 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "HLS Feed Demo";
+				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.hlsproxybuffer.feed-demo";
+				PRODUCT_NAME = "HLS Proxy Feed Demo";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		47FC239DF5CD45136CD245AC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.hlsproxybuffer.feed-demo-ui-tests";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = HLSProxyFeedDemoApp;
+			};
+			name = Release;
+		};
+		AEED7A1551FAF6C7E368034B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.hlsproxybuffer.feed-demo-ui-tests";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = HLSProxyFeedDemoApp;
+			};
+			name = Debug;
+		};
+		FF389742048ECC159A2B9C9B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "HLS Feed Demo";
+				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.hlsproxybuffer.feed-demo";
+				PRODUCT_NAME = "HLS Proxy Feed Demo";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		024D6C40129B1797F4DEA9EF /* Build configuration list for PBXNativeTarget "HLSProxyFeedDemoApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3A4E36CE46E500338A803A19 /* Debug */,
+				FF389742048ECC159A2B9C9B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		6E8DE86C71587CEECF485D44 /* Build configuration list for PBXProject "HLSProxyFeedDemoApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				227C32C66B463189E6C5BEED /* Debug */,
+				392D20B654ABBAF579F2F0BD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E6582B3C241D41D430B681A8 /* Build configuration list for PBXNativeTarget "HLSProxyFeedDemoAppUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AEED7A1551FAF6C7E368034B /* Debug */,
+				47FC239DF5CD45136CD245AC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		95881043783D718D612D11C8 /* XCLocalSwiftPackageReference "../.." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../..;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		5DEE21009CCC529C00077F4C /* HLSProxyBuffer */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = HLSProxyBuffer;
+		};
+		80502095A6E48AA5E6AE3429 /* HLSCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = HLSCore;
+		};
+		D67AEB06DC86836A2F399214 /* LocalProxy */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LocalProxy;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = A12038A570941F4B34D03BB3 /* Project object */;
+}

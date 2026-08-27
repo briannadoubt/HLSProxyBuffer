@@ -8,7 +8,7 @@ Run it on macOS from the package root:
 swift run HLSProxyFeedDemo
 ```
 
-Opening `Package.swift` in Xcode also exposes the `HLSProxyFeedDemo` scheme for Apple-platform builds. The repository CI script compiles that scheme for an available iOS simulator.
+Opening `Package.swift` in Xcode also exposes the `HLSProxyFeedDemo` scheme for Apple-platform builds. The checked-in `Demo/HLSProxyFeedDemo/HLSProxyFeedDemoApp.xcodeproj` adds a real iOS application and UI-test host. `project.yml` is its XcodeGen source of truth.
 
 ## What the demo proves
 
@@ -45,6 +45,10 @@ Focus is deterministic: the highest visible fraction wins, then distance from vi
 - `feed-metrics-overlay`
 - `live-seek-behind` and `live-jump-to-edge`
 - `low-power-toggle`
+- `qualification-ready`, `qualification-next`, and `qualification-finish`
+- `qualification-focus`, `qualification-navigation-count`, and
+  `qualification-playback-state`
+- `qualification-result` and `qualification-report`
 
 These identifiers are the contract used by the rapid-navigation UI qualification ticket.
 
@@ -64,4 +68,26 @@ Disk residency remains available in the model and telemetry snapshot for detaile
 
 ## Verification
 
-`HLSProxyFeedDemoTests` validates that every mode produces a nonempty, uniquely identified local catalog and a valid policy; that each can enter the public engine path; that geometry produces stable focus, velocity, and prediction signals; and that the fixture origin honors byte ranges and validators. Full AVPlayer timing, 100 rapid UI navigations, and sustained resource qualification are intentionally enforced by the subsequent endurance gate rather than hidden inside an unbounded unit test.
+`HLSProxyFeedDemoTests` validates that every mode produces a nonempty, uniquely identified local catalog and a valid policy; that each can enter the public engine path; that geometry produces stable focus, velocity, and prediction signals; and that the fixture origin honors byte ranges and validators.
+
+The `HLSProxyFeedQualification` scheme launches the app with
+`--qualification-mode`, warms every short-form item, then drives 100 rapid
+accessibility-owned focus changes. It requires the requested and active item to
+match, the final platform player to be playing, predicted-warm first-frame p95
+to remain at or below 500 ms, obsolete work to drain inside 250 ms, configured
+memory/disk/player bounds to hold, and managed post-warmup memory growth to stay
+within 1 MiB. The JSON report is attached to the `.xcresult` bundle.
+
+The host qualification complements that UI run with 532 standard trace
+observations, a separate 500-transition engine ownership/teardown test,
+production-backend readiness and cache-reuse timing, and explicit VOD, live,
+and stitched source coverage. Run the complete local gate with:
+
+```sh
+make ci
+```
+
+Set `HLS_CI_ARTIFACT_DIR` to select the output directory. Otherwise the script
+writes JSON reports and the UI result bundle under `ci-artifacts/`. Hosted CI
+also runs Thread Sanitizer and a Release warnings-as-errors build, then uploads
+the evidence even when a qualification fails.

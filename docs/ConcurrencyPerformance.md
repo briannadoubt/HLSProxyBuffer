@@ -24,8 +24,12 @@ It reports operations per second for memory-cache hits, concurrent memory-cache 
 Performance-sensitive changes should also pass:
 
 ```sh
-swift test --sanitize=thread
+swift test --sanitize=thread --skip '.*PerformanceTests'
 swift build -c release -Xswiftc -warnings-as-errors
 ```
 
 Thread Sanitizer verifies the lock-backed request coordination, while the release build catches concurrency and availability warnings under the package's supported platform declarations.
+The ordinary `swift test` gate runs the performance cases. They are excluded only
+from the sanitizer process because XCTest's `measure` machinery crashes inside
+XCTestCore when instrumented by Thread Sanitizer on Xcode 26.6; timing assertions
+would not be meaningful under sanitizer instrumentation in any case.

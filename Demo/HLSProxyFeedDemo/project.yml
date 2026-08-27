@@ -1,0 +1,68 @@
+name: HLSProxyFeedDemoApp
+
+options:
+  bundleIdPrefix: com.hlsproxybuffer
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "26.0"
+
+packages:
+  HLSProxyBuffer:
+    path: ../..
+
+settings:
+  base:
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+
+targets:
+  HLSProxyFeedDemoApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Fixtures
+        buildPhase: resources
+        type: folder
+    dependencies:
+      - package: HLSProxyBuffer
+        product: HLSProxyBuffer
+      - package: HLSProxyBuffer
+        product: HLSCore
+      - package: HLSProxyBuffer
+        product: LocalProxy
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hlsproxybuffer.feed-demo
+        PRODUCT_NAME: HLS Proxy Feed Demo
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: HLS Feed Demo
+        INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+  HLSProxyFeedDemoAppUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: HLSProxyFeedDemoApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hlsproxybuffer.feed-demo-ui-tests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  HLSProxyFeedQualification:
+    build:
+      targets:
+        HLSProxyFeedDemoApp: all
+        HLSProxyFeedDemoAppUITests: [test]
+    test:
+      config: Release
+      gatherCoverageData: false
+      targets:
+        - HLSProxyFeedDemoAppUITests

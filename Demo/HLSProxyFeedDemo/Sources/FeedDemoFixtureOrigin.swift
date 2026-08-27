@@ -93,7 +93,7 @@ final class FeedDemoFixtureOrigin: Sendable {
     }
 
     private static func loadResources() throws -> [String: Resource] {
-        guard let resourceRoot = Bundle.module.resourceURL?.appendingPathComponent(
+        guard let resourceRoot = resourceBundle.resourceURL?.appendingPathComponent(
             "Fixtures",
             isDirectory: true
         ) else {
@@ -128,6 +128,14 @@ final class FeedDemoFixtureOrigin: Sendable {
             )
         }
         return result
+    }
+
+    private static var resourceBundle: Bundle {
+#if SWIFT_PACKAGE
+        .module
+#else
+        .main
+#endif
     }
 
     private static func contentType(for pathExtension: String) -> String {
