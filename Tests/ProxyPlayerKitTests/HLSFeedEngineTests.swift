@@ -437,6 +437,9 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
         stopCount += 1
         isStopped = true
         transition(to: PlayerState())
+        for continuation in continuations.values { continuation.finish() }
+        continuations.removeAll()
+        activeStateObserverCount = 0
     }
 
     func restartPlayback() async {

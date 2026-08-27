@@ -143,18 +143,22 @@ public final class HLSFeedEngine {
         var observationTask: Task<Void, Never>?
         var releaseTask: Task<Void, Never>?
         var playbackEndObserver: NSObjectProtocol?
+        var isReleasing = false
 
         init(session: any HLSFeedPlayerSession) {
             self.session = session
         }
 
-        func cancelLeaseObservers() {
-            observationTask?.cancel()
+        @discardableResult
+        func cancelLeaseObservers() -> Task<Void, Never>? {
+            let task = observationTask
+            task?.cancel()
             observationTask = nil
             if let playbackEndObserver {
                 NotificationCenter.default.removeObserver(playbackEndObserver)
                 self.playbackEndObserver = nil
             }
+            return task
         }
     }
 
@@ -478,7 +482,7 @@ public final class HLSFeedEngine {
     }
 
     private func availableSlot(for role: FeedPlan.Role) -> Slot? {
-        if let idle = slots.first(where: { $0.lease == nil }) { return idle }
+        if let idle = slots.first(where: { $0.lease == nil && !$0.isReleasing }) { return idle }
         if slots.count < effectivePolicy.concurrency.maximumPlayerCount {
             let slot = Slot(session: sessionFactory(playerConfiguration))
             slots.append(slot)
@@ -486,6 +490,7 @@ public final class HLSFeedEngine {
         }
 
         let reclaimable = slots.reversed().first { slot in
+            guard !slot.isReleasing else { return false }
             guard let lease = slot.lease else { return true }
             return lease.itemID != activeItemID
                 && (!desiredItemIDs.contains(lease.itemID) || lease.role.rawValue > role.rawValue)
@@ -711,18 +716,24 @@ public final class HLSFeedEngine {
     }
 
     private func release(_ slot: Slot, token: UUID) async {
-        guard owns(slot, token: token), let itemID = slot.lease?.itemID else { return }
+        guard !slot.isReleasing,
+              owns(slot, token: token),
+              let itemID = slot.lease?.itemID
+        else { return }
+        slot.isReleasing = true
         slot.loadTask?.cancel()
         let loadTask = slot.loadTask
         slot.loadTask = nil
-        slot.releaseTask = nil
-        slot.cancelLeaseObservers()
+        let observationTask = slot.cancelLeaseObservers()
         slot.session.pause()
         slotIDByItemID.removeValue(forKey: itemID)
         slot.lease = nil
         if activeItemID == itemID { activeItemID = nil }
         if let loadTask { await loadTask.value }
+        await observationTask?.value
         await slot.session.stopAndWait()
+        slot.releaseTask = nil
+        slot.isReleasing = false
         rebuildSnapshot()
     }
 
@@ -731,23 +742,29 @@ public final class HLSFeedEngine {
         token: UUID,
         message: String
     ) async {
-        guard owns(slot, token: token), var lease = slot.lease else { return }
+        guard !slot.isReleasing,
+              owns(slot, token: token),
+              var lease = slot.lease
+        else { return }
+        slot.isReleasing = true
         lease.phase = .failed(message)
         lease.state = PlayerState(status: .failed(message))
         slot.lease = lease
-        slot.loadTask = nil
         failuresByItemID[lease.itemID] = .init(
             itemID: lease.itemID,
             generation: lease.generation,
             message: message
         )
         rebuildSnapshot()
-        slot.cancelLeaseObservers()
+        let observationTask = slot.cancelLeaseObservers()
         slot.session.pause()
         slotIDByItemID.removeValue(forKey: lease.itemID)
         slot.lease = nil
         if activeItemID == lease.itemID { activeItemID = nil }
+        await observationTask?.value
         await slot.session.stopAndWait()
+        slot.loadTask = nil
+        slot.isReleasing = false
         rebuildSnapshot()
     }
 
@@ -758,9 +775,11 @@ public final class HLSFeedEngine {
             .filter { $0.lease?.itemID != activeItemID }
             .prefix(slots.count - limit)
         for slot in victims {
+            while slot.isReleasing { await Task.yield() }
             if let token = slot.lease?.token {
                 await release(slot, token: token)
             }
+            while slot.isReleasing { await Task.yield() }
             slots.removeAll { $0.id == slot.id }
         }
         rebuildSnapshot()
