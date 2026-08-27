@@ -10,13 +10,16 @@ import HLSCore
 public final class PlaybackAnalyticsTimeline {
     public struct Configuration: Equatable, Sendable {
         public let eventBufferCapacity: Int
+        public let summaryBufferCapacity: Int
         public let maximumActiveAttemptCount: Int
 
         public init(
             eventBufferCapacity: Int = 128,
+            summaryBufferCapacity: Int = 64,
             maximumActiveAttemptCount: Int = 16
         ) {
             self.eventBufferCapacity = min(max(1, eventBufferCapacity), 512)
+            self.summaryBufferCapacity = min(max(1, summaryBufferCapacity), 256)
             self.maximumActiveAttemptCount = min(max(1, maximumActiveAttemptCount), 64)
         }
     }
@@ -90,6 +93,8 @@ public final class PlaybackAnalyticsTimeline {
         public let maximumActiveAttemptCount: Int
         public let emittedEventCount: UInt64
         public let droppedEventCount: UInt64
+        public let emittedSummaryCount: UInt64
+        public let droppedSummaryCount: UInt64
         public let staleEventCount: UInt64
         public let evictedAttemptCount: UInt64
         public let lastSequence: UInt64
@@ -99,6 +104,8 @@ public final class PlaybackAnalyticsTimeline {
             maximumActiveAttemptCount: 0,
             emittedEventCount: 0,
             droppedEventCount: 0,
+            emittedSummaryCount: 0,
+            droppedSummaryCount: 0,
             staleEventCount: 0,
             evictedAttemptCount: 0,
             lastSequence: 0
@@ -106,12 +113,16 @@ public final class PlaybackAnalyticsTimeline {
     }
 
     public let events: AsyncStream<PlaybackAnalytics.Event>
+    /// One terminal summary for every attempt, including evicted and unfinished attempts.
+    public let summaries: AsyncStream<PlaybackAnalytics.Summary>
     public var snapshot: Snapshot {
         Snapshot(
             activeAttemptCount: states.count,
             maximumActiveAttemptCount: configuration.maximumActiveAttemptCount,
             emittedEventCount: emittedEventCount,
             droppedEventCount: droppedEventCount,
+            emittedSummaryCount: emittedSummaryCount,
+            droppedSummaryCount: droppedSummaryCount,
             staleEventCount: staleEventCount,
             evictedAttemptCount: evictedAttemptCount,
             lastSequence: sequence
@@ -124,17 +135,21 @@ public final class PlaybackAnalyticsTimeline {
         let attempt: Attempt
         var attribution: Attribution
         var streaming = HLSStreamingTelemetry.Snapshot.empty
+        var summarizer: PlaybackSessionSummarizer
         let ordinal: UInt64
     }
 
     private let configuration: Configuration
     private let sessionID: PlaybackAnalytics.SessionID
     private let continuation: AsyncStream<PlaybackAnalytics.Event>.Continuation
+    private let summaryContinuation: AsyncStream<PlaybackAnalytics.Summary>.Continuation
     private var states: [UUID: State] = [:]
     private var sequence: UInt64 = 0
     private var nextAttemptOrdinal: UInt64 = 0
     private var emittedEventCount: UInt64 = 0
     private var droppedEventCount: UInt64 = 0
+    private var emittedSummaryCount: UInt64 = 0
+    private var droppedSummaryCount: UInt64 = 0
     private var staleEventCount: UInt64 = 0
     private var evictedAttemptCount: UInt64 = 0
     private var isFinished = false
@@ -152,6 +167,12 @@ public final class PlaybackAnalyticsTimeline {
         )
         events = pair.stream
         continuation = pair.continuation
+        let summaryPair = AsyncStream.makeStream(
+            of: PlaybackAnalytics.Summary.self,
+            bufferingPolicy: .bufferingNewest(configuration.summaryBufferCapacity)
+        )
+        summaries = summaryPair.stream
+        summaryContinuation = summaryPair.continuation
     }
 
     init(
@@ -168,6 +189,12 @@ public final class PlaybackAnalyticsTimeline {
         )
         events = pair.stream
         continuation = pair.continuation
+        let summaryPair = AsyncStream.makeStream(
+            of: PlaybackAnalytics.Summary.self,
+            bufferingPolicy: .bufferingNewest(configuration.summaryBufferCapacity)
+        )
+        summaries = summaryPair.stream
+        summaryContinuation = summaryPair.continuation
     }
 
     /// Starts one opaque attempt and emits its first ordered lifecycle event.
@@ -186,11 +213,16 @@ public final class PlaybackAnalyticsTimeline {
         }
         if states.count >= configuration.maximumActiveAttemptCount,
            let oldest = states.values.min(by: { $0.ordinal < $1.ordinal }) {
-            states.removeValue(forKey: oldest.attempt.token)
+            finalize(
+                oldest.attempt,
+                reason: .incomplete,
+                endedAt: clock.timestamp()
+            )
             evictedAttemptCount = Self.saturatingAdd(evictedAttemptCount, 1)
         }
 
         nextAttemptOrdinal = Self.saturatingAdd(nextAttemptOrdinal, 1)
+        let startedAt = clock.timestamp()
         let attempt = Attempt(
             correlation: .init(
                 sessionID: sessionID,
@@ -202,6 +234,10 @@ public final class PlaybackAnalyticsTimeline {
         states[attempt.token] = State(
             attempt: attempt,
             attribution: attribution,
+            summarizer: PlaybackSessionSummarizer(
+                correlation: attempt.correlation,
+                startedAt: startedAt
+            ),
             ordinal: nextAttemptOrdinal
         )
         emit(
@@ -558,14 +594,45 @@ public final class PlaybackAnalyticsTimeline {
             measurements: [],
             attempt: attempt
         )
-        states.removeValue(forKey: attempt.token)
+        finalize(
+            attempt,
+            reason: Self.terminalReason(for: lifecycle),
+            endedAt: clock.timestamp()
+        )
+    }
+
+    /// Emits the matching terminal lifecycle and a single typed summary.
+    public func end(
+        _ attempt: Attempt,
+        reason: PlaybackAnalytics.TerminalReason,
+        priority: PlaybackAnalytics.Priority = .critical
+    ) {
+        guard states[attempt.token]?.attempt == attempt else {
+            staleEventCount = Self.saturatingAdd(staleEventCount, 1)
+            return
+        }
+        emit(
+            source: .feedEngine,
+            lifecycle: Self.lifecycle(for: reason),
+            priority: priority,
+            measurements: [],
+            attempt: attempt
+        )
+        finalize(attempt, reason: reason, endedAt: clock.timestamp())
     }
 
     public func finish() {
         guard !isFinished else { return }
+        for state in states.values.sorted(by: { $0.ordinal < $1.ordinal }) {
+            finalize(
+                state.attempt,
+                reason: .incomplete,
+                endedAt: clock.timestamp()
+            )
+        }
         isFinished = true
-        states.removeAll(keepingCapacity: false)
         continuation.finish()
+        summaryContinuation.finish()
     }
 
     func dimensions(
@@ -642,6 +709,10 @@ public final class PlaybackAnalyticsTimeline {
         ) else {
             return
         }
+        if var state = states[attempt.token] {
+            try? state.summarizer.record(event)
+            states[attempt.token] = state
+        }
         switch continuation.yield(event) {
         case .enqueued:
             emittedEventCount = Self.saturatingAdd(emittedEventCount, 1)
@@ -652,6 +723,65 @@ public final class PlaybackAnalyticsTimeline {
             break
         @unknown default:
             break
+        }
+    }
+
+    private func finalize(
+        _ attempt: Attempt,
+        reason: PlaybackAnalytics.TerminalReason,
+        endedAt: PlaybackAnalytics.Timestamp
+    ) {
+        guard var state = states[attempt.token], state.attempt == attempt else { return }
+        let summary = try? state.summarizer.finish(
+            reason: reason,
+            endedAt: endedAt,
+            dimensions: Self.dimensions(from: state.attribution)
+        )
+        states.removeValue(forKey: attempt.token)
+        guard let summary else { return }
+
+        switch summaryContinuation.yield(summary) {
+        case .enqueued:
+            emittedSummaryCount = Self.saturatingAdd(emittedSummaryCount, 1)
+        case .dropped:
+            emittedSummaryCount = Self.saturatingAdd(emittedSummaryCount, 1)
+            droppedSummaryCount = Self.saturatingAdd(droppedSummaryCount, 1)
+        case .terminated:
+            break
+        @unknown default:
+            break
+        }
+    }
+
+    private static func terminalReason(
+        for lifecycle: PlaybackAnalytics.Lifecycle
+    ) -> PlaybackAnalytics.TerminalReason {
+        switch lifecycle {
+        case .completed:
+            .completed
+        case .cancelled:
+            .cancelled
+        case .backgrounded:
+            .backgrounded
+        case .failed:
+            .failed
+        default:
+            .incomplete
+        }
+    }
+
+    private static func lifecycle(
+        for reason: PlaybackAnalytics.TerminalReason
+    ) -> PlaybackAnalytics.Lifecycle {
+        switch reason {
+        case .completed:
+            .completed
+        case .backgrounded:
+            .backgrounded
+        case .failed, .crashed:
+            .failed
+        case .abandonedBeforeStart, .cancelled, .incomplete, .interrupted, .unknown:
+            .cancelled
         }
     }
 

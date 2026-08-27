@@ -294,7 +294,9 @@ public enum PlaybackAnalytics {
         case abandonedBeforeStart
         case cancelled
         case backgrounded
+        case crashed
         case failed
+        case incomplete
         case interrupted
         case unknown(String)
     }
@@ -816,7 +818,9 @@ extension PlaybackAnalytics.TerminalReason: Codable {
         case "abandoned_before_start": self = .abandonedBeforeStart
         case "cancelled": self = .cancelled
         case "backgrounded": self = .backgrounded
+        case "crashed": self = .crashed
         case "failed": self = .failed
+        case "incomplete": self = .incomplete
         case "interrupted": self = .interrupted
         default: self = .unknown(value)
         }
@@ -829,7 +833,9 @@ extension PlaybackAnalytics.TerminalReason: Codable {
         case .abandonedBeforeStart: "abandoned_before_start"
         case .cancelled: "cancelled"
         case .backgrounded: "backgrounded"
+        case .crashed: "crashed"
         case .failed: "failed"
+        case .incomplete: "incomplete"
         case .interrupted: "interrupted"
         case .unknown(let value): value
         }
