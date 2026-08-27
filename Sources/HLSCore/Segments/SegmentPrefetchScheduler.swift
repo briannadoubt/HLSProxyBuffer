@@ -225,9 +225,13 @@ public actor SegmentPrefetchScheduler {
         schedulePrefetchIfNeeded()
     }
 
-    public func onBufferStateChange(_ handler: (@Sendable (BufferState) async -> Void)?) {
-        callbackTask?.cancel()
+    public func onBufferStateChange(_ handler: (@Sendable (BufferState) async -> Void)?) async {
+        let previousTask = callbackTask
+        previousTask?.cancel()
         callbackTask = nil
+        if let previousTask {
+            await previousTask.value
+        }
         guard let handler else { return }
         let stream = states()
         callbackTask = Task {

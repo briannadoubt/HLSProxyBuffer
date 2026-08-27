@@ -228,6 +228,58 @@ final class SegmentPrefetchSchedulerTests: XCTestCase {
         state = await scheduler.bufferState()
         XCTAssertEqual(state.readyPartCounts[1], 1)
     }
+
+    func testRemovingBufferCallbackWaitsForInFlightDelivery() async throws {
+        let scheduler = SegmentPrefetchScheduler()
+        let gate = SchedulerCallbackGate()
+
+        await scheduler.onBufferStateChange { _ in
+            await gate.wait()
+        }
+
+        for _ in 0..<100 {
+            if await gate.isWaiting { break }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let callbackIsWaiting = await gate.isWaiting
+        XCTAssertTrue(callbackIsWaiting)
+
+        let removal = Task {
+            await scheduler.onBufferStateChange(nil)
+            await gate.markRemovalCompleted()
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let completedBeforeRelease = await gate.removalCompleted
+        XCTAssertFalse(completedBeforeRelease)
+
+        await gate.release()
+        await removal.value
+        let completedAfterRelease = await gate.removalCompleted
+        XCTAssertTrue(completedAfterRelease)
+    }
+}
+
+private actor SchedulerCallbackGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var isWaiting = false
+    private(set) var removalCompleted = false
+
+    func wait() async {
+        isWaiting = true
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+        isWaiting = false
+    }
+
+    func markRemovalCompleted() {
+        removalCompleted = true
+    }
 }
 
 private actor MockSegmentSource: SegmentSource {

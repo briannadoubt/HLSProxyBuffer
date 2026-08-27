@@ -319,6 +319,8 @@ public final class ProxyHLSPlayer {
         activeVariant = nil
         abrSwitchInProgress = false
         latestBufferState = nil
+        currentPlaylist = nil
+        currentRewriteConfiguration = nil
         for task in renditionRefreshTasks.values { task.cancel() }
         renditionRefreshTasks.removeAll()
         let scheduler = scheduler
@@ -442,7 +444,7 @@ public final class ProxyHLSPlayer {
 
         await scheduler.onBufferStateChange { [weak self] bufferState in
             guard let self else { return }
-            await self.handleBufferStateChange(bufferState)
+            await self.handleBufferStateChange(bufferState, generation: generation)
         }
 
         await scheduler.start(playlist: playlist, fetcher: segmentFetcher, cache: cache)
@@ -499,7 +501,7 @@ public final class ProxyHLSPlayer {
         await loadRenditionPlaylists(config: rewriteConfiguration)
         try ensureActiveSession(generation)
         await updateMasterPlaylist()
-        await updatePlaybackState(with: bufferState)
+        await updatePlaybackState(with: bufferState, generation: generation)
         await startPlaylistRefresh(at: playlistResult.url, generation: generation)
         startRenditionRefresh(generation: generation, config: rewriteConfiguration)
     }
@@ -1436,9 +1438,11 @@ public final class ProxyHLSPlayer {
         await playlistStore.update(playlistText, for: PlaylistStore.Identifier.primaryVariant)
     }
 
-    private func handleBufferStateChange(_ bufferState: BufferState) async {
+    private func handleBufferStateChange(_ bufferState: BufferState, generation: UInt64) async {
+        guard generation == sessionGeneration else { return }
         latestBufferState = bufferState
-        await updatePlaybackState(with: bufferState)
+        await updatePlaybackState(with: bufferState, generation: generation)
+        guard generation == sessionGeneration else { return }
         await evaluateABR(bufferState: bufferState)
     }
 
@@ -1474,7 +1478,8 @@ public final class ProxyHLSPlayer {
         await scheduler.updatePlaylist(playlist)
         let bufferState = await scheduler.bufferState()
         latestBufferState = bufferState
-        await updatePlaybackState(with: bufferState)
+        await updatePlaybackState(with: bufferState, generation: generation)
+        guard generation == sessionGeneration else { return }
         await evaluateABR(bufferState: bufferState)
         let metrics = await playlistRefresher.metrics()
         diagnostics.onPlaylistRefreshed?(metrics)
@@ -1746,7 +1751,8 @@ public final class ProxyHLSPlayer {
         configuration.bufferPolicy.hideUntilBuffered && bufferState.prefetchDepthSeconds <= 0
     }
 
-    private func updatePlaybackState(with bufferState: BufferState) async {
+    private func updatePlaybackState(with bufferState: BufferState, generation: UInt64) async {
+        guard generation == sessionGeneration else { return }
         guard let rewriteConfiguration = currentRewriteConfiguration else { return }
 
         if shouldDelayPlayback(for: bufferState) {
@@ -1759,6 +1765,7 @@ public final class ProxyHLSPlayer {
         }
 
         await refreshPlaylist(bufferState: bufferState)
+        guard generation == sessionGeneration else { return }
 
         if !didPreparePlayerForCurrentLoad {
             preparePlayer(with: rewriteConfiguration.playlistURL)
