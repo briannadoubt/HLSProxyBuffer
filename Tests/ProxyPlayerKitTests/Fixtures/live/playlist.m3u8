@@ -1,0 +1,12 @@
+#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:1
+#EXT-X-MEDIA-SEQUENCE:105
+#EXT-X-INDEPENDENT-SEGMENTS
+#EXT-X-MAP:URI="../long-form/init.mp4"
+#EXTINF:1.000000,
+../long-form/segment-005.m4s
+#EXTINF:1.000000,
+../long-form/segment-006.m4s
+#EXTINF:1.000000,
+../long-form/segment-007.m4s
