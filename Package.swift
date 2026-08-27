@@ -47,6 +47,7 @@ let package = Package(
             dependencies: [
                 "HLSCore",
                 "LocalProxy",
+                "ProxyPlayerKit",
             ],
             path: "Benchmarks/HLSProxyBenchmarks"
         ),

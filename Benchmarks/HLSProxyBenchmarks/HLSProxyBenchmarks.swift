@@ -1,6 +1,7 @@
 import Foundation
 import HLSCore
 import LocalProxy
+import ProxyPlayerKit
 
 private struct BenchmarkResult {
     let name: String
@@ -32,6 +33,8 @@ private enum HLSProxyBenchmarks {
     private static let iterations = 1_000_000
 
     static func main() async {
+        runFeedPlannerBenchmark()
+
         let segments = (0..<segmentCount).map { sequence in
             HLSSegment(
                 url: URL(string: "https://benchmark.invalid/\(sequence).m4s")!,
@@ -87,6 +90,67 @@ private enum HLSProxyBenchmarks {
                     + "(\(String(format: "%.2f", milliseconds)) ms, \(result.iterations) operations)"
             )
         }
+    }
+
+    private static func runFeedPlannerBenchmark() {
+        let itemCount = 64
+        let planningIterations = 10_000
+        let items = (0..<itemCount).map { index in
+            FeedPlaybackItem(
+                id: .init(rawValue: "item-\(index)"),
+                source: .stream(
+                    url: URL(string: "https://benchmark.invalid/\(index).m3u8")!,
+                    kind: .videoOnDemand
+                ),
+                estimatedPreparationBytes: 512 * 1_024
+            )
+        }
+        let planner = FeedPlanner(limits: .init(
+            maximumResidentItems: 5,
+            maximumPrefetchItems: 4,
+            maximumConcurrentPreparations: 4,
+            maximumEstimatedPreparationBytes: 8 * 1_024 * 1_024,
+            neighborPredictionHorizon: 4
+        ))
+        var samples: [Duration] = []
+        samples.reserveCapacity(planningIterations)
+        var previousPlan: FeedPlan?
+
+        for iteration in 0..<planningIterations {
+            let focusedIndex = iteration % itemCount
+            let signal = FeedViewportSignal(
+                generation: .init(rawValue: UInt64(iteration)),
+                focusedItemID: items[focusedIndex].id,
+                visibleItems: [
+                    .init(itemID: items[focusedIndex].id, fraction: 1, distanceInViewports: 0)
+                ],
+                velocityInViewportsPerSecond: iteration.isMultiple(of: 2) ? 3 : -3,
+                predictedDestinations: [
+                    .init(itemID: items[(focusedIndex + 1) % itemCount].id, confidence: 0.9)
+                ],
+                observedAt: .milliseconds(iteration)
+            )
+            let start = clock.now
+            do {
+                previousPlan = try planner.makePlan(
+                    items: items,
+                    signal: signal,
+                    previousPlan: previousPlan
+                )
+            } catch {
+                preconditionFailure("Feed planning benchmark input is invalid: \(error)")
+            }
+            samples.append(start.duration(to: clock.now))
+        }
+
+        samples.sort()
+        let p95 = samples[(samples.count * 95) / 100]
+        let p95Milliseconds = p95.seconds * 1_000
+        print(
+            "feed-planning-p95: \(String(format: "%.4f", p95Milliseconds)) ms "
+                + "(\(planningIterations) updates, gate <= 1.0000 ms)"
+        )
+        precondition(p95 <= .milliseconds(1), "Feed planning p95 exceeded the 1 ms release gate")
     }
 
     private static func benchmark(
