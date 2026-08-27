@@ -112,13 +112,31 @@ final class HLSSegmentFetcherTests: XCTestCase {
         XCTAssertEqual(SegmentFetcherURLProtocol.requestCount(), 1)
     }
 
+    func testNetworkPolicySetsRequestTimeoutAndCanBeUpdated() async throws {
+        SegmentFetcherURLProtocol.enqueue(data: Data([0x01]))
+        SegmentFetcherURLProtocol.enqueue(data: Data([0x02]))
+        let fetcher = makeFetcher(networkPolicy: .init(requestTimeout: 3, resourceTimeout: 30))
+
+        _ = try await fetcher.fetchSegment(from: URL(string: "https://cdn.example.com/first.ts")!)
+        XCTAssertEqual(SegmentFetcherURLProtocol.lastRequest()?.timeoutInterval, 3)
+
+        await fetcher.updateNetworkPolicy(.init(requestTimeout: 9, resourceTimeout: 30))
+        _ = try await fetcher.fetchSegment(from: URL(string: "https://cdn.example.com/second.ts")!)
+        XCTAssertEqual(SegmentFetcherURLProtocol.lastRequest()?.timeoutInterval, 9)
+    }
+
     private func makeFetcher(
-        validation: HLSSegmentFetcher.ValidationPolicy = .init()
+        validation: HLSSegmentFetcher.ValidationPolicy = .init(),
+        networkPolicy: HLSOriginNetworkPolicy = .default
     ) -> HLSSegmentFetcher {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [SegmentFetcherURLProtocol.self]
         let session = URLSession(configuration: config)
-        return HLSSegmentFetcher(session: session, validationPolicy: validation)
+        return HLSSegmentFetcher(
+            session: session,
+            validationPolicy: validation,
+            networkPolicy: networkPolicy
+        )
     }
 }
 

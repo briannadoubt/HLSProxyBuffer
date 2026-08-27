@@ -56,7 +56,9 @@ public actor PlaylistRefreshController {
     }
 
     private var configuration: Configuration
-    private let session: URLSession
+    private var session: URLSession
+    private var networkPolicy: HLSOriginNetworkPolicy
+    private let managesSession: Bool
     private let logger: Logger
     private let manifestLoader: ManifestLoader?
 
@@ -83,18 +85,30 @@ public actor PlaylistRefreshController {
 
     public init(
         configuration: Configuration = .init(),
-        session: URLSession = .shared,
+        session: URLSession? = nil,
+        networkPolicy: HLSOriginNetworkPolicy = .default,
         logger: Logger = DefaultLogger(),
         manifestLoader: ManifestLoader? = nil
     ) {
         self.configuration = configuration
-        self.session = session
+        self.session = session ?? networkPolicy.makeURLSession()
+        self.networkPolicy = networkPolicy
+        self.managesSession = session == nil
         self.logger = logger
         self.manifestLoader = manifestLoader
     }
 
     public func updateConfiguration(_ configuration: Configuration) {
         self.configuration = configuration
+    }
+
+    public func updateNetworkPolicy(_ policy: HLSOriginNetworkPolicy) {
+        guard policy != networkPolicy else { return }
+        networkPolicy = policy
+        guard managesSession else { return }
+        let previousSession = session
+        session = policy.makeURLSession()
+        previousSession.finishTasksAndInvalidate()
     }
 
     public func updateLowLatencyConfiguration(_ configuration: LowLatencyConfiguration?) {
@@ -193,6 +207,7 @@ public actor PlaylistRefreshController {
                 url: url,
                 session: session,
                 retryPolicy: retryPolicy,
+                networkPolicy: networkPolicy,
                 logger: logger
             )
             text = try await fetcher.fetchManifest(from: url, allowInsecure: allowInsecure, requestTimeout: requestTimeout)

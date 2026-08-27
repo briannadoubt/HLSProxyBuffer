@@ -58,8 +58,20 @@ final class HLSManifestFetcherTests: XCTestCase {
         XCTAssertEqual(MockURLProtocol.requestCount, 1)
     }
 
+    func testNetworkPolicySetsRequestTimeoutWithInjectedSession() async throws {
+        MockURLProtocol.enqueue(data: "#EXTM3U".data(using: .utf8)!, statusCode: 200)
+        let policy = HLSOriginNetworkPolicy(requestTimeout: 4.5, resourceTimeout: 30)
+        let fetcher = makeFetcher(networkPolicy: policy)
+
+        _ = try await fetcher.fetchManifest()
+
+        XCTAssertEqual(MockURLProtocol.lastRequest?.timeoutInterval, 4.5)
+        XCTAssertEqual(MockURLProtocol.lastRequest?.cachePolicy, .reloadIgnoringLocalCacheData)
+    }
+
     private func makeFetcher(
-        retryPolicy: HLSManifestFetcher.RetryPolicy = .default
+        retryPolicy: HLSManifestFetcher.RetryPolicy = .default,
+        networkPolicy: HLSOriginNetworkPolicy = .default
     ) -> HLSManifestFetcher {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
@@ -67,7 +79,8 @@ final class HLSManifestFetcherTests: XCTestCase {
         return HLSManifestFetcher(
             url: URL(string: "https://example.com/master.m3u8")!,
             session: session,
-            retryPolicy: retryPolicy
+            retryPolicy: retryPolicy,
+            networkPolicy: networkPolicy
         )
     }
 }
@@ -85,6 +98,10 @@ private final class MockURLProtocol: URLProtocol {
         storage.requestCount
     }
 
+    static var lastRequest: URLRequest? {
+        storage.lastRequest
+    }
+
     override class func canInit(with request: URLRequest) -> Bool {
         true
     }
@@ -94,7 +111,7 @@ private final class MockURLProtocol: URLProtocol {
     }
 
     override func startLoading() {
-        Self.storage.incrementRequestCount()
+        Self.storage.record(request)
         guard let stub = Self.storage.nextStub() else {
             client?.urlProtocol(self, didFailWithError: URLError(.unknown))
             return
@@ -128,10 +145,15 @@ private final class MockURLProtocol: URLProtocol {
 private final class Storage: @unchecked Sendable {
         private var stubs: [Stub] = []
         private var internalRequestCount = 0
+        private var internalLastRequest: URLRequest?
         private let lock = NSLock()
 
         var requestCount: Int {
             lock.withLock { internalRequestCount }
+        }
+
+        var lastRequest: URLRequest? {
+            lock.withLock { internalLastRequest }
         }
 
         func enqueue(_ stub: Stub) {
@@ -147,9 +169,10 @@ private final class Storage: @unchecked Sendable {
             }
         }
 
-        func incrementRequestCount() {
+        func record(_ request: URLRequest) {
             lock.withLock {
                 internalRequestCount += 1
+                internalLastRequest = request
             }
         }
 
@@ -157,6 +180,7 @@ private final class Storage: @unchecked Sendable {
             lock.withLock {
                 stubs.removeAll()
                 internalRequestCount = 0
+                internalLastRequest = nil
             }
         }
     }

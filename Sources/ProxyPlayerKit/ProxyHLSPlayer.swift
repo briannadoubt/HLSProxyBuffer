@@ -140,6 +140,8 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private let router = ProxyRouter()
     @ObservationIgnored private let segmentCatalog = SegmentCatalog()
     @ObservationIgnored private let segmentFetcher: HLSSegmentFetcher
+    @ObservationIgnored private var manifestSession: URLSession
+    @ObservationIgnored private var appliedNetworkPolicy: HLSOriginNetworkPolicy
     @ObservationIgnored private var currentPlaylist: MediaPlaylist?
     @ObservationIgnored private var currentRewriteConfiguration: HLSRewriteConfiguration?
     @ObservationIgnored private var didPreparePlayerForCurrentLoad = false
@@ -181,13 +183,18 @@ public final class ProxyHLSPlayer {
         diagnostics: ProxyPlayerDiagnostics = .init()
     ) {
         self.configuration = configuration
+        self.appliedNetworkPolicy = configuration.networkPolicy
+        self.manifestSession = configuration.networkPolicy.makeURLSession()
         let cacheDirectoryIdentifier = UUID().uuidString
         self.cacheDirectoryIdentifier = cacheDirectoryIdentifier
         self.logger = logger
         self.diagnostics = diagnostics
         self.throughputEstimator = ThroughputEstimator(configuration: .init(window: configuration.abrPolicy.estimatorWindow))
         self.adaptiveController = AdaptiveVariantController(policy: Self.abrPolicy(from: configuration), logger: logger)
-        self.segmentFetcher = HLSSegmentFetcher(validationPolicy: configuration.segmentValidation)
+        self.segmentFetcher = HLSSegmentFetcher(
+            validationPolicy: configuration.segmentValidation,
+            networkPolicy: configuration.networkPolicy
+        )
         self.cache = HLSSegmentCache(
             capacityBytes: configuration.cachePolicy.memoryCapacityBytes,
             diskDirectory: ProxyHLSPlayer.diskDirectory(
@@ -206,6 +213,7 @@ public final class ProxyHLSPlayer {
                 refreshInterval: configuration.bufferPolicy.refreshInterval,
                 maxBackoffInterval: configuration.bufferPolicy.maxRefreshBackoff
             ),
+            networkPolicy: configuration.networkPolicy,
             logger: logger
         )
 
@@ -685,7 +693,9 @@ public final class ProxyHLSPlayer {
     private func fetchManifestText(from url: URL) async throws -> String {
         let fetcher = HLSManifestFetcher(
             url: url,
+            session: manifestSession,
             retryPolicy: configuration.manifestRetryPolicy,
+            networkPolicy: configuration.networkPolicy,
             logger: logger
         )
         return try await fetcher.fetchManifest(from: url, allowInsecure: configuration.allowInsecureManifests)
@@ -951,6 +961,8 @@ public final class ProxyHLSPlayer {
         let remoteInfos = orderedRenditionInfos.filter { $0.remoteURI != nil }
         let retryPolicy = configuration.manifestRetryPolicy
         let allowInsecure = configuration.allowInsecureManifests
+        let networkPolicy = configuration.networkPolicy
+        let session = manifestSession
         let logger = logger
         let results = await withTaskGroup(
             of: (ResolvedRenditionInfo, MediaPlaylist?).self,
@@ -962,7 +974,9 @@ public final class ProxyHLSPlayer {
                     do {
                         let fetcher = HLSManifestFetcher(
                             url: remoteURL,
+                            session: session,
                             retryPolicy: retryPolicy,
+                            networkPolicy: networkPolicy,
                             logger: logger
                         )
                         let text = try await fetcher.fetchManifest(
@@ -1104,9 +1118,9 @@ public final class ProxyHLSPlayer {
 
     private func fetchBoundedAuxiliaryData(from url: URL) async throws -> Data {
         var request = URLRequest(url: url)
-        request.timeoutInterval = 15
+        request.timeoutInterval = configuration.networkPolicy.requestTimeout
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await manifestSession.data(for: request)
         guard let response = response as? HTTPURLResponse,
               (200..<300).contains(response.statusCode) else {
             throw URLError(.badServerResponse)
@@ -1551,6 +1565,14 @@ public final class ProxyHLSPlayer {
     }
 
     private func applyConfiguration() async {
+        if appliedNetworkPolicy != configuration.networkPolicy {
+            let previousSession = manifestSession
+            manifestSession = configuration.networkPolicy.makeURLSession()
+            appliedNetworkPolicy = configuration.networkPolicy
+            previousSession.finishTasksAndInvalidate()
+        }
+        await segmentFetcher.updateNetworkPolicy(configuration.networkPolicy)
+        await playlistRefresher.updateNetworkPolicy(configuration.networkPolicy)
         await cache.updateConfiguration(
             capacityBytes: configuration.cachePolicy.memoryCapacityBytes,
             diskDirectory: ProxyHLSPlayer.diskDirectory(

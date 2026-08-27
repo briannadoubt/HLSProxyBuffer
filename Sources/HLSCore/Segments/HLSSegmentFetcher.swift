@@ -41,7 +41,9 @@ public actor HLSSegmentFetcher: SegmentSource {
         case checksumMismatch
     }
 
-    private let session: URLSession
+    private var session: URLSession
+    private var networkPolicy: HLSOriginNetworkPolicy
+    private let managesSession: Bool
     private var validationPolicy: ValidationPolicy
     private var metricsHandler: (@Sendable (FetchMetrics) async -> Void)?
     private var latestMetricsValue: FetchMetrics?
@@ -58,15 +60,27 @@ public actor HLSSegmentFetcher: SegmentSource {
     }
 
     public init(
-        session: URLSession = .shared,
-        validationPolicy: ValidationPolicy = .init()
+        session: URLSession? = nil,
+        validationPolicy: ValidationPolicy = .init(),
+        networkPolicy: HLSOriginNetworkPolicy = .default
     ) {
-        self.session = session
+        self.session = session ?? networkPolicy.makeURLSession()
+        self.networkPolicy = networkPolicy
+        self.managesSession = session == nil
         self.validationPolicy = validationPolicy
     }
 
     public func updateValidationPolicy(_ policy: ValidationPolicy) {
         validationPolicy = policy
+    }
+
+    public func updateNetworkPolicy(_ policy: HLSOriginNetworkPolicy) {
+        guard policy != networkPolicy else { return }
+        networkPolicy = policy
+        guard managesSession else { return }
+        let previousSession = session
+        session = policy.makeURLSession()
+        previousSession.finishTasksAndInvalidate()
     }
 
     public func fetchSegment(_ segment: HLSSegment) async throws -> Data {
@@ -122,7 +136,7 @@ public actor HLSSegmentFetcher: SegmentSource {
     private func performFetch(from url: URL, metadata: HLSSegment?) async throws -> Data {
         try Task.checkCancellation()
         var request = URLRequest(url: url)
-        request.timeoutInterval = 20
+        request.timeoutInterval = networkPolicy.requestTimeout
         if let range = metadata?.byteRange {
             request.setValue("bytes=\(range.lowerBound)-\(range.upperBound)", forHTTPHeaderField: "Range")
         }
