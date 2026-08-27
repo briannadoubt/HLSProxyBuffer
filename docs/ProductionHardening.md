@@ -86,6 +86,18 @@ interface switches because URLSession cannot reliably guarantee those choices.
 - Latency and throughput depend on origin/CDN behavior, media encoding, device
   decoding, and policy tuning. Validate target streams on real hardware.
 
+## Structured logging
+
+- `DefaultLogger` routes messages through `os.Logger` with a stable subsystem
+  and per-event category and severity.
+- `LogConfiguration` is immutable and `Sendable`. It filters by minimum level
+  and category before evaluating the message autoclosure, so disabled verbose
+  diagnostics do no string interpolation work.
+- Messages are private and hash-masked by default. Applications may explicitly
+  select fully private or public output and can inject any `Logger` conformer.
+- `ProxyPlayerLogger` uses the same structured backend and policy instead of
+  writing directly to standard output.
+
 ## Release verification
 
 Before release, run:
