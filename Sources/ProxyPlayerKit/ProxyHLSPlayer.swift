@@ -193,7 +193,8 @@ public final class ProxyHLSPlayer {
         self.adaptiveController = AdaptiveVariantController(policy: Self.abrPolicy(from: configuration), logger: logger)
         self.segmentFetcher = HLSSegmentFetcher(
             validationPolicy: configuration.segmentValidation,
-            networkPolicy: configuration.networkPolicy
+            networkPolicy: configuration.networkPolicy,
+            retryPolicy: configuration.segmentRetryPolicy
         )
         self.cache = HLSSegmentCache(
             capacityBytes: configuration.cachePolicy.memoryCapacityBytes,
@@ -206,7 +207,8 @@ public final class ProxyHLSPlayer {
         self.scheduler = SegmentPrefetchScheduler(configuration: .init(
             targetBufferSeconds: configuration.bufferPolicy.targetBufferSeconds,
             maxSegments: configuration.bufferPolicy.maxPrefetchSegments,
-            targetPartCount: configuration.lowLatencyPolicy.isEnabled ? configuration.lowLatencyPolicy.targetPartBufferCount : 0
+            targetPartCount: configuration.lowLatencyPolicy.isEnabled ? configuration.lowLatencyPolicy.targetPartBufferCount : 0,
+            maximumRetryCount: 0
         ))
         self.playlistRefresher = PlaylistRefreshController(
             configuration: .init(
@@ -1572,6 +1574,7 @@ public final class ProxyHLSPlayer {
             previousSession.finishTasksAndInvalidate()
         }
         await segmentFetcher.updateNetworkPolicy(configuration.networkPolicy)
+        await segmentFetcher.updateRetryPolicy(configuration.segmentRetryPolicy)
         await playlistRefresher.updateNetworkPolicy(configuration.networkPolicy)
         await cache.updateConfiguration(
             capacityBytes: configuration.cachePolicy.memoryCapacityBytes,
@@ -1586,7 +1589,8 @@ public final class ProxyHLSPlayer {
         await scheduler.updateConfiguration(.init(
             targetBufferSeconds: configuration.bufferPolicy.targetBufferSeconds,
             maxSegments: configuration.bufferPolicy.maxPrefetchSegments,
-            targetPartCount: partBufferCount
+            targetPartCount: partBufferCount,
+            maximumRetryCount: 0
         ))
         await playlistRefresher.updateConfiguration(.init(
             refreshInterval: configuration.bufferPolicy.refreshInterval,

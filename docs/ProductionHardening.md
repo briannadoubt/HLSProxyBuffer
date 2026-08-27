@@ -75,6 +75,23 @@ connection settings remain authoritative; the policy still supplies each HLS
 request's timeout. HLSProxyBuffer does not expose HTTP-version or preferred-
 interface switches because URLSession cannot reliably guarantee those choices.
 
+## Segment retry policy
+
+`ProxyPlayerConfiguration.segmentRetryPolicy` applies bounded retries to the
+single-flight segment fetch itself, so concurrent prefetch and on-demand callers
+share one retry sequence. Retryable failures are limited to transient URL errors,
+HTTP 408/425/429 and 5xx responses, incomplete or corrupt payloads, and invalid
+range responses. Other 4xx responses and cancellation fail immediately.
+
+Backoff is exponential, capped, and jittered. `Retry-After` delta-seconds and
+HTTP-date values take precedence up to `maximumRetryAfter`. Every attempt rebuilds
+the same range request and repeats response normalization, byte-length checks,
+and checksum validation. The player disables the scheduler's older unclassified
+inner retry loop when using `HLSSegmentFetcher`, avoiding multiplied retry counts.
+Tests can inject `RetryClock` and `RetryJitterSource` values to run without real
+delays. A circuit breaker is intentionally omitted until origin-scoped failure
+and recovery behavior can be justified with production telemetry.
+
 ## Operational boundaries
 
 - Origin manifests default to HTTPS. Enabling insecure manifests is an explicit

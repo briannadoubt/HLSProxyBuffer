@@ -17,4 +17,19 @@ final class ProxyPlayerConfigurationTests: XCTestCase {
 
         XCTAssertEqual(configuration.networkPolicy, policy)
     }
+
+    func testStoresSegmentRetryPolicy() {
+        let policy = HLSSegmentFetcher.RetryPolicy(
+            maxAttempts: 5,
+            initialDelay: 0.5,
+            multiplier: 1.5,
+            maximumDelay: 4,
+            jitterRatio: 0.1,
+            maximumRetryAfter: 20
+        )
+
+        let configuration = ProxyPlayerConfiguration(segmentRetryPolicy: policy)
+
+        XCTAssertEqual(configuration.segmentRetryPolicy, policy)
+    }
 }
