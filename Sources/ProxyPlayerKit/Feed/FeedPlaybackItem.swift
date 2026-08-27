@@ -24,6 +24,42 @@ public enum FeedStreamKind: String, Codable, Sendable {
     case live
 }
 
+/// Transport boundary for feed source manifests.
+///
+/// Production feeds are HTTPS-only by default. ``allowLoopbackHTTP`` exists
+/// for deterministic local fixture servers and never permits cleartext URLs
+/// on a remote host.
+public enum HLSFeedSourceTransportPolicy: Sendable, Equatable {
+    case secureOnly
+    case allowLoopbackHTTP
+
+    func allows(_ url: URL) -> Bool {
+        if url.scheme?.lowercased() == "https" {
+            return true
+        }
+        guard self == .allowLoopbackHTTP,
+              url.scheme?.lowercased() == "http",
+              let host = url.host?.lowercased()
+        else {
+            return false
+        }
+        if host == "localhost" || host == "::1" {
+            return true
+        }
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+        return octets.count == 4
+            && octets.first == "127"
+            && octets.allSatisfy { octet in
+                guard let value = UInt8(octet) else { return false }
+                return String(value) == octet
+            }
+    }
+
+    var allowsInsecureManifests: Bool {
+        self == .allowLoopbackHTTP
+    }
+}
+
 /// One finite media-playlist clip plus the trusted decoder compatibility facts
 /// required to join it directly into a single HLS timeline.
 public struct ProxyPlaybackClip: Identifiable, Hashable, Sendable {

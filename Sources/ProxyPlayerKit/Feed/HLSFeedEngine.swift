@@ -17,6 +17,9 @@ public struct HLSFeedPlayback: Sendable, Equatable {
     public let role: FeedPlan.Role
     public let phase: Phase
     public let state: PlayerState
+    /// True after the focused platform player has entered its `.playing`
+    /// time-control state for this lease.
+    public let hasStartedPlayback: Bool
 
     public var isImmediatelyPlayable: Bool {
         phase == .warm || phase == .focused
@@ -66,6 +69,7 @@ public enum HLSFeedEngineError: Error, Equatable, LocalizedError, Sendable {
     case stopped
     case noFocusedItem
     case itemUnavailable(FeedItemID)
+    case disallowedSourceURL(URL)
     case untypedClipSequenceRequiresCompatibility(FeedItemID)
     case playerFailed(FeedItemID, String)
 
@@ -77,6 +81,8 @@ public enum HLSFeedEngineError: Error, Equatable, LocalizedError, Sendable {
             "The feed engine has no focused playback item"
         case .itemUnavailable(let itemID):
             "The feed item is not currently owned by the playback pool: \(itemID)"
+        case .disallowedSourceURL(let url):
+            "The feed source URL is not permitted by the transport policy: \(url.absoluteString)"
         case .untypedClipSequenceRequiresCompatibility(let itemID):
             "Feed item \(itemID) must use compatibleClips to create one stitched playback timeline"
         case .playerFailed(let itemID, let message):
@@ -132,6 +138,7 @@ public final class HLSFeedEngine {
         var phase: HLSFeedPlayback.Phase
         var state: PlayerState
         var didCompleteInitialLoad: Bool
+        var hasStartedPlayback: Bool
         var telemetryPath: HLSFeedTelemetry.Path
         var stallStartedAt: Duration?
     }
@@ -153,6 +160,8 @@ public final class HLSFeedEngine {
         var observationTask: Task<Void, Never>?
         var releaseTask: Task<Void, Never>?
         var playbackEndObserver: NSObjectProtocol?
+        var playbackStartObservation: NSKeyValueObservation?
+        var playbackFailureObservation: NSKeyValueObservation?
         var isReleasing = false
 
         init(session: any HLSFeedPlayerSession) {
@@ -168,6 +177,10 @@ public final class HLSFeedEngine {
                 NotificationCenter.default.removeObserver(playbackEndObserver)
                 self.playbackEndObserver = nil
             }
+            playbackStartObservation?.invalidate()
+            playbackStartObservation = nil
+            playbackFailureObservation?.invalidate()
+            playbackFailureObservation = nil
             return task
         }
     }
@@ -184,6 +197,7 @@ public final class HLSFeedEngine {
     @ObservationIgnored private var itemsByID: [FeedItemID: FeedPlaybackItem]
     @ObservationIgnored private var basePolicy: FeedPlaybackPolicy
     @ObservationIgnored private var effectivePolicy: FeedPlaybackPolicy
+    @ObservationIgnored private let sourceTransportPolicy: HLSFeedSourceTransportPolicy
     @ObservationIgnored private var playerConfiguration: ProxyPlayerConfiguration
     @ObservationIgnored private let coordinator: FeedCoordinator
     @ObservationIgnored private let sessionFactory: SessionFactory
@@ -217,13 +231,16 @@ public final class HLSFeedEngine {
     public convenience init(
         items: [FeedPlaybackItem],
         policy: FeedPlaybackPolicy,
+        sourceTransportPolicy: HLSFeedSourceTransportPolicy = .secureOnly,
         telemetryConfiguration: HLSFeedTelemetry.Configuration = .init()
     ) throws {
         let validatedPolicy = try policy.validated()
+        try Self.validateSourceURLs(in: items, policy: sourceTransportPolicy)
         let telemetry = HLSFeedTelemetry(configuration: telemetryConfiguration)
         let sharedCache = Self.makeSharedCache(policy: validatedPolicy)
         let backend = try HLSFeedPreparationBackend(
             policy: validatedPolicy,
+            allowsInsecureManifests: sourceTransportPolicy.allowsInsecureManifests,
             cache: sharedCache
         )
         let coordinator = try FeedCoordinator(
@@ -239,7 +256,8 @@ public final class HLSFeedEngine {
                 ProxyHLSPlayer(configuration: configuration, sharedCache: sharedCache)
             },
             telemetry: telemetry,
-            sharedCache: sharedCache
+            sharedCache: sharedCache,
+            sourceTransportPolicy: sourceTransportPolicy
         )
     }
 
@@ -250,14 +268,19 @@ public final class HLSFeedEngine {
         sessionFactory: @escaping SessionFactory,
         telemetry: HLSFeedTelemetry = HLSFeedTelemetry(),
         sharedCache: HLSSegmentCache? = nil,
-        telemetryClock: FeedCoordinatorClock = .continuous
+        telemetryClock: FeedCoordinatorClock = .continuous,
+        sourceTransportPolicy: HLSFeedSourceTransportPolicy = .secureOnly
     ) throws {
         let validatedPolicy = try policy.validated()
         self.items = items
         self.itemsByID = try Self.validatedItemsByID(items)
         self.basePolicy = validatedPolicy
         self.effectivePolicy = validatedPolicy
-        self.playerConfiguration = try Self.playerConfiguration(for: validatedPolicy)
+        self.sourceTransportPolicy = sourceTransportPolicy
+        self.playerConfiguration = try Self.playerConfiguration(
+            for: validatedPolicy,
+            sourceTransportPolicy: sourceTransportPolicy
+        )
         self.coordinator = coordinator
         self.sessionFactory = sessionFactory
         self.telemetry = telemetry
@@ -309,6 +332,7 @@ public final class HLSFeedEngine {
         _ items: [FeedPlaybackItem]
     ) async throws -> HLSFeedEngineSnapshot {
         guard !isStopped else { throw HLSFeedEngineError.stopped }
+        try Self.validateSourceURLs(in: items, policy: sourceTransportPolicy)
         let replacement = try Self.validatedItemsByID(items)
         let value = try await coordinator.replaceItems(items)
         for slot in slots {
@@ -340,7 +364,10 @@ public final class HLSFeedEngine {
     ) async throws -> HLSFeedEngineSnapshot {
         guard !isStopped else { throw HLSFeedEngineError.stopped }
         let validatedPolicy = try policy.validated()
-        let configuration = try Self.playerConfiguration(for: validatedPolicy)
+        let configuration = try Self.playerConfiguration(
+            for: validatedPolicy,
+            sourceTransportPolicy: sourceTransportPolicy
+        )
         let value = try await coordinator.updatePolicy(validatedPolicy)
         basePolicy = validatedPolicy
         effectivePolicy = validatedPolicy
@@ -360,7 +387,10 @@ public final class HLSFeedEngine {
     ) async throws -> HLSFeedEngineSnapshot {
         guard !isStopped else { throw HLSFeedEngineError.stopped }
         let adaptedPolicy = try basePolicy.adaptedForLowPowerMode(isEnabled)
-        let configuration = try Self.playerConfiguration(for: adaptedPolicy)
+        let configuration = try Self.playerConfiguration(
+            for: adaptedPolicy,
+            sourceTransportPolicy: sourceTransportPolicy
+        )
         let value = try await coordinator.setLowPowerModeEnabled(isEnabled)
         effectivePolicy = adaptedPolicy
         playerConfiguration = configuration
@@ -632,6 +662,7 @@ public final class HLSFeedEngine {
             phase: .loading,
             state: slot.session.state,
             didCompleteInitialLoad: false,
+            hasStartedPlayback: false,
             telemetryPath: telemetryPath,
             stallStartedAt: nil
         )
@@ -787,6 +818,7 @@ public final class HLSFeedEngine {
         case .failed(let message):
             finishStallIfNeeded(in: &lease)
             lease.phase = .failed(message)
+            lease.hasStartedPlayback = false
             failuresByItemID[lease.itemID] = .init(
                 itemID: lease.itemID,
                 generation: lease.generation,
@@ -829,6 +861,7 @@ public final class HLSFeedEngine {
             current.session.pause()
             finishStallIfNeeded(in: &currentLease)
             if currentLease.phase == .focused { currentLease.phase = .warm }
+            currentLease.hasStartedPlayback = false
             current.lease = currentLease
         }
         destinationLease.telemetryPath = Self.telemetryPath(
@@ -837,12 +870,77 @@ public final class HLSFeedEngine {
             source: destinationLease.source
         )
         destinationLease.phase = .focused
+        destinationLease.hasStartedPlayback = false
         destination.lease = destinationLease
         activeItemID = destinationLease.itemID
+        let hasPlatformPlayer = destination.session.feedPlatformPlayer != nil
+        if hasPlatformPlayer {
+            observeActivatedPlayback(in: destination, token: destinationLease.token)
+        }
         destination.session.play()
-        if pendingFocus?.itemID == destinationLease.itemID {
+        if !hasPlatformPlayer {
+            confirmActivatedPlayback(in: destination, token: destinationLease.token)
+        }
+    }
+
+    private func observeActivatedPlayback(in slot: Slot, token: UUID) {
+        guard let player = slot.session.feedPlatformPlayer else { return }
+        slot.playbackStartObservation?.invalidate()
+        slot.playbackStartObservation = player.observe(
+            \.timeControlStatus,
+            options: [.initial, .new]
+        ) { [weak self, weak slot] player, _ in
+            guard player.timeControlStatus == .playing else { return }
+            Task { @MainActor [weak self, weak slot] in
+                guard let self, let slot else { return }
+                self.confirmActivatedPlayback(in: slot, token: token)
+            }
+        }
+
+        slot.playbackFailureObservation?.invalidate()
+        guard let item = player.currentItem else { return }
+        slot.playbackFailureObservation = item.observe(
+            \.status,
+            options: [.initial, .new]
+        ) { [weak self, weak slot] item, _ in
+            guard item.status == .failed else { return }
+            let message = item.error?.localizedDescription ?? "AVPlayerItem failed"
+            Task { @MainActor [weak self, weak slot] in
+                guard let self, let slot else { return }
+                self.failActivatedPlayback(in: slot, token: token, message: message)
+            }
+        }
+    }
+
+    private func confirmActivatedPlayback(in slot: Slot, token: UUID) {
+        guard owns(slot, token: token),
+              var lease = slot.lease,
+              lease.itemID == activeItemID
+        else {
+            return
+        }
+        lease.hasStartedPlayback = true
+        slot.lease = lease
+        slot.playbackStartObservation?.invalidate()
+        slot.playbackStartObservation = nil
+        if pendingFocus?.itemID == slot.lease?.itemID {
             completePendingFocus(succeeded: true)
         }
+        rebuildSnapshot()
+    }
+
+    private func failActivatedPlayback(in slot: Slot, token: UUID, message: String) {
+        guard owns(slot, token: token), let lease = slot.lease else { return }
+        acceptPlayerState(
+            PlayerState(
+                status: .failed(message),
+                bufferDepthSeconds: lease.state.bufferDepthSeconds,
+                qualityDescription: lease.state.qualityDescription,
+                livePlayback: lease.state.livePlayback
+            ),
+            from: slot,
+            token: token
+        )
     }
 
     private func scheduleRelease(of slot: Slot) {
@@ -1174,7 +1272,8 @@ public final class HLSFeedEngine {
                 generation: lease.generation,
                 role: lease.role,
                 phase: lease.phase,
-                state: lease.state
+                state: lease.state,
+                hasStartedPlayback: lease.hasStartedPlayback
             )
         }
         let activeLoads = slots.reduce(into: 0) { count, slot in
@@ -1245,14 +1344,32 @@ public final class HLSFeedEngine {
     }
 
     private static func playerConfiguration(
-        for policy: FeedPlaybackPolicy
+        for policy: FeedPlaybackPolicy,
+        sourceTransportPolicy: HLSFeedSourceTransportPolicy
     ) throws -> ProxyPlayerConfiguration {
         var configuration = try policy.makeProxyPlayerConfiguration()
+        configuration.allowInsecureManifests = sourceTransportPolicy.allowsInsecureManifests
         if configuration.cachePolicy.enableDiskCache,
            configuration.cachePolicy.diskDirectory == nil {
             configuration.cachePolicy.diskDirectory = defaultFeedCacheDirectory()
         }
         return configuration
+    }
+
+    private static func validateSourceURLs(
+        in items: [FeedPlaybackItem],
+        policy: HLSFeedSourceTransportPolicy
+    ) throws {
+        for item in items {
+            let urls: [URL] = switch item.source {
+            case .stream(let url, _): [url]
+            case .clips(let urls): urls
+            case .compatibleClips(let clips): clips.map(\.playlistURL)
+            }
+            if let url = urls.first(where: { !policy.allows($0) }) {
+                throw HLSFeedEngineError.disallowedSourceURL(url)
+            }
+        }
     }
 
     private static func makeSharedCache(policy: FeedPlaybackPolicy) -> HLSSegmentCache {

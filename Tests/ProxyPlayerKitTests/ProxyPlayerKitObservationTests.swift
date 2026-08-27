@@ -86,6 +86,23 @@ final class ProxyPlayerKitObservationTests: XCTestCase {
         await player.stopAndWait()
     }
 
+    func testMediaOnlyOriginPublishesPositiveSyntheticVariantBandwidth() async throws {
+        let origin = try MockOriginServer()
+        try await origin.start()
+        defer { origin.stop() }
+        let player = ProxyHLSPlayer(configuration: .init(allowInsecureManifests: true))
+
+        await player.load(from: origin.manifestURL)
+        let playlistURL = try XCTUnwrap(player.playlistURL())
+        let (data, response) = try await URLSession.shared.data(from: playlistURL)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let master = try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertTrue(master.contains("#EXT-X-STREAM-INF:BANDWIDTH=1000000"))
+        XCTAssertFalse(master.contains("BANDWIDTH=0"))
+
+        await player.stopAndWait()
+    }
+
     func testAsyncStateStreamDeliversOrderedLifecycleAndStopWaitsForCleanup() async throws {
         let origin = try MockOriginServer(segmentCount: 2)
         try await origin.start()

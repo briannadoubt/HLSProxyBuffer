@@ -115,6 +115,9 @@ public final class HLSFeedTelemetry {
 
     public struct PathSnapshot: Equatable, Codable, Sendable {
         public let path: Path
+        /// Focus request to the engine-owned AVPlayer first entering its
+        /// `.playing` time-control state. Preparation or `play()` invocation
+        /// alone does not satisfy this measurement.
         public let firstFrameLatency: Distribution
         public let stallDuration: Distribution
         public let cancellationLatency: Distribution
@@ -122,6 +125,8 @@ public final class HLSFeedTelemetry {
         public let cacheMissCount: UInt64
         public let originBytesAvoided: UInt64
         public let cancellationOutcomeCounts: [CancellationOutcome: UInt64]
+        /// Focus requests, requests whose destination was warm at submission,
+        /// and destinations that subsequently entered platform playback.
         public let handoffAttemptCount: UInt64
         public let handoffReadyCount: UInt64
         public let handoffSuccessCount: UInt64

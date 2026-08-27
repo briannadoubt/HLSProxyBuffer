@@ -41,6 +41,13 @@ if command -v xcodebuild >/dev/null 2>&1; then
       -destination "platform=iOS Simulator,id=$IOS_SIM_UDID" \
       -sdk iphonesimulator \
       build
+
+    echo "Building the automatic SwiftUI feed demo for $IOS_SIM_NAME..."
+    xcodebuild \
+      -scheme HLSProxyFeedDemo \
+      -destination "platform=iOS Simulator,id=$IOS_SIM_UDID" \
+      -sdk iphonesimulator \
+      build
   else
     echo "iOS simulator build skipped (no $IOS_SIM_NAME available)."
   fi
