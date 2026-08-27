@@ -479,6 +479,13 @@ public struct FeedPlaybackPolicy: Sendable, Equatable {
         return policy
     }
 
+    public static var shortFormFeed: Self { preset(.shortFormFeed) }
+    public static var pagedFeed: Self { preset(.pagedFeed) }
+    public static var continuousWindowedFeed: Self { preset(.continuousWindowedFeed) }
+    public static var longForm: Self { preset(.longForm) }
+    public static var live: Self { preset(.live) }
+    public static var offlineFirst: Self { preset(.offlineFirst) }
+
     /// Applies one group-level replacement and validates the result.
     public func applying(_ overrides: Overrides) throws -> Self {
         var result = self

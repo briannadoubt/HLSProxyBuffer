@@ -95,6 +95,36 @@ auxiliary key route; register key bytes by their
 
 ## Feed-aware Buffering
 
+New feed integrations should use `HLSFeedEngine`. It composes predictive
+preparation, one bounded shared cache, reusable player/proxy sessions, focus
+handoff, looping, stitched sources, and live/DVR controls behind a single
+Observation-native API:
+
+```swift
+let engine = try HLSFeedEngine(items: items, policy: .shortFormFeed)
+
+for await signal in viewportSignals {
+    try await engine.update(signal)
+}
+
+HLSFeedVideo(engine: engine, itemID: item.id)
+```
+
+`HLSFeedVideo` only renders the engine-owned warm/focused lease. Adopters do not
+allocate `AVPlayer`, construct proxy URLs, register buffer observers, or manage
+cache and scheduler lifetimes. `engine.snapshot` participates in Observation;
+`engine.updates()` provides the same bounded newest-only state to imperative
+consumers. Use `engine.setPlaybackRate(_:for:)`, `jumpToLive(for:)`, and
+`seek(secondsBehindLiveEdge:for:)` for typed controls, then `await engine.stop()`
+when the feed session ends.
+
+The engine accepts ordinary VOD/live streams and
+`.compatibleClips([ProxyPlaybackClip])`. The legacy untyped `.clips([URL])`
+source remains preparation-only because it lacks the decoder compatibility
+facts required to install one safe stitched player timeline.
+
+### Legacy caller-owned controller
+
 TikTok-style feeds want deterministic control over which videos stay warm. `FeedBufferController` coordinates every `ProxyHLSPlayer` in the stack and keeps the visible item playing while the next/previous neighbors retain a shallow buffer. The controller accepts a `FeedBufferPolicy` (max live/VOD neighbors, buffer targets per role, total memory budget, cooldown delay) and `FeedPlayerDescriptor` metadata, including an estimated peak memory cost, so it can prioritize specific rows.
 
 ```swift
@@ -147,6 +177,10 @@ The automatic `FeedCoordinator` validates `.live` sources with the same
 `FeedPreparedItem`. The `.live` policy prepares the newest segments, keeps disk
 reuse disabled, and retains the coordinator's existing concurrency and
 cancellation bounds during rapid focus changes.
+
+`FeedBufferController` remains source compatible, but its explicit player
+registration model is intended for existing integrations. `HLSFeedEngine` is
+the default for new feeds.
 
 ## UIKit / AppKit Bridging
 
