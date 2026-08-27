@@ -37,6 +37,14 @@ boundaries operators should plan around.
 
 - Memory and disk limits are byte-based. Disk files are scoped per player,
   written atomically, read with mapped I/O when possible, and evicted by LRU.
+- Cache entries optionally expire through `CachePolicy.timeToLive`. Active
+  entries use an injectable monotonic clock so wall-clock changes cannot extend
+  or shorten their lifetime. Cold disk reloads recover age from the existing
+  file modification timestamp, preserving the on-disk filename/data format.
+- `maximumEntryCount` bounds memory and disk metadata independently of bytes,
+  including zero-byte entries. Cache telemetry uses only the fixed video,
+  audio, and subtitle namespaces and reports hits, misses, expirations, and
+  memory/disk evictions through `/metrics`.
 - The listener binds explicitly to `127.0.0.1`. Routes are frozen when serving
   starts and request parsing is incremental, binary-safe, and size-limited.
 - The proxy implements GET/HEAD, persistent HTTP/1.1 connections, query/path

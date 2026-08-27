@@ -40,6 +40,7 @@ public struct MetricsHandler: Sendable {
             hlsproxy_cache_bytes \(metrics.totalBytes)
             # HELP hlsproxy_cache_disk_bytes Number of bytes spilled to disk
             hlsproxy_cache_disk_bytes \(metrics.diskBytes)
+            \(namespaceMetricsBody(metrics))
             # HELP hlsproxy_buffer_depth_seconds Prefetch depth in seconds
             # TYPE hlsproxy_buffer_depth_seconds gauge
             hlsproxy_buffer_depth_seconds \(buffer.prefetchDepthSeconds)
@@ -64,6 +65,29 @@ public struct MetricsHandler: Sendable {
                 body: Data(body.utf8)
             )
         }
+    }
+
+    private func namespaceMetricsBody(_ metrics: HLSSegmentCache.Metrics) -> String {
+        var lines = [
+            "# HELP hlsproxy_cache_namespace_hits_total Cache hits by fixed media namespace",
+            "# TYPE hlsproxy_cache_namespace_hits_total counter",
+            "# HELP hlsproxy_cache_namespace_misses_total Cache misses by fixed media namespace",
+            "# TYPE hlsproxy_cache_namespace_misses_total counter",
+            "# HELP hlsproxy_cache_namespace_evictions_total Cache evictions by fixed media namespace and storage tier",
+            "# TYPE hlsproxy_cache_namespace_evictions_total counter",
+            "# HELP hlsproxy_cache_namespace_expirations_total Expired cache lookups by fixed media namespace",
+            "# TYPE hlsproxy_cache_namespace_expirations_total counter"
+        ]
+        for namespace in HLSSegmentCache.Namespace.allCases {
+            let value = metrics.metrics(for: namespace)
+            let label = namespace.rawValue
+            lines.append("hlsproxy_cache_namespace_hits_total{namespace=\"\(label)\"} \(value.hitCount)")
+            lines.append("hlsproxy_cache_namespace_misses_total{namespace=\"\(label)\"} \(value.missCount)")
+            lines.append("hlsproxy_cache_namespace_evictions_total{namespace=\"\(label)\",tier=\"memory\"} \(value.memoryEvictionCount)")
+            lines.append("hlsproxy_cache_namespace_evictions_total{namespace=\"\(label)\",tier=\"disk\"} \(value.diskEvictionCount)")
+            lines.append("hlsproxy_cache_namespace_expirations_total{namespace=\"\(label)\"} \(value.expirationCount)")
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func streamingMetricsBody(_ snapshot: HLSStreamingTelemetry.Snapshot) -> String {
