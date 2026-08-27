@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		00FB70F9D1944984844CD3C0 /* FeedDemoAnalyticsInspector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 533503BD14232605870AC970 /* FeedDemoAnalyticsInspector.swift */; };
 		04CCF75EB57068B2F1ED14A6 /* Fixtures in Resources */ = {isa = PBXBuildFile; fileRef = 1BC85C15EC5A307F9C358B7F /* Fixtures */; };
 		1DE9B45D7666EA9D0151D625 /* HLSProxyBuffer in Frameworks */ = {isa = PBXBuildFile; productRef = 5DEE21009CCC529C00077F4C /* HLSProxyBuffer */; };
 		24BBF26D7CA029F2478C676A /* FeedDemoSignalBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D8961D850963CA1AE629A41 /* FeedDemoSignalBuilder.swift */; };
@@ -35,6 +36,7 @@
 		15A87D0CFA813634B16458E0 /* HLSProxyFeedDemoApp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = HLSProxyFeedDemoApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1BC85C15EC5A307F9C358B7F /* Fixtures */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fixtures; sourceTree = SOURCE_ROOT; };
 		303559D318E4BC284CE77C39 /* FeedDemoQualification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoQualification.swift; sourceTree = "<group>"; };
+		533503BD14232605870AC970 /* FeedDemoAnalyticsInspector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoAnalyticsInspector.swift; sourceTree = "<group>"; };
 		5995C9797B54E0268FDBAE8C /* FeedDemoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoView.swift; sourceTree = "<group>"; };
 		5D8961D850963CA1AE629A41 /* FeedDemoSignalBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoSignalBuilder.swift; sourceTree = "<group>"; };
 		A01534D45F570E145A974181 /* HLSProxyFeedDemoAppUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HLSProxyFeedDemoAppUITests.swift; sourceTree = "<group>"; };
@@ -91,6 +93,7 @@
 		D3630F783D034FB15F20BAAE /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				533503BD14232605870AC970 /* FeedDemoAnalyticsInspector.swift */,
 				CF676DC7A09A1B5C505C422B /* FeedDemoCatalog.swift */,
 				EBCFA5A19660D90ED78B1C54 /* FeedDemoFixtureOrigin.swift */,
 				ED56CD1BFEBDA23EED9467CF /* FeedDemoModel.swift */,
@@ -210,6 +213,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				00FB70F9D1944984844CD3C0 /* FeedDemoAnalyticsInspector.swift in Sources */,
 				F6A8E81993610BE2C1C0077B /* FeedDemoCatalog.swift in Sources */,
 				69978CF3DA6A9351B357D379 /* FeedDemoFixtureOrigin.swift in Sources */,
 				9F7946F13905F8B630B68254 /* FeedDemoModel.swift in Sources */,
