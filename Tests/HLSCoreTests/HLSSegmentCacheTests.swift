@@ -193,6 +193,10 @@ final class HLSSegmentCacheTests: XCTestCase {
 
         let resurrected = await cache.get("one")
         XCTAssertEqual(resurrected, Data([0xAA]), "Disk cache should restore evicted entry.")
+        let metrics = await cache.metrics()
+        XCTAssertEqual(metrics.hitCount, 2)
+        XCTAssertEqual(metrics.memoryHitCount, 1)
+        XCTAssertEqual(metrics.diskHitCount, 1)
     }
 
     func testMetricsReportDiskBytes() async throws {

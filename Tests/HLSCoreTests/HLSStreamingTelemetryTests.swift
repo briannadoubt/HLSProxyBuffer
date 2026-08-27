@@ -37,6 +37,47 @@ final class HLSStreamingTelemetryTests: XCTestCase {
         XCTAssertEqual(snapshot.retryOutcomeCounts[.successWithoutRetry], 1)
         XCTAssertEqual(snapshot.retryOutcomeCounts[.successAfterRetry], 1)
         XCTAssertEqual(snapshot.retryOutcomeCounts[.failureAfterRetry], 1)
+        XCTAssertEqual(snapshot.originByteCount, 2_048)
+        XCTAssertEqual(snapshot.originRetryCount, 3)
+    }
+
+    func testPublishesSchedulerStateAndResetClearsCrossLayerCounters() async {
+        let telemetry = HLSStreamingTelemetry()
+        var iterator = await telemetry.updates().makeAsyncIterator()
+        _ = await iterator.next()
+
+        await telemetry.recordFetch(event(
+            duration: 0.2,
+            attempts: 2,
+            outcome: .successAfterRetry
+        ))
+        await telemetry.updateSchedulerTelemetry(
+            scheduledCount: 8,
+            readyCount: 6,
+            failureCount: 2,
+            readyPartCount: 3
+        )
+
+        var snapshot = await telemetry.snapshot()
+        XCTAssertEqual(snapshot.originByteCount, 1_024)
+        XCTAssertEqual(snapshot.originRetryCount, 1)
+        XCTAssertEqual(snapshot.schedulerScheduledCount, 8)
+        XCTAssertEqual(snapshot.schedulerReadyCount, 6)
+        XCTAssertEqual(snapshot.schedulerFailureCount, 2)
+        XCTAssertEqual(snapshot.schedulerReadyPartCount, 3)
+
+        let published = await iterator.next()
+        XCTAssertEqual(published?.schedulerScheduledCount, 8)
+        XCTAssertEqual(published?.schedulerReadyPartCount, 3)
+
+        await telemetry.reset()
+        snapshot = await telemetry.snapshot()
+        XCTAssertEqual(snapshot.originByteCount, 0)
+        XCTAssertEqual(snapshot.originRetryCount, 0)
+        XCTAssertEqual(snapshot.schedulerScheduledCount, 0)
+        XCTAssertEqual(snapshot.schedulerReadyCount, 0)
+        XCTAssertEqual(snapshot.schedulerFailureCount, 0)
+        XCTAssertEqual(snapshot.schedulerReadyPartCount, 0)
     }
 
     func testTracksCacheRatioAndNormalizesLiveEdgeDistance() async throws {
@@ -45,6 +86,8 @@ final class HLSStreamingTelemetryTests: XCTestCase {
         await telemetry.updateCacheMetrics(.init(
             hitCount: 7,
             missCount: 3,
+            memoryHitCount: 5,
+            diskHitCount: 2,
             totalBytes: 100,
             diskBytes: 20
         ))
@@ -52,6 +95,8 @@ final class HLSStreamingTelemetryTests: XCTestCase {
 
         var snapshot = await telemetry.snapshot()
         XCTAssertEqual(try XCTUnwrap(snapshot.cacheHitRatio), 0.7, accuracy: 0.0001)
+        XCTAssertEqual(snapshot.memoryCacheHitCount, 5)
+        XCTAssertEqual(snapshot.diskCacheHitCount, 2)
         XCTAssertEqual(snapshot.liveEdgeDistanceSeconds, 0)
 
         await telemetry.updateLiveEdgeDistance(.infinity)

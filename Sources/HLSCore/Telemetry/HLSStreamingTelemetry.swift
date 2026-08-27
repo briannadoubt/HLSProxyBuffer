@@ -92,9 +92,17 @@ public actor HLSStreamingTelemetry {
             retryOutcomeCounts: [:],
             cacheHitCount: 0,
             cacheMissCount: 0,
+            memoryCacheHitCount: 0,
+            diskCacheHitCount: 0,
             liveEdgeDistanceSeconds: nil,
             variantSwitchReasonCounts: [:],
-            latestVariantSwitchReason: nil
+            latestVariantSwitchReason: nil,
+            originByteCount: 0,
+            originRetryCount: 0,
+            schedulerScheduledCount: 0,
+            schedulerReadyCount: 0,
+            schedulerFailureCount: 0,
+            schedulerReadyPartCount: 0
         )
 
         public let segmentFetchLatency: LatencyDistribution
@@ -102,9 +110,17 @@ public actor HLSStreamingTelemetry {
         public let retryOutcomeCounts: [HLSSegmentFetcher.RetryOutcome: UInt64]
         public let cacheHitCount: Int
         public let cacheMissCount: Int
+        public let memoryCacheHitCount: Int
+        public let diskCacheHitCount: Int
         public let liveEdgeDistanceSeconds: TimeInterval?
         public let variantSwitchReasonCounts: [String: UInt64]
         public let latestVariantSwitchReason: String?
+        public let originByteCount: Int
+        public let originRetryCount: Int
+        public let schedulerScheduledCount: Int
+        public let schedulerReadyCount: Int
+        public let schedulerFailureCount: Int
+        public let schedulerReadyPartCount: Int
 
         public init(
             segmentFetchLatency: LatencyDistribution,
@@ -112,18 +128,34 @@ public actor HLSStreamingTelemetry {
             retryOutcomeCounts: [HLSSegmentFetcher.RetryOutcome: UInt64],
             cacheHitCount: Int,
             cacheMissCount: Int,
+            memoryCacheHitCount: Int = 0,
+            diskCacheHitCount: Int = 0,
             liveEdgeDistanceSeconds: TimeInterval?,
             variantSwitchReasonCounts: [String: UInt64],
-            latestVariantSwitchReason: String?
+            latestVariantSwitchReason: String?,
+            originByteCount: Int = 0,
+            originRetryCount: Int = 0,
+            schedulerScheduledCount: Int = 0,
+            schedulerReadyCount: Int = 0,
+            schedulerFailureCount: Int = 0,
+            schedulerReadyPartCount: Int = 0
         ) {
             self.segmentFetchLatency = segmentFetchLatency
             self.fetchErrorCounts = fetchErrorCounts
             self.retryOutcomeCounts = retryOutcomeCounts
             self.cacheHitCount = max(0, cacheHitCount)
             self.cacheMissCount = max(0, cacheMissCount)
+            self.memoryCacheHitCount = max(0, memoryCacheHitCount)
+            self.diskCacheHitCount = max(0, diskCacheHitCount)
             self.liveEdgeDistanceSeconds = liveEdgeDistanceSeconds
             self.variantSwitchReasonCounts = variantSwitchReasonCounts
             self.latestVariantSwitchReason = latestVariantSwitchReason
+            self.originByteCount = max(0, originByteCount)
+            self.originRetryCount = max(0, originRetryCount)
+            self.schedulerScheduledCount = max(0, schedulerScheduledCount)
+            self.schedulerReadyCount = max(0, schedulerReadyCount)
+            self.schedulerFailureCount = max(0, schedulerFailureCount)
+            self.schedulerReadyPartCount = max(0, schedulerReadyPartCount)
         }
 
         public var cacheHitRatio: Double? {
@@ -174,9 +206,17 @@ public actor HLSStreamingTelemetry {
     private var retryOutcomeCounts: [HLSSegmentFetcher.RetryOutcome: UInt64] = [:]
     private var cacheHitCount = 0
     private var cacheMissCount = 0
+    private var memoryCacheHitCount = 0
+    private var diskCacheHitCount = 0
     private var liveEdgeDistanceSeconds: TimeInterval?
     private var variantSwitchReasonCounts: [String: UInt64] = [:]
     private var latestVariantSwitchReason: String?
+    private var originByteCount = 0
+    private var originRetryCount = 0
+    private var schedulerScheduledCount = 0
+    private var schedulerReadyCount = 0
+    private var schedulerFailureCount = 0
+    private var schedulerReadyPartCount = 0
     private var continuations: [UUID: AsyncStream<Snapshot>.Continuation] = [:]
 
     public init(configuration: Configuration = .init()) {
@@ -188,6 +228,8 @@ public actor HLSStreamingTelemetry {
 
     public func recordFetch(_ event: HLSSegmentFetcher.FetchEvent) {
         latency.record(event.duration)
+        originByteCount = Self.saturatingAdd(originByteCount, event.byteCount)
+        originRetryCount = Self.saturatingAdd(originRetryCount, event.retryCount)
         retryOutcomeCounts[event.retryOutcome, default: 0] &+= 1
         if let errorCategory = event.errorCategory {
             fetchErrorCounts[errorCategory, default: 0] &+= 1
@@ -195,12 +237,42 @@ public actor HLSStreamingTelemetry {
         publish()
     }
 
+    public func updateSchedulerTelemetry(
+        scheduledCount: Int,
+        readyCount: Int,
+        failureCount: Int,
+        readyPartCount: Int
+    ) {
+        let scheduled = max(0, scheduledCount)
+        let ready = max(0, readyCount)
+        let failures = max(0, failureCount)
+        let readyParts = max(0, readyPartCount)
+        guard schedulerScheduledCount != scheduled
+                || schedulerReadyCount != ready
+                || schedulerFailureCount != failures
+                || schedulerReadyPartCount != readyParts
+        else {
+            return
+        }
+        schedulerScheduledCount = scheduled
+        schedulerReadyCount = ready
+        schedulerFailureCount = failures
+        schedulerReadyPartCount = readyParts
+        publish()
+    }
+
     public func updateCacheMetrics(_ metrics: HLSSegmentCache.Metrics) {
-        guard cacheHitCount != metrics.hitCount || cacheMissCount != metrics.missCount else {
+        guard cacheHitCount != metrics.hitCount
+                || cacheMissCount != metrics.missCount
+                || memoryCacheHitCount != metrics.memoryHitCount
+                || diskCacheHitCount != metrics.diskHitCount
+        else {
             return
         }
         cacheHitCount = metrics.hitCount
         cacheMissCount = metrics.missCount
+        memoryCacheHitCount = metrics.memoryHitCount
+        diskCacheHitCount = metrics.diskHitCount
         publish()
     }
 
@@ -252,9 +324,17 @@ public actor HLSStreamingTelemetry {
         retryOutcomeCounts.removeAll(keepingCapacity: true)
         cacheHitCount = 0
         cacheMissCount = 0
+        memoryCacheHitCount = 0
+        diskCacheHitCount = 0
         liveEdgeDistanceSeconds = nil
         variantSwitchReasonCounts.removeAll(keepingCapacity: true)
         latestVariantSwitchReason = nil
+        originByteCount = 0
+        originRetryCount = 0
+        schedulerScheduledCount = 0
+        schedulerReadyCount = 0
+        schedulerFailureCount = 0
+        schedulerReadyPartCount = 0
         publish()
     }
 
@@ -265,9 +345,17 @@ public actor HLSStreamingTelemetry {
             retryOutcomeCounts: retryOutcomeCounts,
             cacheHitCount: cacheHitCount,
             cacheMissCount: cacheMissCount,
+            memoryCacheHitCount: memoryCacheHitCount,
+            diskCacheHitCount: diskCacheHitCount,
             liveEdgeDistanceSeconds: liveEdgeDistanceSeconds,
             variantSwitchReasonCounts: variantSwitchReasonCounts,
-            latestVariantSwitchReason: latestVariantSwitchReason
+            latestVariantSwitchReason: latestVariantSwitchReason,
+            originByteCount: originByteCount,
+            originRetryCount: originRetryCount,
+            schedulerScheduledCount: schedulerScheduledCount,
+            schedulerReadyCount: schedulerReadyCount,
+            schedulerFailureCount: schedulerFailureCount,
+            schedulerReadyPartCount: schedulerReadyPartCount
         )
     }
 
@@ -280,5 +368,10 @@ public actor HLSStreamingTelemetry {
 
     private func removeContinuation(_ id: UUID) {
         continuations.removeValue(forKey: id)
+    }
+
+    private static func saturatingAdd(_ lhs: Int, _ rhs: Int) -> Int {
+        let value = lhs.addingReportingOverflow(max(0, rhs))
+        return value.overflow ? .max : value.partialValue
     }
 }

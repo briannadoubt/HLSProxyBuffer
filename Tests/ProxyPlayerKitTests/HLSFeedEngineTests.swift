@@ -120,6 +120,8 @@ final class HLSFeedEngineTests: XCTestCase {
         XCTAssertEqual(snapshot.poolOccupancy, 1)
 
         await engine.stop()
+        XCTAssertEqual(engine.analytics.snapshot.activeAttemptCount, 0)
+        XCTAssertEqual(engine.analytics.snapshot.staleEventCount, 0)
     }
 
     func testStaleViewportSignalCannotMoveTargetOrActiveFocusBackward() async throws {
@@ -417,6 +419,73 @@ final class HLSFeedEngineTests: XCTestCase {
         XCTAssertEqual(telemetry.snapshot.stallCount, 2, "stop must close an in-flight stall")
     }
 
+    func testAnalyticsAutomaticallyPreservesCorrelationAcrossPredictionAndWarmHandoff() async throws {
+        let items = makeItems(count: 3)
+        let policy = try makePolicy(maximumPlayerCount: 2)
+        let factory = FakeFeedSessionFactory()
+        let analytics = PlaybackAnalyticsTimeline(configuration: .init(
+            eventBufferCapacity: 128,
+            maximumActiveAttemptCount: 4
+        ))
+        let engine = try makeEngine(
+            items: items,
+            policy: policy,
+            factory: factory,
+            analytics: analytics
+        )
+        let eventTask = Task { @MainActor in
+            var events: [PlaybackAnalytics.Event] = []
+            for await event in analytics.events { events.append(event) }
+            return events
+        }
+
+        try await engine.update(signal(generation: 1, focused: items[0].id))
+        var settled = await engine.waitUntilSettled()
+        let warmID = try XCTUnwrap(settled.playbacks.first { $0.phase == .warm }?.itemID)
+        let warmSession = try XCTUnwrap(factory.session(loadedWith: warmID))
+        warmSession.publishStreaming(streamingSnapshot(originBytes: 2_048))
+        await Task.yield()
+
+        try await engine.update(signal(generation: 2, focused: warmID))
+        settled = await engine.waitUntilSettled()
+        XCTAssertEqual(settled.activeItemID, warmID)
+        warmSession.publishStreaming(streamingSnapshot(originBytes: 4_096))
+        await Task.yield()
+        await engine.stop()
+
+        let events = await eventTask.value
+        let warmOriginEvent = try XCTUnwrap(events.first { event in
+            event.measurements.contains {
+                $0.name.encodedValue == "origin_bytes" && $0.value == 2_048
+            }
+        })
+        let correlated = events.filter { $0.correlation == warmOriginEvent.correlation }
+        XCTAssertTrue(correlated.contains {
+            $0.dimensions.values["feed_intent"] == "predicted"
+        })
+        XCTAssertTrue(correlated.contains {
+            $0.dimensions.values["feed_intent"] == "focused"
+                && $0.dimensions.values["cache_reuse"] == "warm"
+        })
+        XCTAssertTrue(correlated.contains { $0.lifecycle == .handoffCompleted })
+        XCTAssertTrue(correlated.contains {
+            $0.source == .origin
+                && $0.dimensions.values["network_leg"] == "proxy_origin"
+        })
+        XCTAssertTrue(correlated.contains { event in
+            event.measurements.contains {
+                $0.name.encodedValue == "origin_bytes" && $0.value == 2_048
+            }
+        })
+        let sequences = events.compactMap { event in
+            event.measurements.first { $0.name.encodedValue == "timeline_sequence" }?.value
+        }
+        XCTAssertEqual(sequences, sequences.sorted())
+        XCTAssertEqual(Set(sequences).count, sequences.count)
+        XCTAssertEqual(analytics.snapshot.activeAttemptCount, 0)
+        XCTAssertEqual(analytics.snapshot.staleEventCount, 0)
+    }
+
     func testFiveHundredTransitionsLeaveNoTasksObserversOrListeners() async throws {
         struct EnduranceReport: Codable {
             let transitionCount: Int
@@ -497,7 +566,8 @@ final class HLSFeedEngineTests: XCTestCase {
         items: [FeedPlaybackItem],
         policy: FeedPlaybackPolicy,
         factory: FakeFeedSessionFactory,
-        telemetry: HLSFeedTelemetry? = nil
+        telemetry: HLSFeedTelemetry? = nil,
+        analytics: PlaybackAnalyticsTimeline? = nil
     ) throws -> HLSFeedEngine {
         let backend = ImmediateFeedPreparationBackend()
         let coordinator = try FeedCoordinator(items: items, policy: policy, backend: backend)
@@ -506,7 +576,31 @@ final class HLSFeedEngineTests: XCTestCase {
             policy: policy,
             coordinator: coordinator,
             sessionFactory: { configuration in factory.make(configuration: configuration) },
-            telemetry: telemetry ?? HLSFeedTelemetry()
+            telemetry: telemetry ?? HLSFeedTelemetry(),
+            analytics: analytics ?? PlaybackAnalyticsTimeline()
+        )
+    }
+
+    private func streamingSnapshot(originBytes: Int) -> HLSStreamingTelemetry.Snapshot {
+        .init(
+            segmentFetchLatency: .init(
+                upperBounds: [1],
+                bucketCounts: [1, 0],
+                count: 1,
+                sum: 0.1,
+                minimum: 0.1,
+                maximum: 0.1
+            ),
+            fetchErrorCounts: [:],
+            retryOutcomeCounts: [.successWithoutRetry: 1],
+            cacheHitCount: 1,
+            cacheMissCount: 1,
+            liveEdgeDistanceSeconds: nil,
+            variantSwitchReasonCounts: [:],
+            latestVariantSwitchReason: nil,
+            originByteCount: originBytes,
+            schedulerScheduledCount: 2,
+            schedulerReadyCount: 2
         )
     }
 
@@ -649,6 +743,10 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     private let failingItemIDs: Set<FeedItemID>
     private let failsPreparation: Bool
     private var continuations: [UUID: AsyncStream<PlayerState>.Continuation] = [:]
+    private var streamingContinuations: [
+        UUID: AsyncStream<HLSStreamingTelemetry.Snapshot>.Continuation
+    ] = [:]
+    private var streamingSnapshot = HLSStreamingTelemetry.Snapshot.empty
 
     init(
         configuration: ProxyPlayerConfiguration,
@@ -675,6 +773,17 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
                     guard let self, self.continuations.removeValue(forKey: id) != nil else { return }
                     self.activeStateObserverCount -= 1
                 }
+            }
+        }
+    }
+
+    func telemetryUpdates() async -> AsyncStream<HLSStreamingTelemetry.Snapshot> {
+        let id = UUID()
+        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            streamingContinuations[id] = continuation
+            continuation.yield(streamingSnapshot)
+            continuation.onTermination = { [weak self] _ in
+                Task { @MainActor in self?.streamingContinuations.removeValue(forKey: id) }
             }
         }
     }
@@ -730,6 +839,8 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
         transition(to: PlayerState())
         for continuation in continuations.values { continuation.finish() }
         continuations.removeAll()
+        for continuation in streamingContinuations.values { continuation.finish() }
+        streamingContinuations.removeAll()
         activeStateObserverCount = 0
     }
 
@@ -748,6 +859,11 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
 
     func recoverPlayback() {
         transition(to: PlayerState(status: .ready, bufferDepthSeconds: 2))
+    }
+
+    func publishStreaming(_ snapshot: HLSStreamingTelemetry.Snapshot) {
+        streamingSnapshot = snapshot
+        for continuation in streamingContinuations.values { continuation.yield(snapshot) }
     }
 
     private func transition(to state: PlayerState) {
