@@ -10,7 +10,7 @@ jobs:
   build:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Release build with warnings as errors
         run: swift build -c release -Xswiftc -warnings-as-errors
       - name: Thread Sanitizer
@@ -28,7 +28,7 @@ jobs:
         run: bash Scripts/run-ci.sh
       - name: Upload feed qualification evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hls-feed-qualification-${{ github.run_id }}
           path: ci-artifacts
