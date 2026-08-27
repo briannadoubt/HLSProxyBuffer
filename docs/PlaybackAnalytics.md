@@ -65,6 +65,50 @@ errors, URLs, rendition URIs, server addresses, headers, and credentials are
 not measurement values. Collectors convert those details to approved
 categories and numeric facts before constructing an event.
 
+## AVFoundation collection
+
+`AVPlaybackMetricCollector` follows an `AVPlayer` across `currentItem`
+replacement and publishes sanitized `.avFoundation` events through a bounded
+`AsyncStream`. On iOS 18, tvOS 18, macOS 15, Mac Catalyst 18, and visionOS 2 or
+newer, it consumes the player's native `AVPlayerItem.allMetrics()` sequence.
+That path captures startup and likely-to-keep-up timing, stalls, rate and seek
+changes, variant switches, recoverable and fatal errors, HLS playlist/segment/
+content-key resource counts, and the terminal playback summary described in
+[Explore media performance metrics in AVFoundation](https://developer.apple.com/videos/play/wwdc2024/10113/).
+
+Earlier deployments use an explicitly identified `legacyFallback` path built
+from player/item observable state, access and error logs, and playback
+notifications. The fallback deliberately reports less detail rather than
+inventing native metrics. Both paths map into the same versioned contract.
+
+```swift
+let correlation = PlaybackAnalytics.Correlation(
+    sessionID: .init(),
+    playbackID: .init(),
+    itemID: .init()
+)
+let collector = AVPlaybackMetricCollector(correlation: correlation)
+collector.attach(to: player)
+
+for await event in collector.events {
+    // Send the typed event to the bounded delivery pipeline.
+}
+
+collector.stop()
+```
+
+Collection is item-generation scoped: replacement stops the previous source,
+and late events from that source are rejected. `stop()` invalidates the player
+observation, cancels the native metrics task or every fallback observer, and
+finishes the stream. The public `Snapshot` exposes the selected path, bounded
+stream drops, and live task/observer counts so teardown is directly testable.
+
+The native adapter reads resource objects only long enough to derive numeric
+duration, byte, cache, success, and typed request-count measurements. URLs,
+server addresses, request/response headers, native session identifiers, error
+objects, and error text never cross the adapter boundary. The legacy adapter
+applies the same rule to access/error logs.
+
 ## Schema compatibility
 
 The schema uses `{major, minor}` versions.
