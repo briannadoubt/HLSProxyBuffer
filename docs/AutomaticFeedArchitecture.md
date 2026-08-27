@@ -101,8 +101,9 @@ should target the automatic contract rather than manually registering players.
 
 ## Policy and capability composition
 
-HLS-14 will expose typed presets for short-form, paged, continuous/windowed,
-long-form, live, and offline-first workloads. Focused override groups cover:
+`FeedPlaybackPolicy` exposes typed presets for short-form, paged,
+continuous/windowed, long-form, live, and offline-first workloads. Focused
+override groups cover:
 
 - prefetch horizon and leading-segment target;
 - item, byte, memory, and disk budgets;

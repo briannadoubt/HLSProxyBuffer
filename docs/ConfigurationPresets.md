@@ -1,5 +1,47 @@
 # Configuration presets
 
+## Automatic feed policies
+
+`FeedPlaybackPolicy` is the application-facing policy for the automatic feed
+engine. It composes the lower-level player presets below with typed prefetch,
+budget, concurrency, eviction, network, retry, looping, and low-power groups.
+Start from a workload preset and replace only the groups your product has
+measured reason to change:
+
+```swift
+let base = FeedPlaybackPolicy.preset(.shortFormFeed)
+var budget = base.budget
+budget.diskCacheBytes = 1_024 * 1_024 * 1_024
+
+let policy = try base.applying(.init(budget: budget))
+```
+
+| Feed preset | Intended behavior |
+| --- | --- |
+| `shortFormFeed` | Two items ahead, one behind, shallow leading segments, focused-item looping, three pooled players |
+| `pagedFeed` | Symmetric previous/next preparation for discrete page snaps |
+| `continuousWindowedFeed` | A larger velocity-directed forward window with strict item/byte/task bounds |
+| `longForm` | One focused item, deep segment buffering, persistent disk reuse |
+| `live` | LL-HLS defaults, one predicted destination, small expiring memory state, no disk cache |
+| `offlineFirst` | Large persistent disk reuse, connectivity waiting, and no expensive-network access by default |
+
+Every preset passes `validate()`. `applying(_:)` replaces whole typed groups and
+validates before returning; when applying several replacements, later non-`nil`
+groups win. Invalid counts, budgets, cache/eviction combinations, buffer times,
+concurrency, and low-power caps return `FeedPlaybackPolicy.ValidationError`
+with stable issues.
+
+Call `adaptedForLowPowerMode(true)` when the host enters low-power mode. It
+reduces only speculative item/segment work and preparation/fetch/player
+concurrency. The focused-item reservation, focused buffer target, network
+access policy, retry semantics, and cache contents remain intact.
+
+`makePlanningLimits()` feeds the pure planner. `makeProxyPlayerConfiguration()`
+maps the same policy into the existing validated HLS player/network/retry/cache
+types, so there is no second transport or cache configuration stack.
+
+## Player-level presets
+
 `ProxyPlayerConfiguration.preset(_:)` provides four internally validated
 starting points. A preset is intentionally not an automatic tuner: copy it,
 adjust the public policy values for the stream and device class, call
