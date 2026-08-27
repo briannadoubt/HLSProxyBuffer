@@ -15,6 +15,15 @@ final class FeedPlaybackPolicyTests: XCTestCase {
         }
     }
 
+    func testNamedPolicyValuesMatchPresetFactory() {
+        XCTAssertEqual(FeedPlaybackPolicy.shortFormFeed, .preset(.shortFormFeed))
+        XCTAssertEqual(FeedPlaybackPolicy.pagedFeed, .preset(.pagedFeed))
+        XCTAssertEqual(FeedPlaybackPolicy.continuousWindowedFeed, .preset(.continuousWindowedFeed))
+        XCTAssertEqual(FeedPlaybackPolicy.longForm, .preset(.longForm))
+        XCTAssertEqual(FeedPlaybackPolicy.live, .preset(.live))
+        XCTAssertEqual(FeedPlaybackPolicy.offlineFirst, .preset(.offlineFirst))
+    }
+
     func testPresetWorkloadIntentIsExplicit() throws {
         let shortForm = FeedPlaybackPolicy.preset(.shortFormFeed)
         XCTAssertEqual(shortForm.looping, .focusedItem)

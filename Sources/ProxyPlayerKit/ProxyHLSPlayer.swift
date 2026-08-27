@@ -23,6 +23,11 @@ public struct AuxiliaryRenditionRegistration: Sendable, Equatable {
     public let isForced: Bool
     public let characteristics: [String]
 
+    /// Creates one proxy-backed player session.
+    ///
+    /// Pass `sharedCache` only when a higher-level owner coordinates its
+    /// capacity and lifetime. Shared caches are preserved across item loads;
+    /// standalone players retain the existing per-load isolation behavior.
     public init(
         kind: HLSManifest.Rendition.Kind,
         groupId: String,
@@ -140,6 +145,7 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private let logger: Logger
     @ObservationIgnored private let manifestProcessor = ManifestProcessor()
     @ObservationIgnored private let cache: HLSSegmentCache
+    @ObservationIgnored private let preservesSharedCacheBetweenLoads: Bool
     @ObservationIgnored private let scheduler: SegmentPrefetchScheduler
     @ObservationIgnored private let playlistRefresher: PlaylistRefreshController
     @ObservationIgnored private let playlistStore = PlaylistStore()
@@ -191,7 +197,8 @@ public final class ProxyHLSPlayer {
         configuration: ProxyPlayerConfiguration = .init(),
         logger: Logger = ProxyPlayerLogger(),
         diagnostics: ProxyPlayerDiagnostics = .init(),
-        telemetry: HLSStreamingTelemetry = .init()
+        telemetry: HLSStreamingTelemetry = .init(),
+        sharedCache: HLSSegmentCache? = nil
     ) {
         self.configuration = configuration
         self.appliedNetworkPolicy = configuration.networkPolicy
@@ -201,6 +208,7 @@ public final class ProxyHLSPlayer {
         self.logger = logger
         self.diagnostics = diagnostics
         self.telemetry = telemetry
+        self.preservesSharedCacheBetweenLoads = sharedCache != nil
         self.throughputEstimator = ThroughputEstimator(configuration: .init(window: configuration.abrPolicy.estimatorWindow))
         self.adaptiveController = AdaptiveVariantController(policy: Self.abrPolicy(from: configuration), logger: logger)
         self.segmentFetcher = HLSSegmentFetcher(
@@ -208,7 +216,7 @@ public final class ProxyHLSPlayer {
             networkPolicy: configuration.networkPolicy,
             retryPolicy: configuration.segmentRetryPolicy
         )
-        self.cache = HLSSegmentCache(
+        self.cache = sharedCache ?? HLSSegmentCache(
             capacityBytes: configuration.cachePolicy.memoryCapacityBytes,
             diskDirectory: ProxyHLSPlayer.diskDirectory(
                 for: configuration.cachePolicy,
@@ -584,7 +592,9 @@ public final class ProxyHLSPlayer {
 
         didPreparePlayerForCurrentLoad = false
         await clearResolvedRenditions()
-        await cache.clear()
+        if !preservesSharedCacheBetweenLoads {
+            await cache.clear()
+        }
         await throughputEstimator.reset()
         await adaptiveController.reset()
         try ensureActiveSession(generation)
@@ -724,7 +734,9 @@ public final class ProxyHLSPlayer {
         renditionRefreshTasks.removeAll()
         await playlistRefresher.stop()
         await clearResolvedRenditions()
-        await cache.clear()
+        if !preservesSharedCacheBetweenLoads {
+            await cache.clear()
+        }
         await throughputEstimator.reset()
         await adaptiveController.reset()
         try ensureActiveSession(generation)

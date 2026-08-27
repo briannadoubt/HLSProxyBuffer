@@ -114,32 +114,54 @@ The checked contract is 10,000 representative updates with planning p95 at or
 below 1 ms. The benchmark prints the observed p95 and fails when the threshold
 is exceeded.
 
-## Target public experience
+## Public feed experience
 
-HLS-17 and HLS-19 will finish an API with this shape (names remain subject to
-source-compatible refinement while those tickets are implemented):
+`HLSFeedEngine` is the owning runtime boundary. A complete integration has one
+engine, one typed policy, viewport-signal updates, and engine-backed video
+surfaces:
 
 ```swift
-let engine = HLSFeedEngine(
+let engine = try HLSFeedEngine(
     items: items,
     policy: .shortFormFeed
 )
 
 for await signal in feedSignals {
-    await engine.update(signal)
+    try await engine.update(signal)
 }
 
 HLSFeedVideo(engine: engine, itemID: item.id)
+
+// When the owning feed session ends:
+await engine.stop()
 ```
 
-There is one engine, one typed policy, and signal updates. The playback surface
-borrows an engine-owned lease; it does not expose ownership of an `AVPlayer`,
-proxy server, cache, or segment scheduler.
+`HLSFeedVideo` subscribes to bounded engine snapshots and attaches only to a
+warm or focused lease. It never creates, loads, plays, pauses, or destroys an
+`AVPlayer`. The engine automatically pauses speculative sessions, starts the
+ready focused destination, preserves the destination's existing player item at
+handoff, and detaches recycled leases from their surfaces.
+
+`HLSFeedEngineSnapshot` is `Equatable` and fixed-size under the player-pool
+limit. It reports target and actual focus, lease phase/state, failures, current
+and high-water occupancy, active loads, ordered-loop destination requests, and
+discarded stale completions. Observation consumers can read `engine.snapshot`;
+imperative consumers use the newest-only `engine.updates()` stream. Playback
+rate and live/DVR controls are addressed through the engine, so even imperative
+adopters do not borrow player ownership.
+
+The engine creates one shared, policy-bounded memory/disk cache for predictive
+preparation and every pooled `ProxyHLSPlayer`. Pooled players preserve that
+shared cache when their proxy, scheduler, observer, and `AVPlayerItem` state is
+recycled. A generation-scoped lease has exactly one slot owner; stale load
+completion cannot publish after reassignment. Off-window grace tasks,
+preparation tasks, load tasks, state streams, playback-end observers, proxy
+listeners, and player items are cancelled and awaited by `stop()`.
 
 The existing `FeedBufferController` remains source compatible while this work
-lands, but its caller-owned player registration model is transitional. HLS-17
-will move its useful warm/cold behavior behind `HLSFeedEngine`; new integrations
-should target the automatic contract rather than manually registering players.
+lands, but its caller-owned player registration model is transitional. New
+integrations should target `HLSFeedEngine` rather than manually registering
+players.
 
 ## Policy and capability composition
 
@@ -192,7 +214,8 @@ machine-readable run summary.
 - HLS-10: executable stitching contract and real routes.
 - HLS-11: live edge, DVR windows, and feed-compatible controls (implemented).
 - HLS-16: bounded predictive coordination and obsolete-work cancellation.
-- HLS-17: pooled resources, seamless handoff, and the simple public API.
+- HLS-17: pooled resources, seamless handoff, and the simple public API
+  (implemented).
 - HLS-18: feed-quality and resource instrumentation.
 - HLS-19: SwiftUI demo proving every policy and source class.
 - HLS-20: release qualification: 500 core transitions, 100 rapid UI
@@ -209,10 +232,15 @@ generation-correct warm reuse, low-power caps, typed catalog failures, segment
 retry, per-origin serialization, and both memory and cross-backend disk reuse.
 The stress suite drives all seven standard traces (532 observations) through
 the actor and asserts item, byte, and preparation-task high-water marks at every
-step.
+step. The engine suite adds a deterministic 500-transition ownership run,
+generation-stale completion rejection, failure teardown, looping/live/stitched
+composition, and a real AVPlayer fixture handoff that proves the warmed player
+and current item are unchanged when focus transfers.
 
 ```sh
 swift test --filter FeedCoordinator
+swift test --filter HLSFeedEngineTests
+RUN_PROXY_AV_TESTS=1 swift test --filter HLSFeedEngineAVIntegrationTests
 ```
 
 The full repository, Thread Sanitizer, warning-free release, simulator, and
