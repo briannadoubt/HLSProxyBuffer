@@ -9,6 +9,39 @@ import Network
 
 @MainActor
 final class ProxyPlayerKitObservationTests: XCTestCase {
+    func testTelemetryIsObservableAndAvailableAsBoundedAsyncStream() async {
+        let telemetry = HLSStreamingTelemetry(configuration: .init(
+            latencyUpperBounds: [0.1, 1]
+        ))
+        let player = ProxyHLSPlayer(telemetry: telemetry)
+        for _ in 0..<10 { await Task.yield() }
+        let observed = expectation(description: "Telemetry observation fired")
+
+        withObservationTracking {
+            _ = player.telemetrySnapshot.segmentFetchLatency.count
+        } onChange: {
+            observed.fulfill()
+        }
+
+        let stream = await player.telemetryUpdates()
+        var iterator = stream.makeAsyncIterator()
+        _ = await iterator.next()
+        await telemetry.recordFetch(.init(
+            url: URL(string: "https://cdn.example.com/observed.ts")!,
+            duration: 0.2,
+            byteCount: 1_024,
+            attemptCount: 1,
+            retryCount: 0,
+            retryOutcome: .successWithoutRetry,
+            errorCategory: nil
+        ))
+
+        await fulfillment(of: [observed], timeout: 1)
+        let streamed = await iterator.next()
+        XCTAssertEqual(player.telemetrySnapshot.segmentFetchLatency.count, 1)
+        XCTAssertEqual(streamed?.segmentFetchLatency.count, 1)
+    }
+
     func testPlaybackRateIsObservableAndValidated() async {
         let player = ProxyHLSPlayer()
         let expectation = expectation(description: "Playback rate observation fired")
