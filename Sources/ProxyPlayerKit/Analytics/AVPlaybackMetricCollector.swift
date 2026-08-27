@@ -84,6 +84,24 @@ public final class AVPlaybackMetricCollector {
         correlation: PlaybackAnalytics.Correlation,
         dimensions: PlaybackAnalytics.Dimensions = .empty,
         eventBufferCapacity: Int = 64,
+        clock: PlaybackAnalytics.TimelineClock
+    ) {
+        self.correlation = correlation
+        self.dimensions = dimensions
+        self.clock = clock
+        sourceFactory = ProductionAVPlaybackMetricSourceFactory()
+        let pair = AsyncStream.makeStream(
+            of: PlaybackAnalytics.Event.self,
+            bufferingPolicy: .bufferingNewest(min(max(1, eventBufferCapacity), 256))
+        )
+        events = pair.stream
+        continuation = pair.continuation
+    }
+
+    init(
+        correlation: PlaybackAnalytics.Correlation,
+        dimensions: PlaybackAnalytics.Dimensions = .empty,
+        eventBufferCapacity: Int = 64,
         clock: PlaybackAnalytics.TimelineClock,
         sourceFactory: any AVPlaybackMetricSourceFactory
     ) {

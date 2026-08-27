@@ -109,6 +109,43 @@ server addresses, request/response headers, native session identifiers, error
 objects, and error text never cross the adapter boundary. The legacy adapter
 applies the same rule to access/error logs.
 
+## Automatic cross-layer timeline
+
+`HLSFeedEngine.analytics` is the default integration point for feed products.
+The engine creates an opaque attempt when a prepared item enters its player
+pool and preserves that correlation while prediction becomes focus, a warm
+player is handed off, the proxy is reused, or the feed generation advances.
+Applications consume one bounded sequence and do not join player, proxy,
+origin, cache, or scheduler streams themselves:
+
+```swift
+for await event in engine.analytics.events {
+    await exporter.accept(event)
+}
+```
+
+The engine merges `HLSFeedTelemetry`, `HLSStreamingTelemetry`, player state,
+and `AVPlaybackMetricCollector` events onto one monotonic clock. Every event
+contains a `timeline_sequence` measurement for deterministic ordering and the
+same three opaque correlation identifiers for the lifetime of the attempt.
+Late callbacks carry an unforgeable attempt token and are rejected after pool
+reuse or teardown.
+
+Attribution is fixed-cardinality. `cache_reuse` distinguishes cold and warm
+preparation; `feed_intent` distinguishes focused and predicted work;
+`media_kind` distinguishes VOD, live, and stitched playback; `network_leg`
+distinguishes AVPlayer-to-local-proxy from local-proxy-to-origin work; and
+`cache_tier` distinguishes memory, disk, origin, or not-applicable work. Raw
+URLs, item identifiers, rendition names, error messages, and cancellation
+reasons are never dimensions.
+
+`PlaybackAnalyticsTimeline.Configuration` bounds both its newest-event buffer
+and active attempt table. The snapshot exposes emitted, dropped, stale, and
+evicted counts. Engine shutdown cancels streaming and native AV metrics tasks,
+retires every attempt, and finishes the analytics stream. Standalone users may
+also feed sanitized adapters to `PlaybackAnalyticsTimeline`, but normal feed
+adopters only need the engine-owned stream.
+
 ## Schema compatibility
 
 The schema uses `{major, minor}` versions.

@@ -85,6 +85,8 @@ public actor HLSSegmentCache: Caching {
     public struct Metrics: Equatable, Sendable {
         public let hitCount: Int
         public let missCount: Int
+        public let memoryHitCount: Int
+        public let diskHitCount: Int
         public let totalBytes: Int
         public let diskBytes: Int
         public let namespaceMetrics: [Namespace: NamespaceMetrics]
@@ -92,12 +94,16 @@ public actor HLSSegmentCache: Caching {
         public init(
             hitCount: Int,
             missCount: Int,
+            memoryHitCount: Int = 0,
+            diskHitCount: Int = 0,
             totalBytes: Int,
             diskBytes: Int,
             namespaceMetrics: [Namespace: NamespaceMetrics] = [:]
         ) {
             self.hitCount = max(0, hitCount)
             self.missCount = max(0, missCount)
+            self.memoryHitCount = max(0, memoryHitCount)
+            self.diskHitCount = max(0, diskHitCount)
             self.totalBytes = max(0, totalBytes)
             self.diskBytes = max(0, diskBytes)
             self.namespaceMetrics = namespaceMetrics
@@ -128,6 +134,8 @@ public actor HLSSegmentCache: Caching {
     private var residentBytes = 0
     private var hitCount = 0
     private var missCount = 0
+    private var memoryHitCount = 0
+    private var diskHitCount = 0
     private var namespaceCounters = Dictionary(
         uniqueKeysWithValues: Namespace.allCases.map { ($0, MutableNamespaceMetrics()) }
     )
@@ -212,6 +220,7 @@ public actor HLSSegmentCache: Caching {
                 foundExpiredEntry = true
             } else {
                 hitCount += 1
+                memoryHitCount += 1
                 namespaceCounters[namespace, default: .init()].hitCount += 1
                 recordAccess(for: key)
                 return value
@@ -227,6 +236,7 @@ public actor HLSSegmentCache: Caching {
             switch lookup {
             case .hit(let data, let age):
                 hitCount += 1
+                diskHitCount += 1
                 namespaceCounters[namespace, default: .init()].hitCount += 1
                 insertIntoMemory(
                     data,
@@ -272,6 +282,8 @@ public actor HLSSegmentCache: Caching {
         return Metrics(
             hitCount: hitCount,
             missCount: missCount,
+            memoryHitCount: memoryHitCount,
+            diskHitCount: diskHitCount,
             totalBytes: residentBytes,
             diskBytes: diskMetrics.byteCount,
             namespaceMetrics: values

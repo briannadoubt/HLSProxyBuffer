@@ -1973,6 +1973,12 @@ public final class ProxyHLSPlayer {
                 "scheduled=\(schedulerTelemetry.scheduledSequences) ready=\(schedulerTelemetry.readyCount) parts=\(schedulerTelemetry.readyPartCount) failures=\(schedulerTelemetry.failureCount)",
                 category: .scheduler
             )
+            await metrics.updateSchedulerTelemetry(
+                scheduledCount: schedulerTelemetry.scheduledSequences.count,
+                readyCount: schedulerTelemetry.readyCount,
+                failureCount: schedulerTelemetry.failureCount,
+                readyPartCount: schedulerTelemetry.readyPartCount
+            )
             await metrics.updateCacheMetrics(cache.metrics())
             guard schedulerTelemetry.failureCount > 0 else { return }
             await controller.registerFailure()

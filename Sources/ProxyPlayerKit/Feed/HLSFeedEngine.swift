@@ -97,6 +97,7 @@ protocol HLSFeedPlayerSession: AnyObject {
     var feedPlatformPlayer: AVPlayer? { get }
 
     func stateUpdates() -> AsyncStream<PlayerState>
+    func telemetryUpdates() async -> AsyncStream<HLSStreamingTelemetry.Snapshot>
     func load(from remoteURL: URL, quality: HLSRewriteConfiguration.QualityPolicy) async
     func load(clips: [ProxyPlaybackClip]) async throws
     func prepareForImmediatePlayback() async -> Bool
@@ -108,6 +109,12 @@ protocol HLSFeedPlayerSession: AnyObject {
     func updateConfiguration(_ configuration: ProxyPlayerConfiguration) async
     func stopAndWait() async
     func restartPlayback() async
+}
+
+extension HLSFeedPlayerSession {
+    func telemetryUpdates() async -> AsyncStream<HLSStreamingTelemetry.Snapshot> {
+        AsyncStream { continuation in continuation.finish() }
+    }
 }
 
 extension ProxyHLSPlayer: HLSFeedPlayerSession {
@@ -167,6 +174,7 @@ public final class HLSFeedEngine {
         var didCompleteInitialLoad: Bool
         var hasStartedPlayback: Bool
         var telemetryPath: HLSFeedTelemetry.Path
+        let analyticsAttempt: PlaybackAnalyticsTimeline.Attempt
         var stallStartedAt: Duration?
     }
 
@@ -185,6 +193,9 @@ public final class HLSFeedEngine {
         var lease: Lease?
         var loadTask: Task<Void, Never>?
         var observationTask: Task<Void, Never>?
+        var streamingTelemetryTask: Task<Void, Never>?
+        var avMetricTask: Task<Void, Never>?
+        var avMetricCollector: AVPlaybackMetricCollector?
         var releaseTask: Task<Void, Never>?
         var playbackEndObserver: NSObjectProtocol?
         var playbackStartObservation: NSKeyValueObservation?
@@ -210,6 +221,17 @@ public final class HLSFeedEngine {
             playbackFailureObservation = nil
             return task
         }
+
+        func cancelAnalyticsObservers() -> [Task<Void, Never>] {
+            let tasks = [streamingTelemetryTask, avMetricTask].compactMap { $0 }
+            streamingTelemetryTask?.cancel()
+            streamingTelemetryTask = nil
+            avMetricTask?.cancel()
+            avMetricTask = nil
+            avMetricCollector?.stop()
+            avMetricCollector = nil
+            return tasks
+        }
     }
 
     typealias SessionFactory = @MainActor (ProxyPlayerConfiguration) -> any HLSFeedPlayerSession
@@ -219,6 +241,9 @@ public final class HLSFeedEngine {
     /// Observation snapshot, bounded events, signposts, and JSON summaries for
     /// the complete automatic feed lifecycle.
     public let telemetry: HLSFeedTelemetry
+    /// One ordered, privacy-bounded timeline spanning feed, player, proxy,
+    /// origin, cache, scheduler, and native AVFoundation metrics.
+    public let analytics: PlaybackAnalyticsTimeline
 
     @ObservationIgnored private var items: [FeedPlaybackItem]
     @ObservationIgnored private var itemsByID: [FeedItemID: FeedPlaybackItem]
@@ -259,11 +284,13 @@ public final class HLSFeedEngine {
         items: [FeedPlaybackItem],
         policy: FeedPlaybackPolicy,
         sourceTransportPolicy: HLSFeedSourceTransportPolicy = .secureOnly,
-        telemetryConfiguration: HLSFeedTelemetry.Configuration = .init()
+        telemetryConfiguration: HLSFeedTelemetry.Configuration = .init(),
+        analyticsConfiguration: PlaybackAnalyticsTimeline.Configuration = .init()
     ) throws {
         let validatedPolicy = try policy.validated()
         try Self.validateSourceURLs(in: items, policy: sourceTransportPolicy)
         let telemetry = HLSFeedTelemetry(configuration: telemetryConfiguration)
+        let analytics = PlaybackAnalyticsTimeline(configuration: analyticsConfiguration)
         let sharedCache = Self.makeSharedCache(policy: validatedPolicy)
         let backend = try HLSFeedPreparationBackend(
             policy: validatedPolicy,
@@ -283,6 +310,7 @@ public final class HLSFeedEngine {
                 ProxyHLSPlayer(configuration: configuration, sharedCache: sharedCache)
             },
             telemetry: telemetry,
+            analytics: analytics,
             sharedCache: sharedCache,
             sourceTransportPolicy: sourceTransportPolicy
         )
@@ -294,6 +322,7 @@ public final class HLSFeedEngine {
         coordinator: FeedCoordinator,
         sessionFactory: @escaping SessionFactory,
         telemetry: HLSFeedTelemetry = HLSFeedTelemetry(),
+        analytics: PlaybackAnalyticsTimeline = PlaybackAnalyticsTimeline(),
         sharedCache: HLSSegmentCache? = nil,
         telemetryClock: FeedCoordinatorClock = .continuous,
         sourceTransportPolicy: HLSFeedSourceTransportPolicy = .secureOnly
@@ -311,6 +340,7 @@ public final class HLSFeedEngine {
         self.coordinator = coordinator
         self.sessionFactory = sessionFactory
         self.telemetry = telemetry
+        self.analytics = analytics
         self.sharedCache = sharedCache
         self.telemetryClock = telemetryClock
         startCoordinatorObservation()
@@ -503,7 +533,10 @@ public final class HLSFeedEngine {
         let loadTasks = slots.compactMap(\.loadTask)
         let releaseTasks = slots.compactMap(\.releaseTask)
         let observationTasks = slots.compactMap(\.observationTask)
+        let analyticsAttempts = slots.compactMap { $0.lease?.analyticsAttempt }
+        var analyticsTasks: [Task<Void, Never>] = []
         for slot in slots {
+            slot.isReleasing = true
             if var lease = slot.lease {
                 finishStallIfNeeded(in: &lease)
                 slot.lease = lease
@@ -511,13 +544,18 @@ public final class HLSFeedEngine {
             slot.loadTask?.cancel()
             slot.releaseTask?.cancel()
             slot.cancelLeaseObservers()
+            analyticsTasks += slot.cancelAnalyticsObservers()
         }
         await coordinatorObservationTask?.value
         await cacheSampleTask?.value
         for task in loadTasks { await task.value }
         for task in releaseTasks { await task.value }
         for task in observationTasks { await task.value }
+        for task in analyticsTasks { await task.value }
         for slot in slots { await slot.session.stopAndWait() }
+        for attempt in analyticsAttempts where analytics.isActive(attempt) {
+            analytics.end(attempt, lifecycle: .cancelled)
+        }
 
         slots.removeAll()
         slotIDByItemID.removeAll()
@@ -529,6 +567,7 @@ public final class HLSFeedEngine {
         latestCoordinatorSnapshot = nil
         rebuildSnapshot()
         telemetry.finish()
+        analytics.finish()
         for continuation in continuations.values {
             continuation.yield(snapshot)
             continuation.finish()
@@ -611,6 +650,10 @@ public final class HLSFeedEngine {
                 role: role,
                 source: item.source
             )
+            analytics.updateAttribution(
+                Self.analyticsAttribution(from: lease.telemetryPath),
+                for: lease.analyticsAttempt
+            )
             slot.lease = lease
             return
         }
@@ -659,6 +702,8 @@ public final class HLSFeedEngine {
         let previousTask = slot.loadTask
         let playerCancellationRequestedAt = previousTask.map { _ in telemetryClock.now() }
         let playerCancellationPath = slot.lease?.telemetryPath
+        let previousAnalyticsAttempt = slot.lease?.analyticsAttempt
+        let previousAnalyticsTasks = slot.cancelAnalyticsObservers()
         let hadPreviousLease = slot.lease != nil
         previousTask?.cancel()
         slot.releaseTask?.cancel()
@@ -679,6 +724,9 @@ public final class HLSFeedEngine {
             role: role,
             source: item.source
         )
+        let analyticsAttempt = analytics.beginAttempt(
+            attribution: Self.analyticsAttribution(from: telemetryPath)
+        )
         if hadPreviousLease { slot.session.pause() }
         slot.lease = Lease(
             token: token,
@@ -691,25 +739,27 @@ public final class HLSFeedEngine {
             didCompleteInitialLoad: false,
             hasStartedPlayback: false,
             telemetryPath: telemetryPath,
+            analyticsAttempt: analyticsAttempt,
             stallStartedAt: nil
         )
         slotIDByItemID[item.id] = slot.id
         maximumObservedPoolOccupancy = max(maximumObservedPoolOccupancy, slotIDByItemID.count)
-        telemetry.record(.init(
+        analytics.record(prepared: prepared, attempt: analyticsAttempt)
+        recordTelemetry(.init(
             path: telemetryPath,
             payload: .cache(
                 hits: prepared.cacheHitCount,
                 misses: prepared.originFetchCount,
                 originBytesAvoided: prepared.cacheHitByteCount
             )
-        ))
+        ), attempt: analyticsAttempt)
 
         let configuration = playerConfiguration
         slot.loadTask = Task { @MainActor [weak self, weak slot] in
             if let previousTask {
                 await previousTask.value
                 if let self, let playerCancellationRequestedAt, let playerCancellationPath {
-                    self.telemetry.record(.init(
+                    self.recordTelemetry(.init(
                         path: playerCancellationPath,
                         payload: .cancellation(
                             latency: Self.seconds(
@@ -717,8 +767,12 @@ public final class HLSFeedEngine {
                             ),
                             outcome: .acknowledged
                         )
-                    ))
+                    ), attempt: previousAnalyticsAttempt)
                 }
+            }
+            for task in previousAnalyticsTasks { await task.value }
+            if let self, let previousAnalyticsAttempt {
+                self.analytics.end(previousAnalyticsAttempt, lifecycle: .cancelled)
             }
             guard let self, let slot, self.owns(slot, token: token) else { return }
             if hadPreviousLease { await slot.session.stopAndWait() }
@@ -732,6 +786,7 @@ public final class HLSFeedEngine {
                 return
             }
             self.startStateObservation(for: slot, token: token)
+            self.startStreamingTelemetryObservation(for: slot, token: token)
             do {
                 try await self.load(
                     item: item,
@@ -809,6 +864,7 @@ public final class HLSFeedEngine {
             lease.phase = .loading
         }
         slot.lease = lease
+        startAVMetricObservation(for: slot, token: token)
         slot.session.pause()
         if let failedMessage {
             failuresByItemID[lease.itemID] = .init(
@@ -842,10 +898,69 @@ public final class HLSFeedEngine {
         }
     }
 
+    private func startStreamingTelemetryObservation(for slot: Slot, token: UUID) {
+        slot.streamingTelemetryTask?.cancel()
+        slot.streamingTelemetryTask = Task { @MainActor [weak self, weak slot] in
+            guard let slot else { return }
+            let updates = await slot.session.telemetryUpdates()
+            for await snapshot in updates {
+                guard !Task.isCancelled,
+                      let self,
+                      self.owns(slot, token: token),
+                      let attempt = slot.lease?.analyticsAttempt
+                else {
+                    return
+                }
+                self.analytics.record(streaming: snapshot, attempt: attempt)
+            }
+        }
+    }
+
+    private func startAVMetricObservation(for slot: Slot, token: UUID) {
+        guard let player = slot.session.feedPlatformPlayer,
+              let attempt = slot.lease?.analyticsAttempt
+        else {
+            return
+        }
+        slot.avMetricTask?.cancel()
+        slot.avMetricCollector?.stop()
+        let collector = AVPlaybackMetricCollector(
+            correlation: attempt.correlation,
+            dimensions: analytics.dimensions(
+                for: attempt,
+                networkLeg: .playerToLocalProxy
+            ),
+            clock: analytics.clock
+        )
+        slot.avMetricCollector = collector
+        collector.attach(to: player)
+        slot.avMetricTask = Task { @MainActor [weak self, weak slot, weak collector] in
+            guard let collector else { return }
+            for await event in collector.events {
+                guard !Task.isCancelled,
+                      let self,
+                      let slot,
+                      self.owns(slot, token: token),
+                      slot.avMetricCollector === collector,
+                      let attempt = slot.lease?.analyticsAttempt
+                else {
+                    return
+                }
+                self.analytics.record(avFoundation: event, attempt: attempt)
+            }
+        }
+    }
+
     private func acceptPlayerState(_ state: PlayerState, from slot: Slot, token: UUID) {
         guard owns(slot, token: token), var lease = slot.lease else { return }
+        let previousState = lease.state
         let previousStatus = lease.state.status
         lease.state = state
+        analytics.record(
+            player: state,
+            previous: previousState,
+            attempt: lease.analyticsAttempt
+        )
         var shouldReleaseFailedSession = false
         switch state.status {
         case .ready:
@@ -907,6 +1022,16 @@ public final class HLSFeedEngine {
             reuse: destinationLease.telemetryPath.reuse,
             role: .focused,
             source: destinationLease.source
+        )
+        analytics.updateAttribution(
+            Self.analyticsAttribution(from: destinationLease.telemetryPath),
+            for: destinationLease.analyticsAttempt
+        )
+        analytics.record(
+            source: .feedEngine,
+            lifecycle: .handoffStarted,
+            priority: .important,
+            attempt: destinationLease.analyticsAttempt
         )
         destinationLease.phase = .focused
         destinationLease.hasStartedPlayback = false
@@ -1021,8 +1146,10 @@ public final class HLSFeedEngine {
             releasedLease = releasedLeaseValue
         }
         let cancellationPath = releasedLease?.telemetryPath
+        let analyticsAttempt = releasedLease?.analyticsAttempt
         slot.loadTask = nil
         let observationTask = slot.cancelLeaseObservers()
+        let analyticsTasks = slot.cancelAnalyticsObservers()
         slot.session.pause()
         slotIDByItemID.removeValue(forKey: itemID)
         slot.lease = nil
@@ -1031,17 +1158,21 @@ public final class HLSFeedEngine {
         if let loadTask {
             await loadTask.value
             if let cancellationRequestedAt, let cancellationPath {
-                telemetry.record(.init(
+                recordTelemetry(.init(
                     path: cancellationPath,
                     payload: .cancellation(
                         latency: Self.seconds(telemetryClock.now() - cancellationRequestedAt),
                         outcome: .acknowledged
                     )
-                ))
+                ), attempt: analyticsAttempt)
             }
         }
         await observationTask?.value
+        for task in analyticsTasks { await task.value }
         await slot.session.stopAndWait()
+        if let analyticsAttempt {
+            analytics.end(analyticsAttempt, lifecycle: .cancelled)
+        }
         slot.releaseTask = nil
         slot.isReleasing = false
         rebuildSnapshot()
@@ -1070,13 +1201,16 @@ public final class HLSFeedEngine {
         )
         rebuildSnapshot()
         let observationTask = slot.cancelLeaseObservers()
+        let analyticsTasks = slot.cancelAnalyticsObservers()
         slot.session.pause()
         slotIDByItemID.removeValue(forKey: lease.itemID)
         slot.lease = nil
         if activeItemID == lease.itemID { activeItemID = nil }
         if pendingFocus?.itemID == lease.itemID { completePendingFocus(succeeded: false) }
         await observationTask?.value
+        for task in analyticsTasks { await task.value }
         await slot.session.stopAndWait()
+        analytics.end(lease.analyticsAttempt, lifecycle: .failed)
         slot.loadTask = nil
         slot.isReleasing = false
         rebuildSnapshot()
@@ -1196,29 +1330,30 @@ public final class HLSFeedEngine {
     }
 
     private func recordPendingFocus(_ pendingFocus: PendingFocus, succeeded: Bool) {
-        telemetry.record(.init(
+        let attempt = slot(for: pendingFocus.itemID)?.lease?.analyticsAttempt
+        recordTelemetry(.init(
             path: pendingFocus.path,
             payload: .handoff(
                 wasReady: pendingFocus.wasReadyAtRequest,
                 succeeded: succeeded
             )
-        ))
+        ), attempt: attempt)
         if succeeded {
-            telemetry.record(.init(
+            recordTelemetry(.init(
                 path: pendingFocus.path,
                 payload: .firstFrame(latency: Self.seconds(
                     telemetryClock.now() - pendingFocus.requestedAt
                 ))
-            ))
+            ), attempt: attempt)
         }
     }
 
     private func finishStallIfNeeded(in lease: inout Lease) {
         guard let stallStartedAt = lease.stallStartedAt else { return }
-        telemetry.record(.init(
+        recordTelemetry(.init(
             path: lease.telemetryPath,
             payload: .stall(duration: Self.seconds(telemetryClock.now() - stallStartedAt))
-        ))
+        ), attempt: lease.analyticsAttempt)
         lease.stallStartedAt = nil
     }
 
@@ -1239,17 +1374,19 @@ public final class HLSFeedEngine {
         }
         let latency = value.maximumCancellationLatency.map(Self.seconds) ?? 0
         let path = cancellationTelemetryPath()
+        let attempt = targetFocusedItemID.flatMap { slot(for: $0)?.lease?.analyticsAttempt }
+            ?? activeItemID.flatMap { slot(for: $0)?.lease?.analyticsAttempt }
         for _ in 0..<acknowledgedOnTime {
-            telemetry.record(.init(
+            recordTelemetry(.init(
                 path: path,
                 payload: .cancellation(latency: latency, outcome: .acknowledged)
-            ))
+            ), attempt: attempt)
         }
         for _ in 0..<late {
-            telemetry.record(.init(
+            recordTelemetry(.init(
                 path: path,
                 payload: .cancellation(latency: latency, outcome: .late)
-            ))
+            ), attempt: attempt)
         }
         latestCancellationAcknowledgementCount = value.cancellationAcknowledgementCount
         latestLateCancellationCount = value.lateCancellationCount
@@ -1290,12 +1427,26 @@ public final class HLSFeedEngine {
     }
 
     private func recordResourceSample() {
-        telemetry.record(.init(payload: .resources(
+        let event = HLSFeedTelemetry.Event(payload: .resources(
             memoryBytes: cacheMetrics.totalBytes,
             diskBytes: cacheMetrics.diskBytes,
             playerPoolOccupancy: slotIDByItemID.count,
             proxyPoolOccupancy: slots.count
-        )))
+        ))
+        let attempt = activeItemID.flatMap { slot(for: $0)?.lease?.analyticsAttempt }
+            ?? targetFocusedItemID.flatMap { slot(for: $0)?.lease?.analyticsAttempt }
+            ?? slots.compactMap({ $0.lease?.analyticsAttempt }).first
+        recordTelemetry(event, attempt: attempt)
+    }
+
+    private func recordTelemetry(
+        _ event: HLSFeedTelemetry.Event,
+        attempt: PlaybackAnalyticsTimeline.Attempt?
+    ) {
+        telemetry.record(event)
+        if let attempt {
+            analytics.record(feed: event, attempt: attempt)
+        }
     }
 
     private func rebuildSnapshot() {
@@ -1352,6 +1503,21 @@ public final class HLSFeedEngine {
         case .stream(_, .videoOnDemand), .clips: .videoOnDemand
         }
         return HLSFeedTelemetry.Path(reuse: reuse, intent: intent, mediaKind: mediaKind)
+    }
+
+    private static func analyticsAttribution(
+        from path: HLSFeedTelemetry.Path
+    ) -> PlaybackAnalyticsTimeline.Attribution {
+        let reuse: PlaybackAnalyticsTimeline.Reuse = path.reuse == .warm ? .warm : .cold
+        let intent: PlaybackAnalyticsTimeline.Intent = path.intent == .focused
+            ? .focused
+            : .predicted
+        let mediaKind: PlaybackAnalyticsTimeline.MediaKind = switch path.mediaKind {
+        case .videoOnDemand: .videoOnDemand
+        case .live: .live
+        case .stitched: .stitched
+        }
+        return .init(reuse: reuse, intent: intent, mediaKind: mediaKind)
     }
 
     private static func seconds(_ duration: Duration) -> TimeInterval {
