@@ -139,12 +139,123 @@ distinguishes AVPlayer-to-local-proxy from local-proxy-to-origin work; and
 URLs, item identifiers, rendition names, error messages, and cancellation
 reasons are never dimensions.
 
-`PlaybackAnalyticsTimeline.Configuration` bounds both its newest-event buffer
-and active attempt table. The snapshot exposes emitted, dropped, stale, and
-evicted counts. Engine shutdown cancels streaming and native AV metrics tasks,
-retires every attempt, and finishes the analytics stream. Standalone users may
+`PlaybackAnalyticsTimeline.Configuration` bounds its newest-event buffer,
+terminal-summary buffer, and active attempt table. The snapshot exposes event
+and summary emissions/drops plus stale and evicted counts. Engine shutdown
+cancels streaming and native AV metrics tasks, retires every attempt, and
+finishes both analytics streams. Standalone users may
 also feed sanitized adapters to `PlaybackAnalyticsTimeline`, but normal feed
 adopters only need the engine-owned stream.
+
+## Terminal session summaries
+
+`PlaybackAnalyticsTimeline.summaries` publishes exactly one bounded
+`PlaybackAnalytics.Summary` for every attempt. Normal terminal calls, attempt
+table eviction, and timeline shutdown all finalize through the same
+`PlaybackSessionSummarizer`; a finalized accumulator rejects a second summary.
+The summary stream has its own configurable newest-value buffer, and
+`Snapshot.emittedSummaryCount` / `droppedSummaryCount` make downstream
+backpressure visible.
+
+```swift
+for await summary in engine.analytics.summaries {
+    await delivery.record(summary)
+}
+```
+
+Standalone collectors can construct `PlaybackSessionSummarizer` with one
+correlation and monotonic start timestamp, call `record(_:)` with sanitized
+events, then call `finish(reason:endedAt:dimensions:)` once. The accumulator
+retains scalar totals, peaks, and gauges only—never event history. Incremental
+events add counters. A native `.summaryEmitted` event merges counters by
+maximum, so AVFoundation's terminal snapshot does not count its earlier delta
+events twice. An observed `.completed` lifecycle wins over a later routine
+slot-release cancellation or incomplete shutdown, keeping the terminal reason
+and `completion_count` reconciled with the source timeline.
+
+Terminal meanings are intentionally distinct:
+
+- `completed`: the media reached its product-defined successful end.
+- `abandonedBeforeStart`: the attempt ended before first frame because focus
+  moved or the user left, rather than a transport failure.
+- `cancelled`: the owning task or explicit product action cancelled playback.
+- `backgrounded`: the app intentionally finalized because its lifecycle moved
+  playback to the background.
+- `crashed`: a caller's next-launch recovery classified a previously durable
+  in-flight marker as a process crash. Crash handlers must not perform export.
+- `failed`: playback ended because of a fatal player, proxy, or origin failure.
+- `incomplete`: bounded eviction or orderly analytics shutdown found an attempt
+  without another terminal outcome.
+- `interrupted`: an external interruption ended an otherwise valid attempt.
+
+No-first-frame attempts report `startup_abandonment_count = 1`; their
+`first_frame_latency` is absent rather than zero. The terminal reason explains
+why the abandonment happened.
+
+### Metric definitions
+
+Every rate carries its numerator and denominator as sibling measurements.
+Counts and bytes are known zeros when no matching event was observed. Optional
+latencies, gauges, and rates are omitted when their source or denominator was
+not observed; omission means unknown, never zero.
+
+| Summary measurement | Unit | Per-attempt definition / denominator | Nil rule |
+| --- | --- | --- | --- |
+| `startup_duration` | seconds | Maximum native initial-startup duration; gauge, no denominator | Omit without a native startup sample |
+| `first_frame_latency` | seconds | First engine first-frame latency from attempt start; gauge | Omit before first frame |
+| `startup_abandonment_count` | count | `1` when first-frame numerator is absent, otherwise `0`; denominator is one summary | Never nil |
+| `watch_duration` | seconds | Maximum of native watch duration and monotonic time from first frame to terminal | Never nil; zero means no watched time |
+| `completion_count` | count | `1` only for `completed`; denominator is one summary | Never nil |
+| `stall_count` | count | Sum of stall deltas, reconciled by maximum with native terminal count | Never nil |
+| `stall_duration` | seconds | Maximum of summed timed stalls and native stall-recovery duration | Never nil |
+| `rebuffer_ratio` | ratio | `stall_duration / (watch_duration + stall_duration)` | Omit when denominator is zero |
+| `average_bitrate` | bits/second | Arithmetic mean of bounded observed average-bitrate gauges | Omit without a bitrate sample |
+| `peak_bitrate` | bits/second | Maximum observed peak-bitrate gauge | Omit without a bitrate sample |
+| `variant_switch_count` | count | Sum of switch outcomes, reconciled with native terminal count | Never nil |
+| `recoverable_error_count` | count | Sum of sanitized recovered-error signals, reconciled with native terminal count | Never nil |
+| `fatal_error_count` | count | Fatal signals; at least `1` for `failed` or `crashed` | Never nil |
+| `cache_hit_count` | count | Sum of bounded cache-hit deltas | Never nil |
+| `cache_miss_count` | count | Sum of bounded cache-miss deltas | Never nil |
+| `cache_hit_rate` | ratio | `cache_hit_count / (cache_hit_count + cache_miss_count)` | Omit when request denominator is zero |
+| `origin_bytes` | bytes | Sum of proxy-to-origin response bytes | Never nil |
+| `origin_bytes_avoided` | bytes | Sum of bytes served without origin transfer | Never nil |
+| `cancellation_count` | count | Maximum of explicit count and acknowledged + late + failed cancellations; at least `1` for a cancelled terminal | Never nil |
+| `wasted_bytes` | bytes | Bytes completed after work became obsolete | Never nil |
+| `handoff_attempt_count` | count | Sum of player handoff attempts; denominator for both handoff rates | Never nil |
+| `handoff_ready_count` | count | Attempts whose destination was ready at handoff | Never nil |
+| `handoff_success_count` | count | Attempts that completed seamless handoff | Never nil |
+| `handoff_readiness_rate` | ratio | `handoff_ready_count / handoff_attempt_count` | Omit when attempt denominator is zero |
+| `handoff_success_rate` | ratio | `handoff_success_count / handoff_attempt_count` | Omit when attempt denominator is zero |
+| `live_edge_distance` | seconds | Last monotonic live-edge distance gauge before terminal | Omit for non-live or unobserved live playback |
+| `stitched_boundary_success_count` | count | Sum of successful stitched transitions | Never nil |
+| `stitched_boundary_failure_count` | count | Sum of failed stitched transitions | Never nil |
+| `peak_memory_resident_bytes` | bytes | Maximum observed managed memory occupancy | Omit without a resource sample |
+| `peak_disk_resident_bytes` | bytes | Maximum observed managed disk occupancy | Omit without a resource sample |
+| `peak_player_pool_occupancy` | count | Maximum observed allocated-player count | Omit without a resource sample |
+| `peak_proxy_pool_occupancy` | count | Maximum observed proxy count | Omit without a resource sample |
+
+Summary dimensions stay fixed-cardinality: `cache_reuse` (`cold`/`warm`),
+`feed_intent` (`focused`/`predicted`), `media_kind`
+(`vod`/`live`/`stitched`), `network_leg`, and `cache_tier`. `Summary.source`
+identifies the engine; event source is never copied into a high-cardinality
+dimension. The final attribution is used after a predicted attempt becomes a
+focused warm handoff.
+
+### Fleet calculations
+
+Deduplicate summaries by `RecordID`, filter on a compatible schema major, then
+group only by reviewed bounded dimensions and terminal reason. For a group of
+session first-frame values `[80, 100, 120, 200, 400]` ms, sort the raw session
+values and use the ingestion system's documented nearest-rank or interpolated
+quantile consistently: nearest-rank produces p50 = 120 ms, p95 = 400 ms, and
+p99 = 400 ms. Do not average client percentiles.
+
+Fleet completion rate is `sum(completion_count) / deduplicated_summary_count`.
+Startup-abandonment rate uses the same denominator. Cache-hit and handoff rates
+must be recomputed from summed sibling numerators and denominators; never
+average per-session ratios. Omit groups whose summed denominator is zero.
+Opaque session, playback, item, and record identifiers are correlation and
+deduplication keys only, never grouping dimensions.
 
 ## Bounded delivery
 
