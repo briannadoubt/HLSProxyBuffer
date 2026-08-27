@@ -37,7 +37,10 @@ Thread Sanitizer verifies the lock-backed request coordination and the
 100,000-event analytics correctness gate, while the release build catches
 concurrency and availability warnings under the package's supported platform
 declarations.
-The ordinary `swift test` gate runs the performance cases. They are excluded only
-from the sanitizer process because XCTest's `measure` machinery crashes inside
-XCTestCore when instrumented by Thread Sanitizer on Xcode 26.6; timing assertions
+The ordinary `swift test` gate runs the performance cases. The release analytics
+gate is the authoritative host-calibrated overhead measurement, so the tvOS
+simulator smoke test excludes that timing class while retaining every correctness,
+privacy, recovery, and scale case. Performance cases are also excluded from the
+sanitizer process because XCTest's `measure` machinery crashes inside XCTestCore
+when instrumented by Thread Sanitizer on Xcode 26.6; timing assertions
 would not be meaningful under sanitizer instrumentation in any case.

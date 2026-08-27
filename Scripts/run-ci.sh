@@ -85,6 +85,7 @@ if command -v xcodebuild >/dev/null 2>&1; then
       xcodebuild \
         -scheme HLSProxyBuffer-Package \
         -destination "platform=tvOS Simulator,id=$TVOS_SIM_UDID" \
+        -skip-testing:ProxyPlayerKitTests/PlaybackAnalyticsPerformanceTests \
         test
     fi
 
