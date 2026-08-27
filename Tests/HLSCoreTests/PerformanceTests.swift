@@ -12,14 +12,22 @@ final class PerformanceTests: XCTestCase {
         )
 
         measure(metrics: [XCTClockMetric()]) {
-            let expectation = expectation(description: "prefetch")
-            let scheduler = SegmentPrefetchScheduler(configuration: .init(targetBufferSeconds: 8, maxSegments: 8))
-            let cache = HLSSegmentCache(capacity: 8)
+            let expectation = expectation(description: "prefetch completed")
+            let scheduler = SegmentPrefetchScheduler(configuration: .init(
+                targetBufferSeconds: 8,
+                maxSegments: 8,
+                maxConcurrentFetches: 4
+            ))
+            let cache = HLSSegmentCache(capacityBytes: 1_024)
             let fetcher = MockSegmentSource()
 
             Task {
+                let states = await scheduler.states()
                 await scheduler.start(playlist: playlist, fetcher: fetcher, cache: cache)
-                expectation.fulfill()
+                for await state in states where state.readySequences.count == 8 {
+                    expectation.fulfill()
+                    break
+                }
             }
 
             wait(for: [expectation], timeout: 2.0)

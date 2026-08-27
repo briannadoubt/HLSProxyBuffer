@@ -5,7 +5,7 @@ The live refresh controller keeps AVPlayer fed with new media sequences by polli
 - `refreshInterval` – base polling interval in seconds. Default is 2 seconds (or use half the playlist target duration if the stream must be extremely responsive). Lower intervals fetch more frequently but increase CDN load.
 - `maxRefreshBackoff` – how far the exponential backoff can stretch after repeated failures. Keep this bounded when serving low-latency streams; higher values reduce traffic during outages.
 
-When the controller detects `#EXT-X-ENDLIST`, it automatically stops refreshing. Diagnostics surface current metrics through `/debug/status`:
+When the controller detects `#EXT-X-ENDLIST`, it automatically stops refreshing. Cancellation ends the loop without incrementing failures or entering backoff, and stale refresh callbacks are rejected by the player's session generation. Diagnostics surface current metrics through `/debug/status`:
 
 ```json
 {

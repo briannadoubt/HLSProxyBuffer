@@ -1,9 +1,11 @@
 # Low-Latency HLS
 
 The proxy can now ingest and serve Low-Latency HLS (LL-HLS) playlists end to
-end. Partial segments (`#EXT-X-PART`), preload hints, rendition reports, and
-blocking reload semantics are preserved throughout the stack so AVPlayer can
-stay within a sub-second latency window while still using the local proxy.
+end. Partial segments (`#EXT-X-PART`), preload hints, rendition reports, delta
+updates, and blocking reload semantics are preserved throughout the stack.
+The proxy avoids adding an origin bypass, but does not promise a particular
+glass-to-glass latency; encoder cadence, CDN behavior, and AVPlayer policy still
+set the lower bound.
 
 ## Enabling LL-HLS
 
@@ -12,7 +14,7 @@ stay within a sub-second latency window while still using the local proxy.
 1. `lowLatencyPolicy` – enables the runtime behavior (part prefetch counts,
    blocking playlist reloads, refresher timeouts).
 2. `lowLatencyOptions` – forwarded into `HLSRewriteConfiguration` to emit
-   server-control flags, delta-update hints, and prefetch metadata.
+   standard server-control, delta-update, part, and preload-hint metadata.
 
 ```swift
 var config = ProxyPlayerConfiguration()
@@ -37,13 +39,18 @@ When `lowLatencyPolicy.isEnabled` is true the proxy:
   configured part buffer depth.
 - Rewrites `#EXT-X-PART`, `#EXT-X-PRELOAD-HINT`, and `#EXT-X-RENDITION-REPORT`
   tags to localhost URLs so AVPlayer always stays on the proxy path.
+- Emits protocol version 10 or newer for LL-HLS output and never emits the old
+  non-standard `EXT-X-PREFETCH` tags.
 - Issues blocking playlist reload requests (`?_HLS_msn=…&_HLS_part=…`) when the
   upstream manifest advertises `CAN-BLOCK-RELOAD=YES`, and falls back to
   `PART-HOLD-BACK` driven refresh cadence otherwise.
 - Surfaces part readiness/hold-back telemetry via `/debug/status` and
   `/metrics`.
 
-If the stream downgrades to legacy HLS (no LL tags) the proxy gracefully
+Blocking reloads against localhost wait for the requested media sequence/part,
+including correct `EXT-X-SKIP` accounting, rather than merely accepting the
+query parameters. If the stream downgrades to legacy HLS (no LL tags) the proxy
+gracefully
 continues using full segments. Disabling `lowLatencyPolicy` restores the legacy
 behavior even when `lowLatencyOptions` is still populated.
 

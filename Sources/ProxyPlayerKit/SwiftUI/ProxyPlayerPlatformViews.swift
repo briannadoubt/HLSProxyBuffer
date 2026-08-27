@@ -27,17 +27,24 @@ public struct ProxyPlayerViewController: UIViewRepresentable {
     public func makeUIView(context: Context) -> PlayerView {
         let view = PlayerView()
         view.player = player.player
-        Task {
-            await player.load(from: url, quality: configuration.qualityPolicy)
-            if autoplay {
-                player.play()
-            }
-        }
         return view
     }
 
     public func updateUIView(_ uiView: PlayerView, context: Context) {
         uiView.player = player.player
+        context.coordinator.update(
+            player: player,
+            url: url,
+            configuration: configuration,
+            autoplay: autoplay
+        )
+    }
+
+    public func makeCoordinator() -> Coordinator { Coordinator() }
+
+    public static func dismantleUIView(_ uiView: PlayerView, coordinator: Coordinator) {
+        coordinator.cancel()
+        uiView.player = nil
     }
 
     public typealias UIViewType = PlayerView
@@ -50,6 +57,40 @@ public struct ProxyPlayerViewController: UIViewRepresentable {
         public var player: AVPlayer? {
             get { playerLayer.player }
             set { playerLayer.player = newValue }
+        }
+    }
+
+    @MainActor
+    public final class Coordinator {
+        private var task: Task<Void, Never>?
+        private var url: URL?
+        private var configuration: ProxyPlayerConfiguration?
+        private var autoplay = false
+
+        func update(
+            player: ProxyHLSPlayer,
+            url: URL,
+            configuration: ProxyPlayerConfiguration,
+            autoplay: Bool
+        ) {
+            guard self.url != url || self.configuration != configuration || self.autoplay != autoplay else { return }
+            self.url = url
+            self.configuration = configuration
+            self.autoplay = autoplay
+            task?.cancel()
+            task = Task { @MainActor [weak player] in
+                guard let player else { return }
+                await player.updateConfiguration(configuration)
+                guard !Task.isCancelled else { return }
+                await player.load(from: url, quality: configuration.qualityPolicy)
+                guard !Task.isCancelled else { return }
+                if autoplay { player.play() }
+            }
+        }
+
+        func cancel() {
+            task?.cancel()
+            task = nil
         }
     }
 }
@@ -76,18 +117,59 @@ public struct ProxyPlayerNSView: NSViewRepresentable {
 
     public func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
-        Task {
-            await player.load(from: url, quality: configuration.qualityPolicy)
-            if autoplay {
-                player.play()
-            }
-        }
         view.player = player.player
         return view
     }
 
     public func updateNSView(_ nsView: AVPlayerView, context: Context) {
         nsView.player = player.player
+        context.coordinator.update(
+            player: player,
+            url: url,
+            configuration: configuration,
+            autoplay: autoplay
+        )
+    }
+
+    public func makeCoordinator() -> Coordinator { Coordinator() }
+
+    public static func dismantleNSView(_ nsView: AVPlayerView, coordinator: Coordinator) {
+        coordinator.cancel()
+        nsView.player = nil
+    }
+
+    @MainActor
+    public final class Coordinator {
+        private var task: Task<Void, Never>?
+        private var url: URL?
+        private var configuration: ProxyPlayerConfiguration?
+        private var autoplay = false
+
+        func update(
+            player: ProxyHLSPlayer,
+            url: URL,
+            configuration: ProxyPlayerConfiguration,
+            autoplay: Bool
+        ) {
+            guard self.url != url || self.configuration != configuration || self.autoplay != autoplay else { return }
+            self.url = url
+            self.configuration = configuration
+            self.autoplay = autoplay
+            task?.cancel()
+            task = Task { @MainActor [weak player] in
+                guard let player else { return }
+                await player.updateConfiguration(configuration)
+                guard !Task.isCancelled else { return }
+                await player.load(from: url, quality: configuration.qualityPolicy)
+                guard !Task.isCancelled else { return }
+                if autoplay { player.play() }
+            }
+        }
+
+        func cancel() {
+            task?.cancel()
+            task = nil
+        }
     }
 }
 #endif

@@ -37,6 +37,7 @@ public actor HLSSegmentFetcher: SegmentSource {
         case httpStatus(Int)
         case emptyBody
         case lengthMismatch(expected: Int, actual: Int)
+        case invalidContentRange(String?)
         case checksumMismatch
     }
 
@@ -44,6 +45,17 @@ public actor HLSSegmentFetcher: SegmentSource {
     private var validationPolicy: ValidationPolicy
     private var metricsHandler: (@Sendable (FetchMetrics) async -> Void)?
     private var latestMetricsValue: FetchMetrics?
+    private var inFlight: [FetchKey: InFlight] = [:]
+
+    private struct FetchKey: Hashable, Sendable {
+        let url: URL
+        let byteRange: ClosedRange<Int>?
+    }
+
+    private struct InFlight: Sendable {
+        let id: UUID
+        let task: Task<Data, Error>
+    }
 
     public init(
         session: URLSession = .shared,
@@ -65,6 +77,13 @@ public actor HLSSegmentFetcher: SegmentSource {
         try await fetchSegment(from: url, metadata: nil)
     }
 
+    public func fetchResource(at url: URL, byteRange: ClosedRange<Int>?) async throws -> Data {
+        try await fetchSegment(
+            from: url,
+            metadata: HLSSegment(url: url, duration: 0, sequence: 0, byteRange: byteRange)
+        )
+    }
+
     public func onMetrics(_ handler: (@Sendable (FetchMetrics) async -> Void)?) {
         metricsHandler = handler
     }
@@ -74,12 +93,42 @@ public actor HLSSegmentFetcher: SegmentSource {
     }
 
     private func fetchSegment(from url: URL, metadata: HLSSegment?) async throws -> Data {
+        let key = FetchKey(url: url, byteRange: metadata?.byteRange)
+        if let existing = inFlight[key] {
+            let data = try await existing.task.value
+            try Task.checkCancellation()
+            return data
+        }
+
+        let id = UUID()
+        let task = Task { try await performFetch(from: url, metadata: metadata) }
+        inFlight[key] = InFlight(id: id, task: task)
+        do {
+            let data = try await task.value
+            removeInFlight(key: key, id: id)
+            try Task.checkCancellation()
+            return data
+        } catch {
+            removeInFlight(key: key, id: id)
+            throw error
+        }
+    }
+
+    private func removeInFlight(key: FetchKey, id: UUID) {
+        guard inFlight[key]?.id == id else { return }
+        inFlight.removeValue(forKey: key)
+    }
+
+    private func performFetch(from url: URL, metadata: HLSSegment?) async throws -> Data {
         try Task.checkCancellation()
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
+        if let range = metadata?.byteRange {
+            request.setValue("bytes=\(range.lowerBound)-\(range.upperBound)", forHTTPHeaderField: "Range")
+        }
 
         let start = Date()
-        let (data, response) = try await session.data(for: request)
+        let (receivedData, response) = try await session.data(for: request)
         let duration = Date().timeIntervalSince(start)
 
         guard let http = response as? HTTPURLResponse else {
@@ -88,6 +137,11 @@ public actor HLSSegmentFetcher: SegmentSource {
         guard (200..<300).contains(http.statusCode) else {
             throw FetchError.httpStatus(http.statusCode)
         }
+        let data = try normalizedData(
+            receivedData,
+            response: http,
+            requestedRange: metadata?.byteRange
+        )
         guard !data.isEmpty else {
             throw FetchError.emptyBody
         }
@@ -101,6 +155,35 @@ public actor HLSSegmentFetcher: SegmentSource {
         }
 
         return data
+    }
+
+    private func normalizedData(
+        _ data: Data,
+        response: HTTPURLResponse,
+        requestedRange: ClosedRange<Int>?
+    ) throws -> Data {
+        guard let requestedRange else { return data }
+        if response.statusCode == 206 {
+            let header = response.value(forHTTPHeaderField: "Content-Range")
+            guard contentRange(header, matches: requestedRange) else {
+                throw FetchError.invalidContentRange(header)
+            }
+            return data
+        }
+
+        if data.count == requestedRange.count {
+            return data
+        }
+        guard requestedRange.lowerBound >= 0, requestedRange.upperBound < data.count else {
+            throw FetchError.lengthMismatch(expected: requestedRange.count, actual: data.count)
+        }
+        return data.subdata(in: requestedRange.lowerBound..<(requestedRange.upperBound + 1))
+    }
+
+    private func contentRange(_ value: String?, matches expected: ClosedRange<Int>) -> Bool {
+        guard let value else { return false }
+        let prefix = "bytes \(expected.lowerBound)-\(expected.upperBound)/"
+        return value.lowercased().hasPrefix(prefix)
     }
 
     private func validate(data: Data, metadata: HLSSegment?) throws {

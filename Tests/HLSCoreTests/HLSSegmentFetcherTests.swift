@@ -71,6 +71,47 @@ final class HLSSegmentFetcherTests: XCTestCase {
         XCTAssertNotNil(latest)
     }
 
+    func testSendsRangeHeaderAndValidatesContentRange() async throws {
+        SegmentFetcherURLProtocol.enqueue(data: Data([10, 11, 12, 13]))
+        let fetcher = makeFetcher()
+        let segment = HLSSegment(
+            url: URL(string: "https://cdn.example.com/media.mp4")!,
+            duration: 4,
+            sequence: 7,
+            byteRange: 10...13
+        )
+
+        let data = try await fetcher.fetchSegment(segment)
+        XCTAssertEqual(data, Data([10, 11, 12, 13]))
+        XCTAssertEqual(SegmentFetcherURLProtocol.lastRequest()?.value(forHTTPHeaderField: "Range"), "bytes=10-13")
+    }
+
+    func testConcurrentRequestsForSameResourceAreCoalesced() async throws {
+        let expected = Data(repeating: 0xAB, count: 32)
+        SegmentFetcherURLProtocol.enqueue(data: expected)
+        let fetcher = makeFetcher()
+        await fetcher.onMetrics { _ in
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let segment = HLSSegment(
+            url: URL(string: "https://cdn.example.com/shared.m4s")!,
+            duration: 2,
+            sequence: 9
+        )
+
+        let values = try await withThrowingTaskGroup(of: Data.self, returning: [Data].self) { group in
+            for _ in 0..<12 {
+                group.addTask { try await fetcher.fetchSegment(segment) }
+            }
+            var values: [Data] = []
+            for try await value in group { values.append(value) }
+            return values
+        }
+
+        XCTAssertEqual(Set(values), [expected])
+        XCTAssertEqual(SegmentFetcherURLProtocol.requestCount(), 1)
+    }
+
     private func makeFetcher(
         validation: HLSSegmentFetcher.ValidationPolicy = .init()
     ) -> HLSSegmentFetcher {
@@ -93,15 +134,17 @@ private final class SegmentFetcherURLProtocol: URLProtocol {
     }
 
     override func startLoading() {
+        Self.storage.record(request)
         guard let data = Self.storage.nextData() else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
         }
+        let range = request.value(forHTTPHeaderField: "Range")
         let response = HTTPURLResponse(
             url: request.url!,
-            statusCode: 200,
+            statusCode: range == nil ? 200 : 206,
             httpVersion: nil,
-            headerFields: nil
+            headerFields: range.map { ["Content-Range": $0.replacingOccurrences(of: "=", with: " ") + "/*"] }
         )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
@@ -118,8 +161,13 @@ private final class SegmentFetcherURLProtocol: URLProtocol {
         storage.reset()
     }
 
+    static func lastRequest() -> URLRequest? { storage.lastRequest() }
+    static func requestCount() -> Int { storage.requestCount() }
+
     private final class Storage: @unchecked Sendable {
         private var queue: [Data] = []
+        private var request: URLRequest?
+        private var count = 0
         private let lock = NSLock()
 
         func enqueue(_ data: Data) {
@@ -135,9 +183,26 @@ private final class SegmentFetcherURLProtocol: URLProtocol {
             }
         }
 
+        func record(_ request: URLRequest) {
+            lock.withLock {
+                self.request = request
+                count += 1
+            }
+        }
+
+        func lastRequest() -> URLRequest? {
+            lock.withLock { request }
+        }
+
+        func requestCount() -> Int {
+            lock.withLock { count }
+        }
+
         func reset() {
             lock.withLock {
                 queue.removeAll()
+                request = nil
+                count = 0
             }
         }
     }

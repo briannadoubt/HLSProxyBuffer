@@ -3,7 +3,7 @@ import XCTest
 
 final class HLSSegmentCacheTests: XCTestCase {
     func testLRUEviction() async throws {
-        let cache = HLSSegmentCache(capacity: 2)
+        let cache = HLSSegmentCache(capacityBytes: 2)
         await cache.put(Data([0x0]), for: "a")
         await cache.put(Data([0x1]), for: "b")
 
@@ -24,7 +24,7 @@ final class HLSSegmentCacheTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
 
-        let cache = HLSSegmentCache(capacity: 1, diskDirectory: directory)
+        let cache = HLSSegmentCache(capacityBytes: 1, diskDirectory: directory)
         await cache.put(Data([0xAA]), for: "one")
         await cache.put(Data([0xBB]), for: "two") // evicts "one" from memory but keeps on disk
 
@@ -38,9 +38,25 @@ final class HLSSegmentCacheTests: XCTestCase {
     func testMetricsReportDiskBytes() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let cache = HLSSegmentCache(capacity: 1, diskDirectory: directory)
+        let cache = HLSSegmentCache(capacityBytes: 1, diskDirectory: directory)
         await cache.put(Data([0x11, 0x22]), for: "metric")
         let metrics = await cache.metrics()
         XCTAssertGreaterThanOrEqual(metrics.diskBytes, 2)
+    }
+
+    func testClearPreservesFilesNotOwnedByCache() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let unrelated = directory.appendingPathComponent("keep-me.txt")
+        try Data("owned by caller".utf8).write(to: unrelated)
+        let cache = HLSSegmentCache(capacityBytes: 16, diskDirectory: directory)
+        await cache.put(Data([0xAA]), for: "cache-key")
+
+        await cache.clear()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unrelated.path))
+        let cleared = await cache.get("cache-key")
+        XCTAssertNil(cleared)
     }
 }

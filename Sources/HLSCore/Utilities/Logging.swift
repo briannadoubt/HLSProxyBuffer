@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 public enum LogCategory: String, Sendable {
     case manifest
@@ -26,11 +27,8 @@ public struct DefaultLogger: Logger {
     public init() {}
 
     public func log(_ message: @autoclosure () -> String, category: LogCategory) {
-        #if DEBUG
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withFullDate, .withTime, .withTimeZone, .withFractionalSeconds]
-        let timestamp = formatter.string(from: Date())
-        print("[HLSCore][\(category.rawValue.uppercased())][\(timestamp)] \(message())")
-        #endif
+        let logger = os.Logger(subsystem: "com.hlsproxybuffer", category: category.rawValue)
+        let value = message()
+        logger.debug("\(value, privacy: .private(mask: .hash))")
     }
 }

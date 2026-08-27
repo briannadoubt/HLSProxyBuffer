@@ -15,42 +15,68 @@ public actor HLSSegmentCache: Caching {
         }
     }
 
-    private var capacity: Int
+    private var capacityBytes: Int
     private var storage: [String: Data] = [:]
-    private var order: [String] = []
+    private var accessOrder: [String: UInt64] = [:]
+    private var accessCounter: UInt64 = 0
+    private var residentBytes = 0
     private var hitCount = 0
     private var missCount = 0
+    private var diskStore: DiskCacheStore?
     private var diskDirectory: URL?
-    private let fileManager = FileManager()
 
-    public init(capacity: Int = 32, diskDirectory: URL? = nil) {
-        self.capacity = capacity
+    public init(
+        capacityBytes: Int = 32 * 1024 * 1024,
+        diskDirectory: URL? = nil,
+        diskCapacityBytes: Int = 512 * 1024 * 1024
+    ) {
+        self.capacityBytes = max(0, capacityBytes)
         self.diskDirectory = diskDirectory
         if let diskDirectory {
-            try? fileManager.createDirectory(at: diskDirectory, withIntermediateDirectories: true)
+            self.diskStore = DiskCacheStore(
+                directory: diskDirectory,
+                capacityBytes: max(0, diskCapacityBytes)
+            )
         }
     }
 
-    public func updateConfiguration(capacity: Int, diskDirectory: URL?) {
-        self.capacity = capacity
-        self.diskDirectory = diskDirectory
-        ensureDiskDirectory()
+    @available(*, deprecated, message: "Use init(capacityBytes:diskDirectory:diskCapacityBytes:); capacity is measured in bytes.")
+    public init(capacity: Int, diskDirectory: URL? = nil) {
+        self.init(capacityBytes: capacity, diskDirectory: diskDirectory)
+    }
+
+    public func updateConfiguration(
+        capacityBytes: Int,
+        diskDirectory: URL?,
+        diskCapacityBytes: Int = 512 * 1024 * 1024
+    ) async {
+        self.capacityBytes = max(0, capacityBytes)
+        if self.diskDirectory != diskDirectory {
+            self.diskDirectory = diskDirectory
+            self.diskStore = diskDirectory.map {
+                DiskCacheStore(directory: $0, capacityBytes: max(0, diskCapacityBytes))
+            }
+        } else if let diskStore {
+            await diskStore.updateCapacity(max(0, diskCapacityBytes))
+        }
         enforceCapacity()
+    }
+
+    @available(*, deprecated, message: "Use updateConfiguration(capacityBytes:diskDirectory:diskCapacityBytes:).")
+    public func updateConfiguration(capacity: Int, diskDirectory: URL?) async {
+        await updateConfiguration(capacityBytes: capacity, diskDirectory: diskDirectory)
     }
 
     public func get(_ key: String) async -> Data? {
         if let value = storage[key] {
             hitCount += 1
-            moveKeyToFront(key)
+            recordAccess(for: key)
             return value
         }
 
-        if let directory = diskDirectory,
-           let diskData = try? Data(contentsOf: fileURL(for: key, directory: directory)) {
+        if let diskData = await diskStore?.data(for: key) {
             hitCount += 1
-            storage[key] = diskData
-            moveKeyToFront(key)
-            enforceCapacity()
+            insertIntoMemory(diskData, for: key)
             return diskData
         }
 
@@ -59,69 +85,151 @@ public actor HLSSegmentCache: Caching {
     }
 
     public func put(_ data: Data, for key: String) async {
-        storage[key] = data
-        moveKeyToFront(key)
-        enforceCapacity()
-
-        guard let directory = diskDirectory else { return }
-        do {
-            try data.write(to: fileURL(for: key, directory: directory), options: [.atomic])
-        } catch {
-            // Disk caching is best-effort; ignore write failures in MVP.
-        }
+        insertIntoMemory(data, for: key)
+        await diskStore?.put(data, for: key)
     }
 
-    public func metrics() -> Metrics {
-        let diskBytes: Int
-        if let directory = diskDirectory, let contents = try? fileManager
-            .contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey]) {
-            diskBytes = contents.reduce(0) { partial, url in
-                let values = try? url.resourceValues(forKeys: [.fileSizeKey])
-                return partial + (values?.fileSize ?? 0)
-            }
-        } else {
-            diskBytes = 0
-        }
-
-        return Metrics(
+    public func metrics() async -> Metrics {
+        Metrics(
             hitCount: hitCount,
             missCount: missCount,
-            totalBytes: storage.values.reduce(0) { $0 + $1.count },
-            diskBytes: diskBytes
+            totalBytes: residentBytes,
+            diskBytes: await diskStore?.byteCount() ?? 0
         )
     }
 
-    public func clear() {
-        storage.removeAll()
-        order.removeAll()
-        if let directory = diskDirectory {
-            try? fileManager.removeItem(at: directory)
-            ensureDiskDirectory()
-        }
+    public func clear() async {
+        storage.removeAll(keepingCapacity: false)
+        accessOrder.removeAll(keepingCapacity: false)
+        residentBytes = 0
+        await diskStore?.clear()
     }
 
-    private func moveKeyToFront(_ key: String) {
-        order.removeAll(where: { $0 == key })
-        order.insert(key, at: 0)
+    private func insertIntoMemory(_ data: Data, for key: String) {
+        if let previous = storage.updateValue(data, forKey: key) {
+            residentBytes -= previous.count
+        }
+        residentBytes += data.count
+        recordAccess(for: key)
+        enforceCapacity()
+    }
+
+    private func recordAccess(for key: String) {
+        accessCounter &+= 1
+        accessOrder[key] = accessCounter
     }
 
     private func enforceCapacity() {
-        while order.count > capacity, let key = order.popLast() {
-            storage.removeValue(forKey: key)
+        while residentBytes > capacityBytes,
+              let key = accessOrder.min(by: { $0.value < $1.value })?.key {
+            accessOrder.removeValue(forKey: key)
+            if let removed = storage.removeValue(forKey: key) {
+                residentBytes -= removed.count
+            }
+        }
+    }
+}
+
+private actor DiskCacheStore {
+    private let directory: URL
+    private var capacityBytes: Int
+    private let fileManager = FileManager()
+    private var knownSizes: [String: Int] = [:]
+    private var accessDates: [String: Date] = [:]
+    private var residentBytes = 0
+    private var didLoadMetadata = false
+
+    init(directory: URL, capacityBytes: Int) {
+        self.directory = directory
+        self.capacityBytes = capacityBytes
+    }
+
+    func updateCapacity(_ capacityBytes: Int) {
+        self.capacityBytes = capacityBytes
+        prepareIfNeeded()
+        enforceCapacity()
+    }
+
+    func data(for key: String) -> Data? {
+        prepareIfNeeded()
+        let url = fileURL(for: key)
+        guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else { return nil }
+        accessDates[fileName(for: key)] = Date()
+        return data
+    }
+
+    func put(_ data: Data, for key: String) {
+        prepareIfNeeded()
+        let fileName = fileName(for: key)
+        do {
+            try data.write(to: directory.appendingPathComponent(fileName), options: [.atomic])
+            if let previous = knownSizes.updateValue(data.count, forKey: fileName) {
+                residentBytes -= previous
+            }
+            residentBytes += data.count
+            accessDates[fileName] = Date()
+            enforceCapacity()
+        } catch {
+            // Disk caching is optional; an origin fetch remains authoritative.
         }
     }
 
-    private func ensureDiskDirectory() {
-        guard let diskDirectory else { return }
-        try? fileManager.createDirectory(at: diskDirectory, withIntermediateDirectories: true)
+    func byteCount() -> Int {
+        prepareIfNeeded()
+        return residentBytes
     }
 
-    private func fileURL(for key: String, directory: URL) -> URL {
-        directory.appendingPathComponent(safeFileComponent(for: key))
+    func clear() {
+        prepareIfNeeded()
+        for key in knownSizes.keys {
+            try? fileManager.removeItem(at: directory.appendingPathComponent(key))
+        }
+        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        knownSizes.removeAll(keepingCapacity: false)
+        accessDates.removeAll(keepingCapacity: false)
+        residentBytes = 0
+        didLoadMetadata = true
     }
 
-    private func safeFileComponent(for key: String) -> String {
-        Data(key.utf8).base64EncodedString()
+    private func prepareIfNeeded() {
+        guard !didLoadMetadata else { return }
+        didLoadMetadata = true
+        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        guard let files = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.fileSizeKey, .contentAccessDateKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        for file in files {
+            guard file.lastPathComponent.hasPrefix("hlsproxy-") else { continue }
+            guard let values = try? file.resourceValues(forKeys: [
+                .fileSizeKey, .contentAccessDateKey, .contentModificationDateKey
+            ]) else { continue }
+            let key = file.lastPathComponent
+            let size = values.fileSize ?? 0
+            knownSizes[key] = size
+            accessDates[key] = values.contentAccessDate ?? values.contentModificationDate ?? .distantPast
+            residentBytes += size
+        }
+        enforceCapacity()
+    }
+
+    private func enforceCapacity() {
+        while residentBytes > capacityBytes,
+              let key = accessDates.min(by: { $0.value < $1.value })?.key {
+            accessDates.removeValue(forKey: key)
+            let size = knownSizes.removeValue(forKey: key) ?? 0
+            residentBytes -= size
+            try? fileManager.removeItem(at: directory.appendingPathComponent(key))
+        }
+    }
+
+    private func fileURL(for key: String) -> URL {
+        directory.appendingPathComponent(fileName(for: key))
+    }
+
+    private func fileName(for key: String) -> String {
+        "hlsproxy-" + Data(key.utf8).base64EncodedString()
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "-")
     }

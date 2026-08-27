@@ -131,8 +131,12 @@ public struct HLSPreloadHint: Sendable, Hashable, Codable {
     }
 
     public var byteRange: ClosedRange<Int>? {
-        guard let start = byteRangeStart, let length = byteRangeLength else { return nil }
-        return start...(start + length - 1)
+        guard let start = byteRangeStart, start >= 0,
+              let length = byteRangeLength, length > 0 else { return nil }
+        let (distance, overflow) = length.subtractingReportingOverflow(1)
+        let (end, additionOverflow) = start.addingReportingOverflow(distance)
+        guard !overflow, !additionOverflow, end >= start else { return nil }
+        return start...end
     }
 }
 
@@ -192,6 +196,8 @@ public struct HLSSegment: Sendable, Hashable, Identifiable, Codable {
     public let encryption: SegmentEncryption?
     public let initializationMap: MediaInitializationMap?
     public let parts: [HLSPartialSegment]
+    /// Segment-scoped tags preserved verbatim and emitted before `EXTINF`.
+    public let metadataTags: [String]
 
     public init(
         url: URL,
@@ -200,7 +206,8 @@ public struct HLSSegment: Sendable, Hashable, Identifiable, Codable {
         byteRange: ClosedRange<Int>? = nil,
         encryption: SegmentEncryption? = nil,
         initializationMap: MediaInitializationMap? = nil,
-        parts: [HLSPartialSegment] = []
+        parts: [HLSPartialSegment] = [],
+        metadataTags: [String] = []
     ) {
         self.url = url
         self.duration = duration
@@ -209,6 +216,7 @@ public struct HLSSegment: Sendable, Hashable, Identifiable, Codable {
         self.encryption = encryption
         self.initializationMap = initializationMap
         self.parts = parts
+        self.metadataTags = metadataTags
     }
 }
 
@@ -232,6 +240,8 @@ public struct VariantPlaylist: Sendable, Hashable, Identifiable {
         public let audioGroupId: String?
         public let subtitleGroupId: String?
         public let closedCaptionGroupId: String?
+        /// Attributes not interpreted by the core model, retained for lossless master rewriting.
+        public let additionalAttributes: [String: String]
 
         public init(
             bandwidth: Int? = nil,
@@ -241,7 +251,8 @@ public struct VariantPlaylist: Sendable, Hashable, Identifiable {
             codecs: String? = nil,
             audioGroupId: String? = nil,
             subtitleGroupId: String? = nil,
-            closedCaptionGroupId: String? = nil
+            closedCaptionGroupId: String? = nil,
+            additionalAttributes: [String: String] = [:]
         ) {
             self.bandwidth = bandwidth
             self.averageBandwidth = averageBandwidth
@@ -251,6 +262,7 @@ public struct VariantPlaylist: Sendable, Hashable, Identifiable {
             self.audioGroupId = audioGroupId
             self.subtitleGroupId = subtitleGroupId
             self.closedCaptionGroupId = closedCaptionGroupId
+            self.additionalAttributes = additionalAttributes
         }
     }
 
@@ -265,6 +277,7 @@ public struct VariantPlaylist: Sendable, Hashable, Identifiable {
 }
 
 public struct MediaPlaylist: Sendable, Hashable {
+    public let protocolVersion: Int?
     public let targetDuration: TimeInterval?
     public let mediaSequence: Int
     public let segments: [HLSSegment]
@@ -275,8 +288,17 @@ public struct MediaPlaylist: Sendable, Hashable {
     public let preloadHints: [HLSPreloadHint]
     public let renditionReports: [HLSRenditionReport]
     public let skippedSegmentCount: Int?
+    public let independentSegments: Bool
+    public let playlistType: String?
+    public let startTag: String?
+    public let discontinuitySequence: Int?
+    /// Playlist-scoped tags not otherwise modeled, retained verbatim.
+    public let passthroughTags: [String]
+    /// Partial segments at the live edge which do not yet have a complete parent segment.
+    public let trailingParts: [HLSPartialSegment]
 
     public init(
+        protocolVersion: Int? = nil,
         targetDuration: TimeInterval?,
         mediaSequence: Int = 0,
         segments: [HLSSegment],
@@ -286,8 +308,15 @@ public struct MediaPlaylist: Sendable, Hashable {
         serverControl: HLSServerControl? = nil,
         preloadHints: [HLSPreloadHint] = [],
         renditionReports: [HLSRenditionReport] = [],
-        skippedSegmentCount: Int? = nil
+        skippedSegmentCount: Int? = nil,
+        independentSegments: Bool = false,
+        playlistType: String? = nil,
+        startTag: String? = nil,
+        discontinuitySequence: Int? = nil,
+        passthroughTags: [String] = [],
+        trailingParts: [HLSPartialSegment] = []
     ) {
+        self.protocolVersion = protocolVersion
         self.targetDuration = targetDuration
         self.mediaSequence = mediaSequence
         self.segments = segments
@@ -298,6 +327,12 @@ public struct MediaPlaylist: Sendable, Hashable {
         self.preloadHints = preloadHints
         self.renditionReports = renditionReports
         self.skippedSegmentCount = skippedSegmentCount
+        self.independentSegments = independentSegments
+        self.playlistType = playlistType
+        self.startTag = startTag
+        self.discontinuitySequence = discontinuitySequence
+        self.passthroughTags = passthroughTags
+        self.trailingParts = trailingParts
     }
 }
 
@@ -327,6 +362,8 @@ public struct HLSManifest: Sendable, Hashable {
         public let characteristics: [String]
         public let uri: URL?
         public let instreamId: String?
+        /// Attributes not interpreted by the core model, retained for lossless master rewriting.
+        public let additionalAttributes: [String: String]
 
         public init(
             type: Kind,
@@ -338,7 +375,8 @@ public struct HLSManifest: Sendable, Hashable {
             isForced: Bool = false,
             characteristics: [String] = [],
             uri: URL?,
-            instreamId: String? = nil
+            instreamId: String? = nil,
+            additionalAttributes: [String: String] = [:]
         ) {
             self.type = type
             self.groupId = groupId
@@ -350,6 +388,7 @@ public struct HLSManifest: Sendable, Hashable {
             self.characteristics = characteristics
             self.uri = uri
             self.instreamId = instreamId
+            self.additionalAttributes = additionalAttributes
         }
     }
 
@@ -358,6 +397,9 @@ public struct HLSManifest: Sendable, Hashable {
     public let mediaPlaylist: MediaPlaylist?
     public let renditions: [Rendition]
     public let sessionKeys: [HLSKey]
+    public let protocolVersion: Int?
+    public let independentSegments: Bool
+    public let passthroughTags: [String]
     public let originalText: String
 
     public init(
@@ -366,22 +408,27 @@ public struct HLSManifest: Sendable, Hashable {
         mediaPlaylist: MediaPlaylist?,
         renditions: [Rendition] = [],
         originalText: String,
-        sessionKeys: [HLSKey] = []
+        sessionKeys: [HLSKey] = [],
+        protocolVersion: Int? = nil,
+        independentSegments: Bool = false,
+        passthroughTags: [String] = []
     ) {
         self.kind = kind
         self.variants = variants
         self.mediaPlaylist = mediaPlaylist
         self.renditions = renditions
         self.sessionKeys = sessionKeys
+        self.protocolVersion = protocolVersion
+        self.independentSegments = independentSegments
+        self.passthroughTags = passthroughTags
         self.originalText = originalText
     }
 }
 
 public extension HLSManifest.Rendition.Kind {
-    /// Per RFC 8216, URI is optional for AUDIO and SUBTITLES (omitted when media is muxed in the main stream).
-    /// CLOSED-CAPTIONS never has a URI (uses INSTREAM-ID instead).
+    /// SUBTITLES renditions require URI. AUDIO may omit it when muxed; CLOSED-CAPTIONS must omit it.
     var requiresURI: Bool {
-        false
+        self == .subtitles
     }
 
     var requiresInstreamId: Bool {

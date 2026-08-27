@@ -30,18 +30,40 @@ public struct ProxyPlayerConfiguration: Sendable, Equatable {
     }
 
     public struct CachePolicy: Sendable, Equatable {
-        public var memoryCapacity: Int
+        public var memoryCapacityBytes: Int
+        public var diskCapacityBytes: Int
         public var enableDiskCache: Bool
         public var diskDirectory: URL?
 
         public init(
-            memoryCapacity: Int = 32,
+            memoryCapacityBytes: Int = 32 * 1024 * 1024,
+            diskCapacityBytes: Int = 512 * 1024 * 1024,
             enableDiskCache: Bool = false,
             diskDirectory: URL? = nil
         ) {
-            self.memoryCapacity = memoryCapacity
+            self.memoryCapacityBytes = max(0, memoryCapacityBytes)
+            self.diskCapacityBytes = max(0, diskCapacityBytes)
             self.enableDiskCache = enableDiskCache
             self.diskDirectory = diskDirectory
+        }
+
+        @available(*, deprecated, message: "Use memoryCapacityBytes; the value is a byte budget.")
+        public init(
+            memoryCapacity: Int,
+            enableDiskCache: Bool = false,
+            diskDirectory: URL? = nil
+        ) {
+            self.init(
+                memoryCapacityBytes: memoryCapacity,
+                enableDiskCache: enableDiskCache,
+                diskDirectory: diskDirectory
+            )
+        }
+
+        @available(*, deprecated, message: "Use memoryCapacityBytes; the value is a byte budget.")
+        public var memoryCapacity: Int {
+            get { memoryCapacityBytes }
+            set { memoryCapacityBytes = max(0, newValue) }
         }
     }
 

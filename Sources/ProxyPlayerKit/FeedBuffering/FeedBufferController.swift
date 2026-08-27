@@ -10,9 +10,20 @@ public protocol FeedBufferControllable: AnyObject {
     func pause()
     func stop()
     func updateConfiguration(_ configuration: ProxyPlayerConfiguration) async
+    func stateUpdates() -> AsyncStream<PlayerState>
 
     var state: PlayerState { get }
     var configuration: ProxyPlayerConfiguration { get }
+}
+
+public extension FeedBufferControllable {
+    func stateUpdates() -> AsyncStream<PlayerState> {
+        let initial = state
+        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            continuation.yield(initial)
+            continuation.finish()
+        }
+    }
 }
 
 public struct FeedBufferPolicy: Sendable, Equatable {
@@ -130,11 +141,14 @@ public final class FeedBufferController {
         let baseConfiguration: ProxyPlayerConfiguration
         var role: Role = .cold
         var loadTask: Task<Void, Never>?
+        var retryTask: Task<Void, Never>?
         var cooldownTask: Task<Void, Never>?
         var observationTask: Task<Void, Never>?
+        var configurationTask: Task<Void, Never>?
         var isLoaded = false
         var isLoading = false
         var loadGeneration: UInt = 0
+        var retryAttempt = 0
         var needsRoleAction = false
         var lastBufferSeconds: TimeInterval = 0
         var appliedBufferSeconds: TimeInterval?
@@ -148,11 +162,15 @@ public final class FeedBufferController {
 
         func cancelTasks() {
             loadTask?.cancel()
+            retryTask?.cancel()
             cooldownTask?.cancel()
             observationTask?.cancel()
+            configurationTask?.cancel()
             loadTask = nil
+            retryTask = nil
             cooldownTask = nil
             observationTask = nil
+            configurationTask = nil
         }
     }
 
@@ -215,10 +233,13 @@ public final class FeedBufferController {
         guard let entry = entries[handle] else { return }
         let oldDescriptor = entry.descriptor
         entry.descriptor = descriptor
-        if descriptor.url != oldDescriptor.url {
+        if descriptor.url != oldDescriptor.url || descriptor.qualityOverride != oldDescriptor.qualityOverride {
             entry.loadGeneration &+= 1
             entry.isLoaded = false
             entry.loadTask?.cancel()
+            entry.retryTask?.cancel()
+            entry.retryTask = nil
+            entry.retryAttempt = 0
             if !entry.isLoading {
                 entry.loadTask = nil
             }
@@ -407,6 +428,9 @@ public final class FeedBufferController {
             ensurePrepared(entry)
             entry.player.pause()
         case .cold:
+            entry.retryTask?.cancel()
+            entry.retryTask = nil
+            entry.retryAttempt = 0
             entry.player.pause()
             scheduleStop(for: entry)
         }
@@ -422,12 +446,18 @@ public final class FeedBufferController {
         guard !entry.isLoading else { return }
         guard !entry.isLoaded else { return }
         entry.isLoading = true
+        entry.retryTask?.cancel()
+        entry.retryTask = nil
         let url = entry.descriptor.url
         let quality = entry.descriptor.qualityOverride ?? entry.baseConfiguration.qualityPolicy
         let generation = entry.loadGeneration
         entry.loadTask?.cancel()
         entry.loadTask = Task { [weak self, weak entry] in
             guard let entry else { return }
+            if let configurationTask = entry.configurationTask {
+                await configurationTask.value
+            }
+            guard !Task.isCancelled else { return }
             await entry.player.load(from: url, quality: quality)
             await MainActor.run {
                 guard let self else { return }
@@ -450,8 +480,37 @@ public final class FeedBufferController {
                     }
                     return
                 }
-                entry.isLoaded = true
+                if case .ready = entry.player.state.status {
+                    entry.isLoaded = true
+                    entry.retryAttempt = 0
+                } else {
+                    entry.isLoaded = false
+                    if entry.role != .cold {
+                        self.scheduleRetry(for: entry)
+                    }
+                }
             }
+        }
+    }
+
+    private func scheduleRetry(for entry: Entry) {
+        guard entry.role != .cold, entry.retryTask == nil else { return }
+        let exponent = min(entry.retryAttempt, 4)
+        let delay = min(8, 0.5 * pow(2, Double(exponent)))
+        entry.retryAttempt += 1
+        let generation = entry.loadGeneration
+        entry.retryTask = Task { @MainActor [weak self, weak entry] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch {
+                return
+            }
+            guard let self, let entry,
+                  self.entries[entry.handle] === entry,
+                  entry.role != .cold,
+                  generation == entry.loadGeneration else { return }
+            entry.retryTask = nil
+            self.ensurePrepared(entry)
         }
     }
 
@@ -480,6 +539,9 @@ public final class FeedBufferController {
                 entry.isLoaded = false
                 entry.loadGeneration &+= 1
                 entry.loadTask?.cancel()
+                entry.retryTask?.cancel()
+                entry.retryTask = nil
+                entry.retryAttempt = 0
                 if !entry.isLoading {
                     entry.loadTask = nil
                 }
@@ -502,7 +564,13 @@ public final class FeedBufferController {
         entry.appliedBufferSeconds = targetSeconds
         var configuration = entry.baseConfiguration
         configuration.bufferPolicy.targetBufferSeconds = targetSeconds
-        Task { [weak entry] in
+        let estimatedBytes = bytes(fromMegabytes: entry.descriptor.estimatedMemoryMegabytes)
+        configuration.cachePolicy.memoryCapacityBytes = min(
+            configuration.cachePolicy.memoryCapacityBytes,
+            estimatedBytes > Int64(Int.max) ? Int.max : Int(estimatedBytes)
+        )
+        entry.configurationTask?.cancel()
+        entry.configurationTask = Task { [weak entry] in
             guard let entry else { return }
             await entry.player.updateConfiguration(configuration)
         }
@@ -511,25 +579,23 @@ public final class FeedBufferController {
     private func startBufferObservation(for entry: Entry) {
         entry.observationTask = Task { [weak self, weak entry] in
             guard let self, let entry else { return }
-            await self.observeBufferByPolling(entry)
+            let updates = entry.player.stateUpdates()
+            for await state in updates {
+                guard !Task.isCancelled else { return }
+                self.observe(state: state, for: entry)
+            }
         }
     }
 
     @MainActor
-    private func observeBufferByPolling(_ entry: Entry) async {
-        var lastValue = entry.player.state.bufferDepthSeconds
-        entry.lastBufferSeconds = lastValue
-        while !Task.isCancelled, entries[entry.handle] != nil {
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            guard entries[entry.handle] != nil else { break }
-            let newValue = entry.player.state.bufferDepthSeconds
-            let delta = newValue - lastValue
-            if abs(delta) >= 0.25 {
-                telemetry.onEvent(.bufferLevelChanged(entry.descriptor, deltaSeconds: delta))
-            }
-            lastValue = newValue
-            entry.lastBufferSeconds = newValue
+    private func observe(state: PlayerState, for entry: Entry) {
+        guard entries[entry.handle] === entry else { return }
+        let delta = state.bufferDepthSeconds - entry.lastBufferSeconds
+        if abs(delta) >= 0.25 {
+            telemetry.onEvent(.bufferLevelChanged(entry.descriptor, deltaSeconds: delta))
         }
+        entry.lastBufferSeconds = state.bufferDepthSeconds
+        publishWarmSet()
     }
 
     private func publishWarmSet() {
