@@ -155,10 +155,22 @@ warm or focused lease. It never creates, loads, plays, pauses, or destroys an
 ready focused destination, preserves the destination's existing player item at
 handoff, and detaches recycled leases from their surfaces.
 
+Audio ownership is stricter than surface attachment. Every newly allocated or
+recycled player is muted before loading or preroll. An accepted focus change
+first mutes and pauses the old owner, then unmutes a destination only after its
+lease is warm and still matches the current navigation generation. A destination
+that is not ready therefore creates a deliberately silent gap instead of letting
+stale audio continue; a late preparation completion cannot steal audio after a
+fling or direction reversal. `setPlaybackSuspended(_:)` gives lifecycle adapters
+one engine-owned background/foreground hook: suspension immediately removes the
+audio owner while retaining the bounded warm working set, and resumption starts
+only the still-current prepared focus.
+
 `HLSFeedEngineSnapshot` is `Equatable` and fixed-size under the player-pool
-limit. It reports target and actual focus, lease phase/state, failures, current
-and high-water occupancy, active loads, ordered-loop destination requests, and
-discarded stale completions. Observation consumers can read `engine.snapshot`;
+limit. It reports target, active, and audible focus, per-lease audibility,
+lifecycle suspension, failures, current and high-water player/audio occupancy,
+active loads, ordered-loop destination requests, and discarded stale
+completions. Observation consumers can read `engine.snapshot`;
 imperative consumers use the newest-only `engine.updates()` stream. Playback
 rate and live/DVR controls are addressed through the engine, so even imperative
 adopters do not borrow player ownership.

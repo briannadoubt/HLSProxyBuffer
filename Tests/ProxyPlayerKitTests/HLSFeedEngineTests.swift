@@ -100,6 +100,8 @@ final class HLSFeedEngineTests: XCTestCase {
         var snapshot = await engine.waitUntilSettled()
 
         XCTAssertEqual(snapshot.activeItemID, items[0].id)
+        XCTAssertEqual(snapshot.audibleItemID, items[0].id)
+        XCTAssertEqual(snapshot.playback(for: items[0].id)?.isAudible, true)
         XCTAssertLessThanOrEqual(snapshot.poolOccupancy, 2)
         XCTAssertLessThanOrEqual(snapshot.allocatedPlayerCount, 2)
         XCTAssertEqual(Set(snapshot.playbacks.map(\.itemID)).count, snapshot.playbacks.count)
@@ -108,11 +110,15 @@ final class HLSFeedEngineTests: XCTestCase {
         let loadCountBeforeHandoff = warmSession.loadCount
         XCTAssertEqual(warmSession.preparationCount, 1)
         XCTAssertEqual(warmSession.playCount, 0, "speculative playback must remain paused")
+        XCTAssertTrue(warmSession.isMuted, "speculative playback must never own audio")
 
         try await engine.update(signal(generation: 2, focused: warmID))
         snapshot = await engine.waitUntilSettled()
 
         XCTAssertEqual(snapshot.activeItemID, warmID)
+        XCTAssertEqual(snapshot.audibleItemID, warmID)
+        XCTAssertFalse(warmSession.isMuted)
+        XCTAssertEqual(factory.audiblePlayingItemIDs, [warmID])
         XCTAssertEqual(snapshot.playback(for: warmID)?.phase, .focused)
         XCTAssertEqual(
             warmSession.loadCount,
@@ -126,8 +132,99 @@ final class HLSFeedEngineTests: XCTestCase {
             "focus must not start before the media pipeline is primed"
         )
         XCTAssertLessThanOrEqual(snapshot.maximumObservedPoolOccupancy, 2)
+        XCTAssertEqual(snapshot.maximumObservedAudiblePlaybackCount, 1)
+        XCTAssertEqual(factory.maximumAudiblePlayingCount, 1)
 
         await engine.stop()
+    }
+
+    func testNotReadyFocusSilencesPreviousAudioUntilDestinationIsPrepared() async throws {
+        let items = makeItems(count: 4)
+        let policy = try makePolicy(maximumPlayerCount: 2)
+        let factory = FakeFeedSessionFactory(loadDelay: .milliseconds(100))
+        let engine = try makeEngine(items: items, policy: policy, factory: factory)
+
+        try await engine.update(signal(generation: 1, focused: items[0].id))
+        _ = await engine.waitUntilSettled()
+        XCTAssertEqual(factory.audiblePlayingItemIDs, [items[0].id])
+
+        let loading = try await engine.update(signal(generation: 2, focused: items[3].id))
+        XCTAssertNil(loading.activeItemID)
+        XCTAssertNil(loading.audibleItemID)
+        XCTAssertTrue(factory.audiblePlayingItemIDs.isEmpty)
+
+        let settled = await engine.waitUntilSettled()
+        XCTAssertEqual(settled.activeItemID, items[3].id)
+        XCTAssertEqual(settled.audibleItemID, items[3].id)
+        XCTAssertEqual(factory.audiblePlayingItemIDs, [items[3].id])
+        XCTAssertEqual(factory.maximumAudiblePlayingCount, 1)
+        XCTAssertEqual(settled.maximumObservedAudiblePlaybackCount, 1)
+
+        await engine.stop()
+    }
+
+    func testRapidDirectionReversalCannotLetLateDestinationStealAudio() async throws {
+        let items = makeItems(count: 4)
+        let policy = try makePolicy(maximumPlayerCount: 2)
+        let factory = FakeFeedSessionFactory(loadDelay: .milliseconds(100))
+        let engine = try makeEngine(items: items, policy: policy, factory: factory)
+
+        try await engine.update(signal(generation: 1, focused: items[0].id))
+        _ = await engine.waitUntilSettled()
+        _ = try await engine.update(signal(
+            generation: 2,
+            focused: items[3].id,
+            velocity: 12
+        ))
+        _ = try await engine.update(signal(
+            generation: 3,
+            focused: items[0].id,
+            velocity: -12
+        ))
+        let settled = await engine.waitUntilSettled()
+
+        XCTAssertEqual(settled.generation, .init(rawValue: 3))
+        XCTAssertEqual(settled.activeItemID, items[0].id)
+        XCTAssertEqual(settled.audibleItemID, items[0].id)
+        XCTAssertEqual(factory.audiblePlayingItemIDs, [items[0].id])
+        XCTAssertEqual(factory.session(loadedWith: items[3].id)?.playCount ?? 0, 0)
+        XCTAssertEqual(factory.maximumAudiblePlayingCount, 1)
+
+        await engine.stop()
+    }
+
+    func testBackgroundSuspendsAudioButKeepsWarmLeasesForForegroundHandoff() async throws {
+        let items = makeItems(count: 3)
+        let policy = try makePolicy(maximumPlayerCount: 2)
+        let factory = FakeFeedSessionFactory()
+        let engine = try makeEngine(items: items, policy: policy, factory: factory)
+
+        try await engine.update(signal(generation: 1, focused: items[0].id))
+        _ = await engine.waitUntilSettled()
+        var snapshot = engine.setPlaybackSuspended(true)
+        XCTAssertTrue(snapshot.isPlaybackSuspended)
+        XCTAssertNil(snapshot.activeItemID)
+        XCTAssertNil(snapshot.audibleItemID)
+        XCTAssertTrue(factory.audiblePlayingItemIDs.isEmpty)
+
+        try await engine.update(signal(generation: 2, focused: items[1].id))
+        snapshot = await engine.waitUntilSettled()
+        XCTAssertTrue(snapshot.isPlaybackSuspended)
+        XCTAssertEqual(snapshot.targetFocusedItemID, items[1].id)
+        XCTAssertNil(snapshot.activeItemID)
+        XCTAssertTrue(factory.audiblePlayingItemIDs.isEmpty)
+
+        snapshot = engine.setPlaybackSuspended(false)
+        XCTAssertFalse(snapshot.isPlaybackSuspended)
+        XCTAssertEqual(snapshot.activeItemID, items[1].id)
+        XCTAssertEqual(snapshot.audibleItemID, items[1].id)
+        XCTAssertEqual(factory.audiblePlayingItemIDs, [items[1].id])
+        XCTAssertLessThanOrEqual(snapshot.allocatedPlayerCount, 2)
+        XCTAssertEqual(factory.maximumAudiblePlayingCount, 1)
+
+        await engine.stop()
+        XCTAssertTrue(factory.audiblePlayingItemIDs.isEmpty)
+        XCTAssertTrue(factory.sessions.allSatisfy { $0.isMuted && !$0.isPlaying })
     }
 
     func testNewGenerationCancelsAndRejectsStalePlayerCompletion() async throws {
@@ -519,6 +616,7 @@ final class HLSFeedEngineTests: XCTestCase {
             let transitionCount: Int
             let maximumPlayerPoolOccupancy: Int
             let maximumAllocatedPlayerCount: Int
+            let maximumAudiblePlaybackCount: Int
             let maximumPlayerPoolLimit: Int
             let allocatedSessionCount: Int
             let finalPoolOccupancy: Int
@@ -528,6 +626,7 @@ final class HLSFeedEngineTests: XCTestCase {
             let maximumAnalyticsObserverCount: Int
             let finalAnalyticsObserverCount: Int
             let stoppedSessionCount: Int
+            let finalAudiblePlayingSessionCount: Int
             let handoffAttemptCount: UInt64
             let handoffSuccessCount: UInt64
             let handoffSuccessRate: Double
@@ -557,6 +656,10 @@ final class HLSFeedEngineTests: XCTestCase {
             let snapshot = await engine.waitUntilSettled()
             XCTAssertLessThanOrEqual(snapshot.poolOccupancy, 2)
             XCTAssertLessThanOrEqual(snapshot.allocatedPlayerCount, 2)
+            XCTAssertEqual(snapshot.audibleItemID, focused)
+            XCTAssertEqual(snapshot.playbacks.filter(\.isAudible).count, 1)
+            XCTAssertLessThanOrEqual(snapshot.maximumObservedAudiblePlaybackCount, 1)
+            XCTAssertLessThanOrEqual(factory.maximumAudiblePlayingCount, 1)
             maximumAllocatedPlayerCount = max(
                 maximumAllocatedPlayerCount,
                 snapshot.allocatedPlayerCount
@@ -584,6 +687,7 @@ final class HLSFeedEngineTests: XCTestCase {
         XCTAssertTrue(factory.sessions.allSatisfy { $0.activeStateObserverCount == 0 })
         XCTAssertTrue(factory.sessions.allSatisfy { $0.activeStreamingObserverCount == 0 })
         XCTAssertTrue(factory.sessions.allSatisfy { $0.isStopped })
+        XCTAssertTrue(factory.sessions.allSatisfy { $0.isMuted && !$0.isPlaying })
         let summary = try engine.telemetry.machineReadableSummary()
         let decoded = try JSONDecoder().decode(HLSFeedTelemetry.Snapshot.self, from: summary)
         XCTAssertEqual(decoded, engine.telemetry.snapshot)
@@ -604,6 +708,7 @@ final class HLSFeedEngineTests: XCTestCase {
                 transitionCount: 500,
                 maximumPlayerPoolOccupancy: decoded.resources.maximumPlayerPoolOccupancy,
                 maximumAllocatedPlayerCount: maximumAllocatedPlayerCount,
+                maximumAudiblePlaybackCount: factory.maximumAudiblePlayingCount,
                 maximumPlayerPoolLimit: policy.concurrency.maximumPlayerCount,
                 allocatedSessionCount: factory.sessions.count,
                 finalPoolOccupancy: engine.snapshot.poolOccupancy,
@@ -615,6 +720,7 @@ final class HLSFeedEngineTests: XCTestCase {
                     $0 + $1.activeStreamingObserverCount
                 },
                 stoppedSessionCount: factory.sessions.filter(\.isStopped).count,
+                finalAudiblePlayingSessionCount: factory.audiblePlayingItemIDs.count,
                 handoffAttemptCount: handoffAttemptCount,
                 handoffSuccessCount: decoded.handoffSuccessCount,
                 handoffSuccessRate: handoffSuccessRate,
@@ -762,6 +868,7 @@ private final class FakeFeedSessionFactory {
     let failsPreparation: Bool
     let usesUnstartedPlatformPlayer: Bool
     private(set) var sessions: [FakeFeedPlayerSession] = []
+    private(set) var maximumAudiblePlayingCount = 0
 
     init(
         loadDelay: Duration = .zero,
@@ -783,12 +890,30 @@ private final class FakeFeedSessionFactory {
             failsPreparation: failsPreparation,
             platformPlayer: usesUnstartedPlatformPlayer ? AVPlayer() : nil
         )
+        session.onPlaybackMutation = { [weak self] in
+            self?.captureAudiblePlaybackCount()
+        }
         sessions.append(session)
+        captureAudiblePlaybackCount()
         return session
     }
 
     func session(loadedWith itemID: FeedItemID) -> FakeFeedPlayerSession? {
         sessions.first { $0.loadedItemID == itemID }
+    }
+
+    var audiblePlayingItemIDs: [FeedItemID] {
+        sessions.compactMap { session in
+            guard session.isPlaying, !session.isMuted else { return nil }
+            return session.loadedItemID
+        }
+    }
+
+    private func captureAudiblePlaybackCount() {
+        maximumAudiblePlayingCount = max(
+            maximumAudiblePlayingCount,
+            sessions.filter { $0.isPlaying && !$0.isMuted }.count
+        )
     }
 }
 
@@ -808,7 +933,10 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     private(set) var stopCount = 0
     private(set) var restartCount = 0
     private(set) var isStopped = false
+    private(set) var isMuted = true
+    private(set) var isPlaying = false
     private(set) var activeStateObserverCount = 0
+    var onPlaybackMutation: (@MainActor () -> Void)?
 
     private let loadDelay: Duration
     private let failingItemIDs: Set<FeedItemID>
@@ -896,8 +1024,18 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     func play() {
         playCount += 1
         if preparationCount == 0 { playBeforePreparationCount += 1 }
+        isPlaying = true
+        onPlaybackMutation?()
     }
-    func pause() { pauseCount += 1 }
+    func pause() {
+        pauseCount += 1
+        isPlaying = false
+        onPlaybackMutation?()
+    }
+    func setMuted(_ isMuted: Bool) {
+        self.isMuted = isMuted
+        onPlaybackMutation?()
+    }
     func setPlaybackRate(_ rate: Float) {}
     func jumpToLive() async throws {}
     func seek(secondsBehindLiveEdge: TimeInterval) async throws {}
@@ -909,6 +1047,9 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     func stopAndWait() async {
         stopCount += 1
         isStopped = true
+        isPlaying = false
+        isMuted = true
+        onPlaybackMutation?()
         transition(to: PlayerState())
         for continuation in continuations.values { continuation.finish() }
         continuations.removeAll()

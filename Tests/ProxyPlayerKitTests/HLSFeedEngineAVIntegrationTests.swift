@@ -71,20 +71,28 @@ final class HLSFeedEngineAVIntegrationTests: XCTestCase {
         try await engine.update(signal(generation: 1, focused: items[0].id))
         var snapshot = await engine.waitUntilSettled()
         XCTAssertEqual(snapshot.activeItemID, items[0].id)
+        XCTAssertEqual(snapshot.audibleItemID, items[0].id)
+        let initiallyFocusedPlayer = try XCTUnwrap(engine.platformPlayer(for: items[0].id))
+        XCTAssertFalse(initiallyFocusedPlayer.isMuted)
         XCTAssertEqual(snapshot.playback(for: items[1].id)?.phase, .warm)
 
         let warmedPlayer = try XCTUnwrap(engine.platformPlayer(for: items[1].id))
         let warmedItem = try XCTUnwrap(warmedPlayer.currentItem)
         XCTAssertEqual(snapshot.playback(for: items[1].id)?.state.status, .ready)
+        XCTAssertTrue(warmedPlayer.isMuted, "the prepared neighbor must remain silent")
 
         try await engine.update(signal(generation: 2, focused: items[1].id))
         snapshot = await engine.waitUntilSettled()
 
         XCTAssertEqual(snapshot.activeItemID, items[1].id)
+        XCTAssertEqual(snapshot.audibleItemID, items[1].id)
         XCTAssertTrue(engine.platformPlayer(for: items[1].id) === warmedPlayer)
         XCTAssertTrue(warmedPlayer.currentItem === warmedItem)
+        XCTAssertFalse(warmedPlayer.isMuted)
+        XCTAssertTrue(initiallyFocusedPlayer.isMuted)
         XCTAssertEqual(snapshot.playback(for: items[1].id)?.phase, .focused)
         XCTAssertEqual(snapshot.maximumObservedPoolOccupancy, 2)
+        XCTAssertEqual(snapshot.maximumObservedAudiblePlaybackCount, 1)
         let requests = origin.timelineSnapshot().filter { $0.kind == .requestStarted }
         XCTAssertEqual(
             requests.filter { $0.path == "/short-a/segment-000.m4s" }.count,
@@ -98,6 +106,7 @@ final class HLSFeedEngineAVIntegrationTests: XCTestCase {
         )
 
         await engine.stop()
+        XCTAssertTrue(warmedPlayer.isMuted)
     }
 
     private func signal(
