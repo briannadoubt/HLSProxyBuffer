@@ -298,10 +298,74 @@ final class HLSFeedEngineTests: XCTestCase {
         XCTAssertEqual(snapshot.poolOccupancy, 0)
         XCTAssertNil(snapshot.activeItemID)
         XCTAssertEqual(snapshot.failures.first?.itemID, items[0].id)
-        XCTAssertEqual(factory.sessions.first?.preparationCount, 1)
+        XCTAssertEqual(factory.sessions.first?.preparationCount, 5)
         XCTAssertEqual(factory.sessions.first?.playCount, 0)
 
         await engine.stop()
+    }
+
+    func testPreparationRetryPolicyClampsAttemptsAndDelay() {
+        let minimum = HLSFeedPlayerPreparationRetryPolicy(
+            maximumAttemptCount: 0,
+            retryDelay: .milliseconds(-50)
+        )
+        let maximum = HLSFeedPlayerPreparationRetryPolicy(
+            maximumAttemptCount: 100,
+            retryDelay: .seconds(10)
+        )
+
+        XCTAssertEqual(minimum.maximumAttemptCount, 1)
+        XCTAssertEqual(minimum.retryDelay, .zero)
+        XCTAssertEqual(maximum.maximumAttemptCount, 5)
+        XCTAssertEqual(maximum.retryDelay, .milliseconds(200))
+    }
+
+    func testTransientPreparationRejectionRetriesThenPublishesWarmLease() async throws {
+        let items = makeItems(count: 1)
+        let policy = try makePolicy(maximumPlayerCount: 1, prefetchItemCount: 0)
+        let factory = FakeFeedSessionFactory(preparationResults: [false, true])
+        let engine = try makeEngine(
+            items: items,
+            policy: policy,
+            factory: factory,
+            playerPreparationRetryPolicy: .init(
+                maximumAttemptCount: 3,
+                retryDelay: .zero
+            )
+        )
+
+        try await engine.update(signal(generation: 1, focused: items[0].id))
+        let snapshot = await engine.waitUntilSettled()
+
+        XCTAssertEqual(snapshot.activeItemID, items[0].id)
+        XCTAssertEqual(snapshot.audibleItemID, items[0].id)
+        XCTAssertEqual(snapshot.playback(for: items[0].id)?.phase, .focused)
+        XCTAssertTrue(snapshot.failures.isEmpty)
+        XCTAssertEqual(factory.sessions.first?.preparationCount, 2)
+
+        await engine.stop()
+    }
+
+    func testCancellationStopsPreparationRetryWithoutWaitingForDelay() async throws {
+        let items = makeItems(count: 1)
+        let policy = try makePolicy(maximumPlayerCount: 1, prefetchItemCount: 0)
+        let factory = FakeFeedSessionFactory(preparationDelay: .seconds(5))
+        let engine = try makeEngine(items: items, policy: policy, factory: factory)
+
+        try await engine.update(signal(generation: 1, focused: items[0].id))
+        for _ in 0..<100 where factory.sessions.first?.preparationCount != 1 {
+            await Task.yield()
+        }
+        XCTAssertEqual(factory.sessions.first?.preparationCount, 1)
+
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        await engine.stop()
+
+        XCTAssertLessThan(startedAt.duration(to: clock.now), .seconds(1))
+        XCTAssertEqual(factory.sessions.first?.preparationCancellationCount, 1)
+        XCTAssertEqual(factory.sessions.first?.preparationCount, 1)
+        XCTAssertEqual(engine.snapshot.activeLoadCount, 0)
     }
 
     func testRuntimePlayerFailureAlsoReleasesItsLeaseAndObservers() async throws {
@@ -743,7 +807,8 @@ final class HLSFeedEngineTests: XCTestCase {
         factory: FakeFeedSessionFactory,
         telemetry: HLSFeedTelemetry? = nil,
         analytics: PlaybackAnalyticsTimeline? = nil,
-        sharedCache: HLSSegmentCache? = nil
+        sharedCache: HLSSegmentCache? = nil,
+        playerPreparationRetryPolicy: HLSFeedPlayerPreparationRetryPolicy = .automaticFeed
     ) throws -> HLSFeedEngine {
         let backend = ImmediateFeedPreparationBackend()
         let coordinator = try FeedCoordinator(items: items, policy: policy, backend: backend)
@@ -754,7 +819,8 @@ final class HLSFeedEngineTests: XCTestCase {
             sessionFactory: { configuration in factory.make(configuration: configuration) },
             telemetry: telemetry ?? HLSFeedTelemetry(),
             analytics: analytics ?? PlaybackAnalyticsTimeline(),
-            sharedCache: sharedCache
+            sharedCache: sharedCache,
+            playerPreparationRetryPolicy: playerPreparationRetryPolicy
         )
     }
 
@@ -866,6 +932,8 @@ private final class FakeFeedSessionFactory {
     let loadDelay: Duration
     let failingItemIDs: Set<FeedItemID>
     let failsPreparation: Bool
+    let preparationResults: [Bool]?
+    let preparationDelay: Duration
     let usesUnstartedPlatformPlayer: Bool
     private(set) var sessions: [FakeFeedPlayerSession] = []
     private(set) var maximumAudiblePlayingCount = 0
@@ -874,11 +942,15 @@ private final class FakeFeedSessionFactory {
         loadDelay: Duration = .zero,
         failingItemIDs: Set<FeedItemID> = [],
         failsPreparation: Bool = false,
+        preparationResults: [Bool]? = nil,
+        preparationDelay: Duration = .zero,
         usesUnstartedPlatformPlayer: Bool = false
     ) {
         self.loadDelay = loadDelay
         self.failingItemIDs = failingItemIDs
         self.failsPreparation = failsPreparation
+        self.preparationResults = preparationResults
+        self.preparationDelay = preparationDelay
         self.usesUnstartedPlatformPlayer = usesUnstartedPlatformPlayer
     }
 
@@ -888,6 +960,8 @@ private final class FakeFeedSessionFactory {
             loadDelay: loadDelay,
             failingItemIDs: failingItemIDs,
             failsPreparation: failsPreparation,
+            preparationResults: preparationResults,
+            preparationDelay: preparationDelay,
             platformPlayer: usesUnstartedPlatformPlayer ? AVPlayer() : nil
         )
         session.onPlaybackMutation = { [weak self] in
@@ -927,6 +1001,7 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     private(set) var loadedClipCount = 0
     private(set) var loadCount = 0
     private(set) var preparationCount = 0
+    private(set) var preparationCancellationCount = 0
     private(set) var playCount = 0
     private(set) var playBeforePreparationCount = 0
     private(set) var pauseCount = 0
@@ -941,6 +1016,8 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     private let loadDelay: Duration
     private let failingItemIDs: Set<FeedItemID>
     private let failsPreparation: Bool
+    private var preparationResults: [Bool]
+    private let preparationDelay: Duration
     private var continuations: [UUID: AsyncStream<PlayerState>.Continuation] = [:]
     private var streamingContinuations: [
         UUID: AsyncStream<HLSStreamingTelemetry.Snapshot>.Continuation
@@ -954,12 +1031,16 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
         loadDelay: Duration,
         failingItemIDs: Set<FeedItemID>,
         failsPreparation: Bool,
+        preparationResults: [Bool]?,
+        preparationDelay: Duration,
         platformPlayer: AVPlayer?
     ) {
         self.configuration = configuration
         self.loadDelay = loadDelay
         self.failingItemIDs = failingItemIDs
         self.failsPreparation = failsPreparation
+        self.preparationResults = preparationResults ?? []
+        self.preparationDelay = preparationDelay
         self.feedPlatformPlayer = platformPlayer
     }
 
@@ -1016,9 +1097,32 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
         isStopped = false
     }
 
-    func prepareForImmediatePlayback() async -> Bool {
-        preparationCount += 1
-        return !failsPreparation
+    func prepareForImmediatePlayback(
+        retryPolicy: HLSFeedPlayerPreparationRetryPolicy
+    ) async -> Bool {
+        for attempt in 1...retryPolicy.maximumAttemptCount {
+            preparationCount += 1
+            if preparationDelay > .zero {
+                do {
+                    try await Task.sleep(for: preparationDelay)
+                } catch {
+                    preparationCancellationCount += 1
+                    return false
+                }
+            }
+            let didPrepare = preparationResults.isEmpty
+                ? !failsPreparation
+                : preparationResults.removeFirst()
+            if didPrepare { return true }
+            guard attempt < retryPolicy.maximumAttemptCount else { return false }
+            do {
+                try await Task.sleep(for: retryPolicy.retryDelay * attempt)
+            } catch {
+                preparationCancellationCount += 1
+                return false
+            }
+        }
+        return false
     }
 
     func play() {

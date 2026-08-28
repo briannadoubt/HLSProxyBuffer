@@ -112,7 +112,9 @@ protocol HLSFeedPlayerSession: AnyObject {
     func telemetryUpdates() async -> AsyncStream<HLSStreamingTelemetry.Snapshot>
     func load(from remoteURL: URL, quality: HLSRewriteConfiguration.QualityPolicy) async
     func load(clips: [ProxyPlaybackClip]) async throws
-    func prepareForImmediatePlayback() async -> Bool
+    func prepareForImmediatePlayback(
+        retryPolicy: HLSFeedPlayerPreparationRetryPolicy
+    ) async -> Bool
     func play()
     func pause()
     func setMuted(_ isMuted: Bool)
@@ -137,7 +139,9 @@ extension HLSFeedPlayerSession {
 extension ProxyHLSPlayer: HLSFeedPlayerSession {
     var feedPlatformPlayer: AVPlayer? { player }
 
-    func prepareForImmediatePlayback() async -> Bool {
+    func prepareForImmediatePlayback(
+        retryPolicy: HLSFeedPlayerPreparationRetryPolicy
+    ) async -> Bool {
         guard let player, let item = player.currentItem else { return false }
         player.pause()
 
@@ -155,12 +159,35 @@ extension ProxyHLSPlayer: HLSFeedPlayerSession {
             return false
         }
 
-        let rate = playbackRate
-        return await withTaskCancellationHandler {
-            await player.preroll(atRate: rate)
-        } onCancel: {
-            player.cancelPendingPrerolls()
+        for attempt in 1...retryPolicy.maximumAttemptCount {
+            guard !Task.isCancelled,
+                  player.status == .readyToPlay,
+                  item.status == .readyToPlay
+            else {
+                return false
+            }
+            let rate = playbackRate
+            let didPrepare = await withTaskCancellationHandler {
+                await player.preroll(atRate: rate)
+            } onCancel: {
+                player.cancelPendingPrerolls()
+            }
+            if didPrepare { return true }
+            guard attempt < retryPolicy.maximumAttemptCount,
+                  !Task.isCancelled
+            else {
+                return false
+            }
+            do {
+                // A preroll can be interrupted by a transient media time or
+                // rate transition. Linear backoff gives that transition time
+                // to settle while the hard attempt cap bounds total latency.
+                try await Task.sleep(for: retryPolicy.retryDelay * attempt)
+            } catch {
+                return false
+            }
         }
+        return false
     }
 
     func setMuted(_ isMuted: Bool) {
@@ -172,6 +199,26 @@ extension ProxyHLSPlayer: HLSFeedPlayerSession {
         player.currentItem?.cancelPendingSeeks()
         await player.seek(to: .zero)
         play()
+    }
+}
+
+struct HLSFeedPlayerPreparationRetryPolicy: Equatable, Sendable {
+    private static let maximumRetryDelay: Duration = .milliseconds(200)
+
+    static let automaticFeed = Self(
+        maximumAttemptCount: 5,
+        retryDelay: .milliseconds(50)
+    )
+
+    let maximumAttemptCount: Int
+    let retryDelay: Duration
+
+    init(maximumAttemptCount: Int, retryDelay: Duration) {
+        self.maximumAttemptCount = min(max(1, maximumAttemptCount), 5)
+        self.retryDelay = min(
+            max(.zero, retryDelay),
+            Self.maximumRetryDelay
+        )
     }
 }
 
@@ -280,6 +327,8 @@ public final class HLSFeedEngine {
     @ObservationIgnored private let sessionFactory: SessionFactory
     @ObservationIgnored private let sharedCache: HLSSegmentCache?
     @ObservationIgnored private let telemetryClock: FeedCoordinatorClock
+    @ObservationIgnored private let playerPreparationRetryPolicy:
+        HLSFeedPlayerPreparationRetryPolicy
     @ObservationIgnored private var slots: [Slot] = []
     @ObservationIgnored private var slotIDByItemID: [FeedItemID: UUID] = [:]
     @ObservationIgnored private var desiredItemIDs: Set<FeedItemID> = []
@@ -361,6 +410,7 @@ public final class HLSFeedEngine {
         backgroundWarmer: HLSFeedBackgroundWarmer? = nil,
         sharedCache: HLSSegmentCache? = nil,
         telemetryClock: FeedCoordinatorClock = .continuous,
+        playerPreparationRetryPolicy: HLSFeedPlayerPreparationRetryPolicy = .automaticFeed,
         sourceTransportPolicy: HLSFeedSourceTransportPolicy = .secureOnly
     ) throws {
         let validatedPolicy = try policy.validated()
@@ -380,6 +430,7 @@ public final class HLSFeedEngine {
         self.backgroundWarmer = backgroundWarmer
         self.sharedCache = sharedCache
         self.telemetryClock = telemetryClock
+        self.playerPreparationRetryPolicy = playerPreparationRetryPolicy
         startCoordinatorObservation()
     }
 
@@ -951,7 +1002,9 @@ public final class HLSFeedEngine {
                 }
                 slot.session.setMuted(true)
                 let isPreparedForImmediatePlayback = await slot.session
-                    .prepareForImmediatePlayback()
+                    .prepareForImmediatePlayback(
+                        retryPolicy: self.playerPreparationRetryPolicy
+                    )
                 guard self.owns(slot, token: token), !Task.isCancelled else {
                     self.recordStaleCompletion()
                     return
@@ -1123,7 +1176,13 @@ public final class HLSFeedEngine {
         switch state.status {
         case .ready:
             finishStallIfNeeded(in: &lease)
-            if lease.phase == .loading { lease.phase = .warm }
+            // AVPlayer can publish `.readyToPlay` before its preroll callback
+            // succeeds. Keep the lease loading until the full initial load,
+            // including bounded preparation, has completed so observation
+            // cannot activate an unprimed player while preparation is retrying.
+            if lease.didCompleteInitialLoad, lease.phase == .loading {
+                lease.phase = .warm
+            }
             if lease.didCompleteInitialLoad, slot.playbackEndObserver == nil {
                 installPlaybackEndObserver(for: slot, token: token)
             }

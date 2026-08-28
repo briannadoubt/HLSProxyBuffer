@@ -70,11 +70,23 @@ final class HLSFeedEngineAVIntegrationTests: XCTestCase {
 
         try await engine.update(signal(generation: 1, focused: items[0].id))
         var snapshot = await engine.waitUntilSettled()
-        XCTAssertEqual(snapshot.activeItemID, items[0].id)
-        XCTAssertEqual(snapshot.audibleItemID, items[0].id)
+        XCTAssertEqual(
+            snapshot.activeItemID,
+            items[0].id,
+            "initial playback failures: \(snapshot.failures)"
+        )
+        XCTAssertEqual(
+            snapshot.audibleItemID,
+            items[0].id,
+            "initial playback failures: \(snapshot.failures)"
+        )
         let initiallyFocusedPlayer = try XCTUnwrap(engine.platformPlayer(for: items[0].id))
         XCTAssertFalse(initiallyFocusedPlayer.isMuted)
-        XCTAssertEqual(snapshot.playback(for: items[1].id)?.phase, .warm)
+        XCTAssertEqual(
+            snapshot.playback(for: items[1].id)?.phase,
+            .warm,
+            "neighbor preparation failures: \(snapshot.failures)"
+        )
 
         let warmedPlayer = try XCTUnwrap(engine.platformPlayer(for: items[1].id))
         let warmedItem = try XCTUnwrap(warmedPlayer.currentItem)
@@ -160,8 +172,10 @@ private final class InsecureFeedPlayerSession: HLSFeedPlayerSession {
     }
 
     func load(clips: [ProxyPlaybackClip]) async throws { try await player.load(clips: clips) }
-    func prepareForImmediatePlayback() async -> Bool {
-        await player.prepareForImmediatePlayback()
+    func prepareForImmediatePlayback(
+        retryPolicy: HLSFeedPlayerPreparationRetryPolicy
+    ) async -> Bool {
+        await player.prepareForImmediatePlayback(retryPolicy: retryPolicy)
     }
     func play() { player.play() }
     func pause() { player.pause() }
