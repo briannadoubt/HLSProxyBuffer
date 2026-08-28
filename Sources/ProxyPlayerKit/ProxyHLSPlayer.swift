@@ -159,6 +159,7 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var currentLiveWindow: HLSLiveWindow?
     @ObservationIgnored private var currentRewriteConfiguration: HLSRewriteConfiguration?
     @ObservationIgnored private var didPreparePlayerForCurrentLoad = false
+    @ObservationIgnored private var isFeedPlaybackMuted = false
     @ObservationIgnored private lazy var server = ProxyServer(router: router)
     @ObservationIgnored private let diagnostics: ProxyPlayerDiagnostics
     @ObservationIgnored private let telemetry: HLSStreamingTelemetry
@@ -412,6 +413,15 @@ public final class ProxyHLSPlayer {
     public func pause() {
         shouldPlayWhenReady = false
         player?.pause()
+    }
+
+    /// Persists feed-owned audio eligibility across asynchronous AVPlayer item
+    /// installation. This is internal because standalone adopters should use
+    /// normal AVPlayer audio controls; the feed engine owns its mute contract.
+    func setFeedPlaybackMuted(_ isMuted: Bool) {
+        isFeedPlaybackMuted = isMuted
+        player?.isMuted = isMuted
+        player?.volume = isMuted ? 0 : 1
     }
 
     /// Selects the forward-playback rate used by the current item and future replacements.
@@ -801,6 +811,8 @@ public final class ProxyHLSPlayer {
         } else {
             player = AVPlayer(url: url)
         }
+        player?.isMuted = isFeedPlaybackMuted
+        player?.volume = isFeedPlaybackMuted ? 0 : 1
         player?.defaultRate = playbackRate
         installPlaybackTimeObserver()
         publishLivePlayback(playbackTime: player?.currentTime().seconds)

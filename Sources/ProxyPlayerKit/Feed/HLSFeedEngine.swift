@@ -164,7 +164,7 @@ extension ProxyHLSPlayer: HLSFeedPlayerSession {
     }
 
     func setMuted(_ isMuted: Bool) {
-        player?.isMuted = isMuted
+        setFeedPlaybackMuted(isMuted)
     }
 
     func restartPlayback() async {
@@ -642,6 +642,11 @@ public final class HLSFeedEngine {
     public func stop() async {
         guard !isStopped else { return }
         isStopped = true
+        // Silence every lease before the first suspension point. Coordinator,
+        // background, and session teardown may take time, but no retained
+        // platform player is allowed to remain audible during that work.
+        let retainedPlatformPlayers = slots.compactMap { $0.session.feedPlatformPlayer }
+        deactivateActivePlayback()
         if pendingFocus != nil { completePendingFocus(succeeded: false) }
         let coordinatorObservationTask = coordinatorObservationTask
         let cacheSampleTask = cacheSampleTask
@@ -678,6 +683,15 @@ public final class HLSFeedEngine {
         for task in observationTasks { await task.value }
         for task in analyticsTasks { await task.value }
         for slot in slots { await slot.session.stopAndWait() }
+        // Session teardown releases its engine-owned AVPlayer reference. Keep
+        // external read-only references silent even if a late AVFoundation
+        // callback raced with observer cancellation while teardown awaited.
+        for player in retainedPlatformPlayers {
+            player.isMuted = true
+            player.volume = 0
+            player.pause()
+            player.cancelPendingPrerolls()
+        }
         for attempt in analyticsAttempts where analytics.isActive(attempt) {
             analytics.end(attempt, lifecycle: .cancelled)
         }
