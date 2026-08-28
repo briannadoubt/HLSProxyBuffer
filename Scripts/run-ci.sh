@@ -36,6 +36,13 @@ swift test \
   --skip 'PlaybackAnalyticsQualificationTests' \
   --skip 'PlaybackAnalyticsPerformanceTests'
 
+FEED_QUALIFICATION_REPORT="$QUALIFICATION_ARTIFACT_DIR/hls-feed-qualification.json"
+if [ ! -s "$FEED_QUALIFICATION_REPORT" ]; then
+  echo "Missing feed qualification report: $FEED_QUALIFICATION_REPORT"
+  exit 1
+fi
+echo "Feed qualification report: $FEED_QUALIFICATION_REPORT"
+
 if command -v xcodebuild >/dev/null 2>&1; then
   IOS_SIM_NAME="iPhone Air"
   IOS_SIM_UDID=$(xcrun simctl list devices "iOS" | grep "$IOS_SIM_NAME" | head -n 1 | sed -n 's/.*(\([0-9A-F-]*\)).*/\1/p' || true)

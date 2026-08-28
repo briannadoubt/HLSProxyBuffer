@@ -316,6 +316,27 @@ Every stress runner must persist or attach
 JSON snapshot includes the exact storage bound and dropped/rejected consumer
 counts as well as distributions, counters, and resource high-water marks.
 
+`HLSFeedQualificationReport` is the schema-versioned release envelope. It
+combines the bounded telemetry snapshot, the stopped engine snapshot, the
+validated typed policy, and fixed-cardinality outcomes for cold/no-cache,
+warm-disk launch, revisit, forward/backward paging, rapid fling, direction
+reversal, memory pressure, cache eviction, background/foreground, warm and
+uncached offline launch, poor network, and transient failure recovery. Its
+sorted-key JSON contains request and byte totals for both cache and origin,
+memory/disk entries and high-water marks, eviction reasons, cancellation and
+stall distributions, handoff outcomes, pool occupancy, stale focus, and leak
+accounting. It deliberately contains no item IDs, URLs, request headers, or
+user-derived dimensions. Missing or duplicate scenarios, failed scenarios,
+budget violations, multiple audible players, stale playback, and undrained
+loads all fail the report closed.
+
+`Scripts/run-ci.sh` requires the host suite to emit
+`hls-feed-qualification.json` before any simulator gate begins. The primary
+vertical-feed UI qualification supplies the platform first-frame and real
+paging evidence; deterministic production-backend tests supply cache, origin,
+retry, offline, pressure, eviction, and cancellation evidence for the same
+contract.
+
 The first-frame timestamp is deliberately measured from accepted focus to the
 engine-owned AVPlayer entering its `.playing` time-control state. A predicted
 lease is not declared warm immediately after proxy readiness: the engine first
