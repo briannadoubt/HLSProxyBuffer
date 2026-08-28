@@ -165,68 +165,30 @@ private struct FeedDemoShell: View {
     let model: FeedDemoModel
 
     var body: some View {
-        GeometryReader { proxy in
-            ZStack {
-                LinearGradient(
-                    colors: [Color(red: 0.035, green: 0.04, blue: 0.075), .black],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                .ignoresSafeArea()
-
-                VStack(spacing: 14) {
-                    FeedDemoHeader(
-                        mode: model.selectedMode,
-                        status: model.status,
-                        isLowPowerModeEnabled: model.isLowPowerModeEnabled,
-                        onLowPowerChange: { enabled in
-                            Task { await model.setLowPowerModeEnabled(enabled) }
-                        }
-                    )
-                    FeedDemoModeRail(
-                        selectedMode: model.selectedMode,
-                        onSelect: { mode in
-                            Task { await model.select(mode) }
-                        }
-                    )
-                    if let engine = model.engine {
-                        FeedDemoViewport(
-                            entries: model.entries,
-                            engine: engine,
-                            snapshot: model.engineSnapshot,
-                            focusedItemID: model.focusedItemID,
-                            layout: model.selectedMode.layout,
-                            onGeometryChange: model.observe,
-                            onFocusRequest: model.requestFocus
-                        )
-                    } else {
-                        FeedDemoLoadingView(status: model.status)
-                    }
-
-                    if model.selectedMode == .liveDVR, model.engine != nil {
-                        FeedDemoLiveControls(
-                            onSeek: { seconds in
-                                Task { await model.seekBehindLiveEdge(seconds: seconds) }
-                            },
-                            onJumpToLive: {
-                                Task { await model.jumpToLive() }
-                            }
-                        )
-                    }
-
-                    FeedDemoMetricsGrid(metrics: model.metrics)
-                }
-                .padding()
-
-            }
-            .frame(width: proxy.size.width, height: proxy.size.height)
-            .overlay(alignment: .bottomTrailing) {
-                FeedDemoAnalyticsLauncher(
-                    inspector: model.analyticsInspector,
-                    onOpen: { isInspectorPresented = true }
-                )
-                .padding()
-            }
+        ZStack {
+            Color.black.ignoresSafeArea()
+            FeedDemoPrimaryContent(model: model)
+        }
+        .overlay(alignment: .top) {
+            FeedDemoPrimaryChrome(model: model)
+        }
+        .overlay(alignment: .bottom) {
+            FeedDemoPrimaryHUD(
+                entries: model.entries,
+                focusedItemID: model.focusedItemID,
+                focusedPlayback: model.focusedItemID.flatMap {
+                    model.engineSnapshot.playback(for: $0)
+                },
+                metrics: model.metrics
+            )
+        }
+        .overlay(alignment: .bottomTrailing) {
+            FeedDemoAnalyticsLauncher(
+                inspector: model.analyticsInspector,
+                onOpen: { isInspectorPresented = true }
+            )
+            .padding(.trailing, 16)
+            .padding(.bottom, 184)
         }
         .tint(.mint)
         .sheet(isPresented: $isInspectorPresented) {
@@ -235,6 +197,201 @@ private struct FeedDemoShell: View {
                 onClose: { isInspectorPresented = false }
             )
         }
+    }
+}
+
+private struct FeedDemoPrimaryContent: View {
+    let model: FeedDemoModel
+
+    var body: some View {
+        ZStack {
+            if let engine = model.engine {
+                FeedDemoViewport(
+                    entries: model.entries,
+                    engine: engine,
+                    snapshot: model.engineSnapshot,
+                    focusedItemID: model.focusedItemID,
+                    layout: model.selectedMode.layout,
+                    onGeometryChange: model.observe,
+                    onScrollGeometryChange: model.observe,
+                    onFocusRequest: model.requestFocus
+                )
+                .ignoresSafeArea()
+            } else {
+                LinearGradient(
+                    colors: [Color(red: 0.035, green: 0.04, blue: 0.075), .black],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .ignoresSafeArea()
+                FeedDemoLoadingView(status: model.status)
+            }
+        }
+    }
+}
+
+private struct FeedDemoPrimaryChrome: View {
+    let model: FeedDemoModel
+
+    var body: some View {
+        VStack(spacing: 10) {
+            FeedDemoHeader(
+                mode: model.selectedMode,
+                status: model.status,
+                isLowPowerModeEnabled: model.isLowPowerModeEnabled,
+                onLowPowerChange: { enabled in
+                    Task { await model.setLowPowerModeEnabled(enabled) }
+                }
+            )
+            FeedDemoModeRail(
+                selectedMode: model.selectedMode,
+                onSelect: { mode in
+                    Task { await model.select(mode) }
+                }
+            )
+            if model.selectedMode == .liveDVR, model.engine != nil {
+                FeedDemoLiveControls(
+                    onSeek: { seconds in
+                        Task { await model.seekBehindLiveEdge(seconds: seconds) }
+                    },
+                    onJumpToLive: {
+                        Task { await model.jumpToLive() }
+                    }
+                )
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 24)
+        .background {
+            LinearGradient(
+                colors: [.black.opacity(0.82), .black.opacity(0.5), .clear],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea(edges: .top)
+        }
+    }
+}
+
+private struct FeedDemoPrimaryHUD: View {
+    let entries: [FeedDemoEntry]
+    let focusedItemID: FeedItemID?
+    let focusedPlayback: HLSFeedPlayback?
+    let metrics: FeedDemoMetrics
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(positionText)
+                    .font(.caption.monospacedDigit().weight(.bold))
+                Spacer()
+                Text(playbackStatus.title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(playbackStatus == .playing ? .mint : .white)
+                    .accessibilityIdentifier("feed-focused-playback")
+                    .accessibilityValue(playbackStatus.accessibilityValue)
+                Text(verbatim: focusedItemID?.rawValue ?? "pending")
+                    .font(.caption.monospaced())
+                    .lineLimit(1)
+                    .accessibilityIdentifier("feed-focused-item")
+                    .accessibilityValue(focusedItemID?.rawValue ?? "pending")
+            }
+            HStack(spacing: 12) {
+                FeedDemoHUDMetric(
+                    title: LocalizedStringResource("Players", bundle: #bundle),
+                    value: "\(metrics.playerCount)/\(metrics.playerLimit)"
+                )
+                FeedDemoHUDMetric(
+                    title: LocalizedStringResource("Handoffs", bundle: #bundle),
+                    value: "\(metrics.handoffSuccessCount)"
+                )
+                FeedDemoHUDMetric(
+                    title: LocalizedStringResource("Cache", bundle: #bundle),
+                    value: metrics.cacheHitRate.map {
+                        $0.formatted(.percent.precision(.fractionLength(0)))
+                    } ?? "—"
+                )
+                FeedDemoHUDMetric(
+                    title: LocalizedStringResource("Cancels", bundle: #bundle),
+                    value: "\(metrics.acknowledgedCancellationCount)"
+                )
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
+    }
+
+    private var positionText: LocalizedStringResource {
+        guard let focusedItemID,
+              let index = entries.firstIndex(where: { $0.id == focusedItemID })
+        else {
+            return LocalizedStringResource("Preparing feed", bundle: #bundle)
+        }
+        return LocalizedStringResource(
+            "Moment \(index + 1) of \(entries.count)",
+            bundle: #bundle
+        )
+    }
+
+    private var playbackStatus: PlaybackStatus {
+        if focusedPlayback?.hasStartedPlayback == true { return .playing }
+        return switch focusedPlayback?.phase {
+        case .focused: .preparing
+        case .warm: .ready
+        case .loading: .preparing
+        case .failed: .failed
+        case nil: .queued
+        }
+    }
+
+    private enum PlaybackStatus: Equatable {
+        case playing
+        case ready
+        case preparing
+        case failed
+        case queued
+
+        var title: LocalizedStringResource {
+            switch self {
+            case .playing: LocalizedStringResource("Playing", bundle: #bundle)
+            case .ready: LocalizedStringResource("Ready", bundle: #bundle)
+            case .preparing: LocalizedStringResource("Preparing", bundle: #bundle)
+            case .failed: LocalizedStringResource("Failed", bundle: #bundle)
+            case .queued: LocalizedStringResource("Queued", bundle: #bundle)
+            }
+        }
+
+        var accessibilityValue: String {
+            switch self {
+            case .playing: "Playing"
+            case .ready: "Ready"
+            case .preparing: "Preparing"
+            case .failed: "Failed"
+            case .queued: "Queued"
+            }
+        }
+    }
+}
+
+private struct FeedDemoHUDMetric: View {
+    let title: LocalizedStringResource
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.65))
+            Text(verbatim: value)
+                .font(.caption.monospacedDigit().weight(.semibold))
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -290,7 +447,9 @@ private struct FeedDemoLowPowerToggle: View {
                 Image(systemName: "leaf.fill")
             }
         }
+        .labelStyle(.iconOnly)
         .accessibilityIdentifier("low-power-toggle")
+        .accessibilityLabel(Text("Low power", bundle: #bundle))
     }
 }
 
@@ -395,50 +554,64 @@ private struct FeedDemoViewport: View {
     let focusedItemID: FeedItemID?
     let layout: FeedDemoLayout
     let onGeometryChange: ([FeedItemID: CGRect], CGRect) -> Void
+    let onScrollGeometryChange: (FeedDemoScrollGeometrySample) -> Void
     let onFocusRequest: (FeedItemID) -> Void
 
     var body: some View {
         GeometryReader { proxy in
             let viewport = CGRect(origin: .zero, size: proxy.size)
-            Group {
-                switch layout {
-                case .paged:
-                    FeedDemoPagedScroller(
+            switch layout {
+            case .paged:
+                if #available(iOS 18, macOS 15, tvOS 18, visionOS 2, *) {
+                    FeedDemoModernPagedScroller(
+                        entries: entries,
+                        engine: engine,
+                        snapshot: snapshot,
+                        focusedItemID: focusedItemID,
+                        onScrollGeometryChange: onScrollGeometryChange,
+                        onFocusRequest: onFocusRequest
+                    )
+                    .id(entries.first?.id)
+                } else {
+                    FeedDemoLegacyPagedScroller(
                         entries: entries,
                         engine: engine,
                         snapshot: snapshot,
                         focusedItemID: focusedItemID,
                         viewportHeight: proxy.size.height,
+                        viewport: viewport,
+                        onGeometryChange: onGeometryChange,
                         onFocusRequest: onFocusRequest
                     )
-                case .windowed:
-                    FeedDemoWindowedScroller(
-                        entries: entries,
-                        engine: engine,
-                        snapshot: snapshot,
-                        focusedItemID: focusedItemID,
-                        viewportHeight: proxy.size.height,
-                        onFocusRequest: onFocusRequest
-                    )
+                    .id(entries.first?.id)
+                }
+            case .windowed:
+                FeedDemoWindowedScroller(
+                    entries: entries,
+                    engine: engine,
+                    snapshot: snapshot,
+                    focusedItemID: focusedItemID,
+                    viewportHeight: proxy.size.height,
+                    onFocusRequest: onFocusRequest
+                )
+                .coordinateSpace(name: "HLSFeedViewport")
+                .onPreferenceChange(FeedDemoFramePreferenceKey.self) { frames in
+                    onGeometryChange(frames, viewport)
                 }
             }
-            .coordinateSpace(name: "HLSFeedViewport")
-            .onPreferenceChange(FeedDemoFramePreferenceKey.self) { frames in
-                onGeometryChange(frames, viewport)
-            }
         }
-        .frame(minHeight: 300)
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .accessibilityIdentifier("automatic-feed-viewport")
     }
 }
 
-private struct FeedDemoPagedScroller: View {
+@available(iOS 18, macOS 15, tvOS 18, visionOS 2, *)
+private struct FeedDemoModernPagedScroller: View {
+    @State private var scrollPositionID: FeedItemID?
+
     let entries: [FeedDemoEntry]
     let engine: HLSFeedEngine
     let snapshot: HLSFeedEngineSnapshot
     let focusedItemID: FeedItemID?
-    let viewportHeight: CGFloat
+    let onScrollGeometryChange: (FeedDemoScrollGeometrySample) -> Void
     let onFocusRequest: (FeedItemID) -> Void
 
     var body: some View {
@@ -450,10 +623,66 @@ private struct FeedDemoPagedScroller: View {
                         engine: engine,
                         playback: snapshot.playback(for: entry.id),
                         isFocused: focusedItemID == entry.id,
+                        cornerRadius: 0,
+                        contentBottomPadding: 128,
+                        showsTopStatus: false,
                         onFocusRequest: onFocusRequest
                     )
-                    .padding(10)
-                    .frame(height: max(300, viewportHeight))
+                    .containerRelativeFrame([.horizontal, .vertical])
+                    .id(entry.id)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .scrollTargetBehavior(.paging)
+        .scrollPosition(id: $scrollPositionID, anchor: .center)
+        .scrollIndicators(.hidden)
+        .background(.black)
+        .onAppear {
+            scrollPositionID = focusedItemID ?? entries.first?.id
+        }
+        .onChange(of: scrollPositionID) { _, itemID in
+            if let itemID { onFocusRequest(itemID) }
+        }
+        .onScrollGeometryChange(for: FeedDemoScrollGeometrySample.self) { geometry in
+            FeedDemoScrollGeometrySample(
+                contentOffsetY: geometry.visibleRect.minY,
+                viewportSize: geometry.containerSize
+            )
+        } action: { _, sample in
+            onScrollGeometryChange(sample)
+        }
+        .accessibilityIdentifier("primary-vertical-feed")
+    }
+}
+
+private struct FeedDemoLegacyPagedScroller: View {
+    @State private var scrollPositionID: FeedItemID?
+
+    let entries: [FeedDemoEntry]
+    let engine: HLSFeedEngine
+    let snapshot: HLSFeedEngineSnapshot
+    let focusedItemID: FeedItemID?
+    let viewportHeight: CGFloat
+    let viewport: CGRect
+    let onGeometryChange: ([FeedItemID: CGRect], CGRect) -> Void
+    let onFocusRequest: (FeedItemID) -> Void
+
+    var body: some View {
+        ScrollView(.vertical) {
+            LazyVStack(spacing: 0) {
+                ForEach(entries) { entry in
+                    FeedDemoCard(
+                        entry: entry,
+                        engine: engine,
+                        playback: snapshot.playback(for: entry.id),
+                        isFocused: focusedItemID == entry.id,
+                        cornerRadius: 0,
+                        contentBottomPadding: 128,
+                        showsTopStatus: false,
+                        onFocusRequest: onFocusRequest
+                    )
+                    .frame(height: viewportHeight)
                     .feedDemoGeometry(itemID: entry.id)
                     .id(entry.id)
                 }
@@ -461,8 +690,20 @@ private struct FeedDemoPagedScroller: View {
             .scrollTargetLayout()
         }
         .scrollTargetBehavior(.paging)
+        .scrollPosition(id: $scrollPositionID, anchor: .center)
         .scrollIndicators(.hidden)
-        .background(.black.opacity(0.25))
+        .background(.black)
+        .coordinateSpace(name: "HLSFeedViewport")
+        .onPreferenceChange(FeedDemoFramePreferenceKey.self) { frames in
+            onGeometryChange(frames, viewport)
+        }
+        .onAppear {
+            scrollPositionID = focusedItemID ?? entries.first?.id
+        }
+        .onChange(of: scrollPositionID) { _, itemID in
+            if let itemID { onFocusRequest(itemID) }
+        }
+        .accessibilityIdentifier("primary-vertical-feed")
     }
 }
 
@@ -483,6 +724,9 @@ private struct FeedDemoWindowedScroller: View {
                         engine: engine,
                         playback: snapshot.playback(for: entry.id),
                         isFocused: focusedItemID == entry.id,
+                        cornerRadius: 20,
+                        contentBottomPadding: 18,
+                        showsTopStatus: true,
                         onFocusRequest: onFocusRequest
                     )
                     .frame(height: max(260, viewportHeight * 0.72))
@@ -504,6 +748,9 @@ private struct FeedDemoCard: View {
     let engine: HLSFeedEngine
     let playback: HLSFeedPlayback?
     let isFocused: Bool
+    let cornerRadius: CGFloat
+    let contentBottomPadding: CGFloat
+    let showsTopStatus: Bool
     let onFocusRequest: (FeedItemID) -> Void
 
     var body: some View {
@@ -529,17 +776,19 @@ private struct FeedDemoCard: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    FeedDemoPhaseBadge(playback: playback)
-                    Spacer()
-                    if isFocused {
-                        Label {
-                            Text("Focused", bundle: #bundle)
-                        } icon: {
-                            Image(systemName: "play.fill")
+                if showsTopStatus {
+                    HStack {
+                        FeedDemoPhaseBadge(playback: playback)
+                        Spacer()
+                        if isFocused {
+                            Label {
+                                Text("Focused", bundle: #bundle)
+                            } icon: {
+                                Image(systemName: "play.fill")
+                            }
+                            .font(.caption.bold())
+                            .foregroundStyle(.mint)
                         }
-                        .font(.caption.bold())
-                        .foregroundStyle(.mint)
                     }
                 }
                 Spacer()
@@ -550,12 +799,14 @@ private struct FeedDemoCard: View {
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.72))
             }
-            .padding(18)
+            .padding(.horizontal, 18)
+            .padding(.top, 18)
+            .padding(.bottom, contentBottomPadding)
         }
-        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .stroke(isFocused ? Color.mint : Color.white.opacity(0.12), lineWidth: isFocused ? 3 : 1)
         }
         .onTapGesture { onFocusRequest(entry.id) }

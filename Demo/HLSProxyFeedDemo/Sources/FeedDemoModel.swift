@@ -95,7 +95,24 @@ final class FeedDemoModel {
         submitSignal(requestedFocus: nil)
     }
 
+    func observe(scrollGeometry sample: FeedDemoScrollGeometrySample) {
+        guard sample.viewportSize.height > 0, !entries.isEmpty else { return }
+        let prefetch = selectedMode.policy.prefetch
+        let frames = FeedDemoScrollGeometryProjector.frames(
+            itemIDs: signalBuilder.orderedItemIDs,
+            focusedItemID: signalBuilder.focusedItemID,
+            sample: sample,
+            itemsBehind: prefetch.behindItemCount,
+            itemsAhead: prefetch.aheadItemCount
+        )
+        observe(
+            frames: frames,
+            viewport: CGRect(origin: .zero, size: sample.viewportSize)
+        )
+    }
+
     func requestFocus(_ itemID: FeedItemID) {
+        guard signalBuilder.focusedItemID != itemID else { return }
         submitSignal(requestedFocus: itemID)
     }
 

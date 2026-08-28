@@ -155,6 +155,18 @@ warm or focused lease. It never creates, loads, plays, pauses, or destroys an
 ready focused destination, preserves the destination's existing player item at
 handoff, and detaches recycled leases from their surfaces.
 
+The repository demo launches directly into a full-height vertical feed. On
+current OS releases it uses paged scroll targets, bound scroll position, and a
+coarsened `onScrollGeometryChange` sample to move the engine's bounded working
+set. Its iOS 17 compatibility path projects the same UI-independent signal from
+preference-key geometry, so policy and playback ownership do not fork by OS.
+Changing source modes gives the scroller a new stable identity, atomically
+resetting focus instead of carrying an obsolete page position into a new
+catalog. Page, focused-item, and playback accessibility values make real swipe,
+forward/backward, and direction-reversal behavior observable to UI tests. The
+button-driven qualification view remains available only through its explicit
+launch argument as a lower-level 100-navigation performance fixture.
+
 Audio ownership is stricter than surface attachment. Every newly allocated or
 recycled player is muted before loading or preroll. An accepted focus change
 first mutes and pauses the old owner, then unmutes a destination only after its

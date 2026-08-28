@@ -9,7 +9,35 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
     }
 
     @MainActor
+    func testPrimaryFeedUsesRealVerticalPagingAndReversesCleanly() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launch()
+
+        let pager = app.scrollViews["primary-vertical-feed"]
+        XCTAssertTrue(pager.waitForExistence(timeout: 10))
+        let focusedItem = app.staticTexts["feed-focused-item"]
+        let focusedPlayback = app.staticTexts["feed-focused-playback"]
+        XCTAssertTrue(waitForValue("short-0", in: focusedItem, timeout: 10))
+        XCTAssertTrue(waitForValue("Playing", in: focusedPlayback, timeout: 10))
+
+        pager.swipeUp()
+        XCTAssertTrue(waitForValue("short-1", in: focusedItem, timeout: 10))
+        XCTAssertTrue(waitForValue("Playing", in: focusedPlayback, timeout: 10))
+
+        pager.swipeUp()
+        XCTAssertTrue(waitForValue("short-2", in: focusedItem, timeout: 10))
+        pager.swipeDown()
+        XCTAssertTrue(waitForValue("short-1", in: focusedItem, timeout: 10))
+        XCTAssertTrue(waitForValue("Playing", in: focusedPlayback, timeout: 10))
+
+        let focusedPage = app.descendants(matching: .any)["feed-item-short-1"]
+        XCTAssertTrue(focusedPage.waitForExistence(timeout: 5))
+    }
+
+    @MainActor
     func testOneHundredRapidNavigationsKeepPlaybackAndResourcesCorrect() throws {
+        XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["--qualification-mode"]
         app.launch()
@@ -85,6 +113,7 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
 
     @MainActor
     func testAnalyticsInspectorShowsTypedSanitizedPublicPipeline() throws {
+        XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launch()
 
