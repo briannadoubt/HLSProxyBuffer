@@ -189,9 +189,15 @@ public struct HLSFeedBackgroundWarmingClock: Sendable {
 
 public enum HLSFeedBackgroundWarmingError: Error, Equatable, LocalizedError, Sendable {
     case busy
+    case stopped
 
     public var errorDescription: String? {
-        "Background warming policy cannot change while a request is running"
+        switch self {
+        case .busy:
+            "Background warming policy cannot change while a request is running"
+        case .stopped:
+            "The background warmer has been stopped"
+        }
     }
 }
 
@@ -320,6 +326,8 @@ public actor HLSFeedBackgroundWarmer {
     private var feedPolicy: FeedPlaybackPolicy?
     private var nextGeneration: UInt64 = 0
     private var isRunning = false
+    private var isStopped = false
+    private var activeTask: Task<RaceOutcome, Never>?
     private var outcomeCounts: [HLSFeedBackgroundWarmingSnapshot.Outcome: UInt64] = Dictionary(
         uniqueKeysWithValues: HLSFeedBackgroundWarmingSnapshot.Outcome.allCases.map { ($0, 0) }
     )
@@ -403,6 +411,7 @@ public actor HLSFeedBackgroundWarmer {
 
     public func updatePolicy(_ policy: HLSFeedBackgroundWarmingPolicy) async throws {
         let validated = try policy.validated()
+        guard !isStopped else { throw HLSFeedBackgroundWarmingError.stopped }
         guard !isRunning else { throw HLSFeedBackgroundWarmingError.busy }
         isRunning = true
         defer { isRunning = false }
@@ -420,6 +429,7 @@ public actor HLSFeedBackgroundWarmer {
     /// the validated, background-adapted policy.
     public func updateFeedPolicy(_ feedPolicy: FeedPlaybackPolicy) async throws {
         let validatedFeedPolicy = try feedPolicy.validated()
+        guard !isStopped else { throw HLSFeedBackgroundWarmingError.stopped }
         guard !isRunning else { throw HLSFeedBackgroundWarmingError.busy }
         isRunning = true
         defer { isRunning = false }
@@ -436,6 +446,13 @@ public actor HLSFeedBackgroundWarmer {
 
     /// Newest-only observation with bounded subscriber storage.
     public func updates() -> AsyncStream<HLSFeedBackgroundWarmingSnapshot> {
+        if isStopped {
+            let value = snapshotValue()
+            return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+                continuation.yield(value)
+                continuation.finish()
+            }
+        }
         guard continuations.count < maximumSubscriberCount else {
             rejectedSubscriberCount = Self.add(rejectedSubscriberCount, 1)
             publishSnapshot()
@@ -461,12 +478,25 @@ public actor HLSFeedBackgroundWarmer {
         return try encoder.encode(snapshotValue())
     }
 
+    /// Permanently rejects new work and cancels the active structured batch.
+    public func stop() async {
+        guard !isStopped else { return }
+        isStopped = true
+        let task = activeTask
+        task?.cancel()
+        _ = await task?.value
+        activeTask = nil
+    }
+
     @discardableResult
     public func warm(
         _ request: HLSFeedBackgroundWarmingRequest
     ) async -> HLSFeedBackgroundWarmingResult {
         requestCount = Self.add(requestCount, 1)
         candidateItemCount = Self.add(candidateItemCount, request.candidates.count)
+        guard !isStopped else {
+            return finish(Self.emptyResult(.cancelled, request: request))
+        }
         guard !isRunning else {
             return finish(Self.emptyResult(.deniedBusy, request: request))
         }
@@ -511,11 +541,26 @@ public actor HLSFeedBackgroundWarmer {
         nextGeneration &+= 1
         let generation = FeedNavigationGeneration(rawValue: nextGeneration)
         let duration = min(policy.maximumExecutionTime, request.availableExecutionTime)
-        let outcome = await race(
-            candidates: selection.candidates,
-            generation: generation,
-            duration: duration
-        )
+        let backend = self.backend
+        let clock = self.clock
+        let policy = self.policy
+        let task = Task {
+            await Self.race(
+                candidates: selection.candidates,
+                generation: generation,
+                duration: duration,
+                backend: backend,
+                clock: clock,
+                policy: policy
+            )
+        }
+        activeTask = task
+        let outcome = await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        activeTask = nil
 
         let result: HLSFeedBackgroundWarmingResult
         switch outcome {
@@ -610,14 +655,14 @@ public actor HLSFeedBackgroundWarmer {
         )
     }
 
-    private func race(
+    private nonisolated static func race(
         candidates: [HLSFeedBackgroundWarmingCandidate],
         generation: FeedNavigationGeneration,
-        duration: Duration
+        duration: Duration,
+        backend: any FeedPreparing,
+        clock: HLSFeedBackgroundWarmingClock,
+        policy: HLSFeedBackgroundWarmingPolicy
     ) async -> RaceOutcome {
-        let backend = self.backend
-        let clock = self.clock
-        let policy = self.policy
         return await withTaskGroup(of: RaceOutcome.self, returning: RaceOutcome.self) { group in
             group.addTask {
                 .batch(await Self.prepare(

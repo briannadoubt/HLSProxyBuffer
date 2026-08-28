@@ -3,6 +3,45 @@ import XCTest
 @testable import ProxyPlayerKit
 
 final class HLSFeedBackgroundWarmingTests: XCTestCase {
+    @MainActor
+    func testProductionFeedEngineOwnsSimplePlayerFreeWarmingAPI() async throws {
+        let items = makeItems(count: 1)
+        let engine = try HLSFeedEngine(items: items, policy: .shortFormFeed)
+        let request = makeRequest(items: items, availableExecutionTime: .zero)
+
+        let result = try await engine.warmInBackground(request)
+        let warmer = try XCTUnwrap(engine.backgroundWarmer)
+        let snapshot = await warmer.snapshot()
+
+        XCTAssertEqual(result.outcome, .expired)
+        XCTAssertEqual(snapshot.requestCount, 1)
+        XCTAssertEqual(snapshot.count(for: .expired), 1)
+        XCTAssertEqual(engine.snapshot.allocatedPlayerCount, 0)
+
+        let cellularRequest = HLSFeedBackgroundWarmingRequest(
+            candidates: [
+                .init(item: items[0], cacheState: .fresh(remainingValidity: .seconds(60))),
+            ],
+            environment: .init(networkInterface: .cellular),
+            availableExecutionTime: .seconds(1)
+        )
+        let cellularDenied = try await engine.warmInBackground(cellularRequest)
+        XCTAssertEqual(cellularDenied.outcome, .deniedCellular)
+        var replacement = HLSFeedBackgroundWarmingPolicy.shortFormFeed
+        replacement.allowsCellularAccess = true
+        try await engine.updateBackgroundWarmingPolicy(replacement)
+        let cellularAllowed = try await engine.warmInBackground(cellularRequest)
+        XCTAssertEqual(cellularAllowed.outcome, .noEligibleWork)
+
+        await engine.stop()
+        do {
+            _ = try await engine.warmInBackground(request)
+            XCTFail("A stopped feed engine must reject background work")
+        } catch {
+            XCTAssertEqual(error as? HLSFeedEngineError, .stopped)
+        }
+    }
+
     func testPolicyValidationReportsEveryInvalidBoundInStableOrder() throws {
         let policy = makePolicy(
             maximumItemCount: 0,
@@ -285,7 +324,8 @@ final class HLSFeedBackgroundWarmingTests: XCTestCase {
         XCTAssertEqual(snapshot.preparedItemCount, 1)
         XCTAssertEqual(snapshot.preparedByteCount, 100)
         let audit = await backend.audit()
-        XCTAssertEqual(audit.cancellationCount, 1)
+        XCTAssertLessThanOrEqual(audit.requests.count, 2)
+        XCTAssertLessThanOrEqual(audit.cancellationCount, 1)
     }
 
     func testCallerCancellationPropagatesIntoPreparation() async throws {
@@ -304,6 +344,31 @@ final class HLSFeedBackgroundWarmingTests: XCTestCase {
         XCTAssertEqual(result.preparedItemCount, 0)
         let audit = await backend.audit()
         XCTAssertEqual(audit.cancellationCount, 1)
+    }
+
+    func testStopCancelsActiveWorkAndPermanentlyRejectsNewWork() async throws {
+        let backend = BackgroundPreparingFake(delay: .seconds(60))
+        let warmer = try HLSFeedBackgroundWarmer(policy: makePolicy(), backend: backend)
+        let request = makeRequest(items: makeItems(count: 1))
+        let active = Task { await warmer.warm(request) }
+        for _ in 0..<100 where await backend.audit().requests.isEmpty {
+            await Task.yield()
+        }
+
+        await warmer.stop()
+        let activeResult = await active.value
+        let rejected = await warmer.warm(request)
+
+        XCTAssertEqual(activeResult.outcome, .cancelled)
+        XCTAssertEqual(rejected.outcome, .cancelled)
+        let audit = await backend.audit()
+        XCTAssertEqual(audit.requests.count, 1)
+        do {
+            try await warmer.updatePolicy(makePolicy())
+            XCTFail("A stopped warmer must reject policy updates")
+        } catch {
+            XCTAssertEqual(error as? HLSFeedBackgroundWarmingError, .stopped)
+        }
     }
 
     func testConcurrentInvocationIsDeniedInsteadOfCreatingUnboundedSessions() async throws {

@@ -219,6 +219,17 @@ segments, estimated bytes, concurrent preparations, and elapsed time. The
 short-form default warms at most two items, one leading segment per item, one
 preparation at a time, and 4 MiB of planning reservations.
 
+Production `HLSFeedEngine` instances create the warmer against their existing
+persistent cache and expose it through one adopter-facing call:
+
+```swift
+let result = try await engine.warmInBackground(request)
+```
+
+No AVPlayer, proxy, fetcher, or cache object crosses that API. Engine policy
+updates reconfigure the background preparation path before committing, and
+`engine.stop()` cancels an active warming batch along with foreground work.
+
 Fresh cache entries with sufficient validity remaining are skipped. Stale,
 near-expiry, absent, and unknown entries may use the canonical manifest and
 segment preparation path, including conditional validation and the same
