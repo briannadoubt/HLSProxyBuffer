@@ -1,10 +1,43 @@
 import Foundation
 import XCTest
 @testable import HLSProxyFeedDemo
+import HLSCore
 import ProxyPlayerKit
 
 @MainActor
 final class HLSProxyFeedDemoTests: XCTestCase {
+    func testPrimaryShortFormCatalogHasTwentyFourStableDistinctHLSItems() async throws {
+        let origin = try FeedDemoFixtureOrigin()
+        let baseURL = try await origin.start()
+        defer { origin.stop() }
+
+        let entries = FeedDemoCatalog.entries(for: .shortForm, baseURL: baseURL)
+        XCTAssertEqual(entries.count, 24)
+        XCTAssertEqual(Set(entries.map(\.id)).count, 24)
+        let urls = entries.compactMap { entry -> URL? in
+            guard case .stream(let url, .videoOnDemand) = entry.item.source else { return nil }
+            return url
+        }
+        XCTAssertEqual(Set(urls).count, 24)
+        XCTAssertTrue(urls.allSatisfy { $0.path.hasPrefix("/feed/feed-") })
+
+        let parser = HLSParser()
+        var observedSegmentCounts: Set<Int> = []
+        var observedFixtureIDs: Set<String> = []
+        for url in urls {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            let http = try XCTUnwrap(response as? HTTPURLResponse)
+            observedFixtureIDs.insert(try XCTUnwrap(
+                http.value(forHTTPHeaderField: "X-HLS-Fixture-Item")
+            ))
+            let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+            let manifest = try parser.parse(text, baseURL: url)
+            observedSegmentCounts.insert(try XCTUnwrap(manifest.mediaPlaylist).segments.count)
+        }
+        XCTAssertEqual(observedFixtureIDs.count, 24)
+        XCTAssertEqual(observedSegmentCounts, [2, 3])
+    }
+
     func testEveryModeUsesAValidatedPolicyAndLocalFixtureCatalog() async throws {
         let origin = try FeedDemoFixtureOrigin()
         let baseURL = try await origin.start()
@@ -53,6 +86,109 @@ final class HLSProxyFeedDemoTests: XCTestCase {
         XCTAssertEqual(data.count, 32)
         XCTAssertEqual(http.value(forHTTPHeaderField: "Accept-Ranges"), "bytes")
         XCTAssertNotNil(http.value(forHTTPHeaderField: "ETag"))
+    }
+
+    func testFixtureOriginControlsFaultsOfflinePoorNetworkAndRequestAccounting() async throws {
+        let origin = try FeedDemoFixtureOrigin()
+        let baseURL = try await origin.start()
+        defer { origin.stop() }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let segmentPath = "/feed/feed-01/segment-000.m4s"
+        let segmentURL = baseURL.appendingPathComponent(String(segmentPath.dropFirst()))
+        await origin.setNetworkProfile(.init(
+            responseDelay: .milliseconds(20),
+            bytesPerSecond: 2_000
+        ))
+        await origin.setFaults([.init(
+            path: segmentPath,
+            attempts: 1...1,
+            action: .serviceUnavailable
+        )])
+
+        var request = URLRequest(url: segmentURL)
+        request.setValue("bytes=0-199", forHTTPHeaderField: "Range")
+        let (_, failedResponse) = try await session.data(for: request)
+        XCTAssertEqual((failedResponse as? HTTPURLResponse)?.statusCode, 503)
+
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        let (segmentData, successfulResponse) = try await session.data(for: request)
+        let elapsed = clock.now - startedAt
+        XCTAssertEqual((successfulResponse as? HTTPURLResponse)?.statusCode, 206)
+        XCTAssertEqual(segmentData.count, 200)
+        XCTAssertGreaterThanOrEqual(elapsed, .milliseconds(100))
+
+        let playlistURL = baseURL.appendingPathComponent("feed/feed-01/playlist.m3u8")
+        let (_, playlistResponse) = try await session.data(from: playlistURL)
+        let etag = try XCTUnwrap(
+            (playlistResponse as? HTTPURLResponse)?.value(forHTTPHeaderField: "ETag")
+        )
+        var validationRequest = URLRequest(url: playlistURL)
+        validationRequest.setValue(etag, forHTTPHeaderField: "If-None-Match")
+        let (validationData, validationResponse) = try await session.data(
+            for: validationRequest
+        )
+        XCTAssertEqual((validationResponse as? HTTPURLResponse)?.statusCode, 304)
+        XCTAssertTrue(validationData.isEmpty)
+
+        await origin.setOffline(true)
+        var offlineRequest = URLRequest(url: playlistURL)
+        offlineRequest.cachePolicy = .reloadIgnoringLocalCacheData
+        let (_, offlineResponse) = try await session.data(for: offlineRequest)
+        XCTAssertEqual((offlineResponse as? HTTPURLResponse)?.statusCode, 503)
+
+        let snapshot = await origin.snapshot()
+        XCTAssertEqual(snapshot.requestCount, 5)
+        XCTAssertEqual(snapshot.requestsByPath[segmentPath], 2)
+        XCTAssertEqual(snapshot.bytesByPath[segmentPath], 200)
+        XCTAssertEqual(snapshot.conditionalRequestCount, 1)
+        XCTAssertEqual(snapshot.notModifiedCount, 1)
+        XCTAssertEqual(snapshot.offlineRequestCount, 1)
+        XCTAssertEqual(snapshot.failureCount, 2)
+        XCTAssertEqual(snapshot.records.map(\.sequence), [1, 2, 3, 4, 5])
+        XCTAssertTrue(snapshot.records.allSatisfy { $0.feedItemID == "feed-01" })
+        let encodedSnapshot = try JSONEncoder().encode(snapshot)
+        XCTAssertEqual(
+            try JSONDecoder().decode(FeedDemoFixtureOrigin.Snapshot.self, from: encodedSnapshot),
+            snapshot
+        )
+
+        await origin.resetRequestAccounting()
+        let resetSnapshot = await origin.snapshot()
+        XCTAssertEqual(resetSnapshot, .empty)
+    }
+
+    func testFixtureOriginAccountsForConcurrentFeedItemsIndependently() async throws {
+        let origin = try FeedDemoFixtureOrigin()
+        let baseURL = try await origin.start()
+        defer { origin.stop() }
+        await origin.setNetworkProfile(.init(responseDelay: .milliseconds(100)))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let urls = (1...3).map { index in
+            baseURL.appendingPathComponent(String(format: "feed/feed-%02d/playlist.m3u8", index))
+        }
+
+        async let first = session.data(from: urls[0])
+        async let second = session.data(from: urls[1])
+        async let third = session.data(from: urls[2])
+        let responses = try await [first, second, third]
+        XCTAssertTrue(responses.allSatisfy {
+            ($0.1 as? HTTPURLResponse)?.statusCode == 200 && !$0.0.isEmpty
+        })
+
+        let snapshot = await origin.snapshot()
+        XCTAssertEqual(snapshot.requestCount, 3)
+        XCTAssertGreaterThanOrEqual(snapshot.maximumActiveRequestCount, 3)
+        XCTAssertEqual(Set(snapshot.records.compactMap(\.feedItemID)).count, 3)
+        XCTAssertEqual(snapshot.requestsByPath.count, 3)
     }
 
     func testGeometrySignalsChooseFocusDeterministicallyAndPredictDirection() throws {

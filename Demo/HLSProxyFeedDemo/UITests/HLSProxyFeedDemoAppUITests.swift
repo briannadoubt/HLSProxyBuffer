@@ -1,7 +1,8 @@
 import XCTest
 
 final class HLSProxyFeedDemoAppUITests: XCTestCase {
-    private let itemCount = 14
+    private let itemCount = 24
+    private let measuredNavigationCount = 100
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -33,12 +34,22 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
         let warmupButton = app.buttons["qualification-mark-warmup"]
         warmupButton.tap()
         XCTAssertTrue(waitForValue("ready", in: warmupButton, timeout: 5))
-        XCTAssertTrue(waitForValue("13", in: app.staticTexts["qualification-navigation-count"], timeout: 5))
+        let warmupNavigationCount = itemCount - 1
+        XCTAssertTrue(waitForValue(
+            "\(warmupNavigationCount)",
+            in: app.staticTexts["qualification-navigation-count"],
+            timeout: 5
+        ))
 
-        for _ in 0..<100 {
+        for _ in 0..<measuredNavigationCount {
             app.buttons["qualification-next"].tap()
         }
-        XCTAssertTrue(waitForValue("113", in: app.staticTexts["qualification-navigation-count"], timeout: 10))
+        let totalNavigationCount = warmupNavigationCount + measuredNavigationCount
+        XCTAssertTrue(waitForValue(
+            "\(totalNavigationCount)",
+            in: app.staticTexts["qualification-navigation-count"],
+            timeout: 10
+        ))
 
         app.buttons["qualification-finish"].tap()
         let reportElement = app.staticTexts["qualification-report"]
@@ -53,10 +64,18 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
             in: app.staticTexts["qualification-result"],
             timeout: 2
         ), report)
-        XCTAssertTrue(waitForValue("short-1", in: app.staticTexts["qualification-focus"], timeout: 5))
+        let expectedFinalIndex = totalNavigationCount % itemCount
+        XCTAssertTrue(waitForValue(
+            "short-\(expectedFinalIndex)",
+            in: app.staticTexts["qualification-focus"],
+            timeout: 5
+        ))
         XCTAssertTrue(waitForValue("Playing", in: app.staticTexts["qualification-playback-state"], timeout: 5))
 
-        XCTAssertTrue(report.contains("\"measuredNavigationCount\":100"), report)
+        XCTAssertTrue(
+            report.contains("\"measuredNavigationCount\":\(measuredNavigationCount)"),
+            report
+        )
         XCTAssertTrue(report.contains("\"passed\":true"), report)
         let attachment = XCTAttachment(data: Data(report.utf8), uniformTypeIdentifier: "public.json")
         attachment.name = "hls-feed-ui-qualification.json"
