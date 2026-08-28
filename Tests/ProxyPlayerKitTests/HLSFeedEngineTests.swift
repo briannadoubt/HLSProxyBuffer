@@ -7,6 +7,33 @@ import XCTest
 
 @MainActor
 final class HLSFeedEngineTests: XCTestCase {
+    func testMemoryPressureHookShedsSharedMemoryWithoutDiscardingDiskBytes() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HLSFeedEnginePressure-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = HLSSegmentCache(
+            capacityBytes: 1_024,
+            diskDirectory: directory,
+            diskCapacityBytes: 4_096
+        )
+        await cache.put(Data(repeating: 0xAB, count: 128), for: "segment-engine-pressure")
+        let items = makeItems(count: 1)
+        let engine = try makeEngine(
+            items: items,
+            policy: makePolicy(maximumPlayerCount: 1, prefetchItemCount: 0),
+            factory: FakeFeedSessionFactory(),
+            sharedCache: cache
+        )
+
+        await engine.handleMemoryPressure()
+
+        let metrics = await cache.metrics()
+        XCTAssertEqual(metrics.totalBytes, 0)
+        XCTAssertEqual(metrics.diskBytes, 128)
+        XCTAssertEqual(metrics.evictionCounts[.memoryPressure], 1)
+        await engine.stop()
+    }
+
     func testPublicInitializerKeepsCleartextRestrictedToExplicitLoopbackFixtures() async throws {
         let remoteURL = try XCTUnwrap(URL(string: "http://media.example/playlist.m3u8"))
         let remoteItem = FeedPlaybackItem(
@@ -609,7 +636,8 @@ final class HLSFeedEngineTests: XCTestCase {
         policy: FeedPlaybackPolicy,
         factory: FakeFeedSessionFactory,
         telemetry: HLSFeedTelemetry? = nil,
-        analytics: PlaybackAnalyticsTimeline? = nil
+        analytics: PlaybackAnalyticsTimeline? = nil,
+        sharedCache: HLSSegmentCache? = nil
     ) throws -> HLSFeedEngine {
         let backend = ImmediateFeedPreparationBackend()
         let coordinator = try FeedCoordinator(items: items, policy: policy, backend: backend)
@@ -619,7 +647,8 @@ final class HLSFeedEngineTests: XCTestCase {
             coordinator: coordinator,
             sessionFactory: { configuration in factory.make(configuration: configuration) },
             telemetry: telemetry ?? HLSFeedTelemetry(),
-            analytics: analytics ?? PlaybackAnalyticsTimeline()
+            analytics: analytics ?? PlaybackAnalyticsTimeline(),
+            sharedCache: sharedCache
         )
     }
 

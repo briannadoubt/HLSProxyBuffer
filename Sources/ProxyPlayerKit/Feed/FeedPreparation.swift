@@ -410,6 +410,10 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
         await cache.metrics()
     }
 
+    public func handleMemoryPressure() async {
+        await cache.handleMemoryPressure()
+    }
+
     private func resolveMediaPlaylist(
         from url: URL,
         qualityPolicy: HLSRewriteConfiguration.QualityPolicy,
@@ -472,41 +476,129 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
             throw HLSManifestFetcher.FetchError.insecureScheme
         }
         let key = "manifest-\(url.absoluteString)"
-        if let data = await cache.get(key),
-           let text = String(data: data, encoding: .utf8) {
-            return (try parser.parse(text, baseURL: url), 1, 0, data.count, 0)
+        let cached = await cache.entry(for: key, allowingExpired: true)
+        if let cached, !cached.isExpired,
+           let text = String(data: cached.data, encoding: .utf8) {
+            return (try parser.parse(text, baseURL: url), 1, 0, cached.data.count, 0)
         }
 
         let currentPolicy = policy
         let session = manifestSession
         let allowInsecure = allowsInsecureManifests
-        let text = try await limiter.withPermit(origin: Origin(url: url)) {
+        let response = try await limiter.withPermit(origin: Origin(url: url)) {
             let fetcher = HLSManifestFetcher(
                 url: url,
                 session: session,
                 retryPolicy: currentPolicy.retry.manifest,
                 networkPolicy: currentPolicy.network
             )
-            return try await fetcher.fetchManifest(
+            return try await fetcher.fetchValidatedManifest(
                 from: url,
-                allowInsecure: allowInsecure
+                allowInsecure: allowInsecure,
+                ifNoneMatch: cached?.validation?.eTag,
+                ifModifiedSince: cached?.validation?.lastModified
             )
         }
         try Task.checkCancellation()
-        let data = Data(text.utf8)
-        await cache.put(data, for: key)
-        return (try parser.parse(text, baseURL: url), 0, 1, 0, data.count)
+        switch response {
+        case .notModified(let validation):
+            guard let cached,
+                  let text = String(data: cached.data, encoding: .utf8)
+            else {
+                throw HLSManifestFetcher.FetchError.invalidResponse(nil)
+            }
+            if validation.allowsStorage {
+                await cache.put(
+                    cached.data,
+                    for: key,
+                    validation: Self.cacheValidation(
+                        validation,
+                        fallingBackTo: cached.validation
+                    )
+                )
+            } else {
+                await cache.remove(key)
+            }
+            return (try parser.parse(text, baseURL: url), 1, 1, cached.data.count, 0)
+        case .modified(let text, let validation):
+            let data = Data(text.utf8)
+            if validation.allowsStorage {
+                await cache.put(
+                    data,
+                    for: key,
+                    validation: Self.cacheValidation(validation)
+                )
+            } else {
+                await cache.remove(key)
+            }
+            return (try parser.parse(text, baseURL: url), 0, 1, 0, data.count)
+        }
     }
 
     private func fetch(_ resource: Resource) async throws -> ResourceOutcome {
-        if let data = await cache.get(resource.key) {
+        let cached = await cache.entry(for: resource.key, allowingExpired: true)
+        if let cached, !cached.isExpired {
             return ResourceOutcome(
-                byteCount: data.count,
+                byteCount: cached.data.count,
                 cacheHitCount: 1,
                 originFetchCount: 0,
-                cacheHitByteCount: data.count,
+                cacheHitByteCount: cached.data.count,
                 originFetchByteCount: 0
             )
+        }
+
+        if let managedSegmentFetcher {
+            let response = try await limiter.withPermit(origin: Origin(url: resource.url)) {
+                try await managedSegmentFetcher.fetchValidatedResource(
+                    at: resource.url,
+                    byteRange: resource.byteRange,
+                    ifNoneMatch: cached?.validation?.eTag,
+                    ifModifiedSince: cached?.validation?.lastModified
+                )
+            }
+            try Task.checkCancellation()
+            switch response {
+            case .notModified(let validation):
+                guard let cached else {
+                    throw HLSSegmentFetcher.FetchError.invalidResponse
+                }
+                if validation.allowsStorage {
+                    await cache.put(
+                        cached.data,
+                        for: resource.key,
+                        validation: Self.cacheValidation(
+                            validation,
+                            fallingBackTo: cached.validation
+                        )
+                    )
+                } else {
+                    await cache.remove(resource.key)
+                }
+                return ResourceOutcome(
+                    byteCount: cached.data.count,
+                    cacheHitCount: 1,
+                    originFetchCount: 1,
+                    cacheHitByteCount: cached.data.count,
+                    originFetchByteCount: 0
+                )
+            case .modified(let data, let validation):
+                if validation.allowsStorage {
+                    await cache.put(
+                        data,
+                        for: resource.key,
+                        validation: Self.cacheValidation(validation)
+                    )
+                } else {
+                    await cache.remove(resource.key)
+                }
+                return ResourceOutcome(
+                    byteCount: data.count,
+                    cacheHitCount: 0,
+                    originFetchCount: 1,
+                    cacheHitByteCount: 0,
+                    originFetchByteCount: data.count
+                )
+            }
         }
 
         let source = segmentSource
@@ -559,6 +651,28 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
         return root
             .appendingPathComponent("HLSProxyBuffer", isDirectory: true)
             .appendingPathComponent("FeedPreparation", isDirectory: true)
+    }
+
+    private static func cacheValidation(
+        _ validation: HLSManifestFetcher.Validation,
+        fallingBackTo fallback: HLSSegmentCache.ValidationMetadata? = nil
+    ) -> HLSSegmentCache.ValidationMetadata {
+        HLSSegmentCache.ValidationMetadata(
+            eTag: validation.eTag ?? fallback?.eTag,
+            lastModified: validation.lastModified ?? fallback?.lastModified,
+            freshUntil: validation.maximumAge.map { Date().addingTimeInterval($0) }
+        )
+    }
+
+    private static func cacheValidation(
+        _ validation: HLSSegmentFetcher.OriginValidation,
+        fallingBackTo fallback: HLSSegmentCache.ValidationMetadata? = nil
+    ) -> HLSSegmentCache.ValidationMetadata {
+        HLSSegmentCache.ValidationMetadata(
+            eTag: validation.eTag ?? fallback?.eTag,
+            lastModified: validation.lastModified ?? fallback?.lastModified,
+            freshUntil: validation.maximumAge.map { Date().addingTimeInterval($0) }
+        )
     }
 }
 

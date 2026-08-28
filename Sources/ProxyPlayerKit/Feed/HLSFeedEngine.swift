@@ -383,6 +383,17 @@ public final class HLSFeedEngine {
         return snapshot
     }
 
+    /// Releases all memory-resident cache bytes while retaining valid disk
+    /// entries for later reuse. UI lifecycle code can forward the platform's
+    /// memory-pressure signal here without owning players or cache instances.
+    public func handleMemoryPressure() async {
+        await sharedCache?.handleMemoryPressure()
+        if let sharedCache {
+            cacheMetrics = await sharedCache.metrics()
+            rebuildSnapshot()
+        }
+    }
+
     /// Replaces feed contents while retaining leases only for identical items.
     @discardableResult
     public func replaceItems(

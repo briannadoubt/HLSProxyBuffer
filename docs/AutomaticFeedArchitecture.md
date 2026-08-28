@@ -171,6 +171,26 @@ completion cannot publish after reassignment. Off-window grace tasks,
 preparation tasks, load tasks, state streams, playback-end observers, proxy
 listeners, and player items are cancelled and awaited by `stop()`.
 
+Disk entries retain their canonical URL/range identity, insertion/access age,
+ETag, Last-Modified value, and bounded freshness deadline across engine
+instances. Fresh playlist, initialization-map, and segment bytes are served
+without an origin request on a warm-disk launch. An expired entry remains
+available only to the internal conditional-request path: a 304 refreshes its
+age and reuses the exact bytes with a zero-byte origin response, while a 200
+atomically replaces the entry. Expired or absent work is never served as a
+synthetic offline success. Validator sidecars contain no credentials, request
+headers, or unbounded dimensions.
+
+`await engine.handleMemoryPressure()` is the single public pressure hook. It
+drops memory residency atomically, leaves valid disk entries intact, and blocks
+already-started disk reads from repopulating RAM during that pressure response.
+Platform lifecycle adapters forward their supported memory warning to this
+method; applications still do not own the cache. Fixed-cardinality metrics
+report current entries/bytes, memory and disk byte high-water marks, and exact
+byte-limit, entry-limit, pressure, and expiration removal reasons. Deterministic
+tests cover cross-instance reload, revalidation, offline warm hit/miss, poor
+network continuation, and byte/entry LRU enforcement.
+
 The existing `FeedBufferController` remains source compatible while this work
 lands, but its caller-owned player registration model is transitional. New
 integrations should target `HLSFeedEngine` rather than manually registering
