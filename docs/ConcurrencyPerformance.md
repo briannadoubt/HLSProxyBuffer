@@ -24,12 +24,23 @@ It reports operations per second for memory-cache hits, concurrent memory-cache 
 Performance-sensitive changes should also pass:
 
 ```sh
+swift test --sanitize=address --filter PlaybackAnalyticsQualificationTests
 swift test --sanitize=thread --skip '.*PerformanceTests'
 swift build -c release -Xswiftc -warnings-as-errors
+HLS_ANALYTICS_QUALIFICATION_CONFIGURATION=release \
+  swift test -c release \
+    --filter 'PlaybackAnalytics(Qualification|Performance)Tests'
 ```
 
-Thread Sanitizer verifies the lock-backed request coordination, while the release build catches concurrency and availability warnings under the package's supported platform declarations.
-The ordinary `swift test` gate runs the performance cases. They are excluded only
-from the sanitizer process because XCTest's `measure` machinery crashes inside
-XCTestCore when instrumented by Thread Sanitizer on Xcode 26.6; timing assertions
+Address Sanitizer covers analytics ownership and exporter/spool lifetimes.
+Thread Sanitizer verifies the lock-backed request coordination and the
+100,000-event analytics correctness gate, while the release build catches
+concurrency and availability warnings under the package's supported platform
+declarations.
+The ordinary `swift test` gate runs the performance cases. The release analytics
+gate is the authoritative host-calibrated overhead measurement, so the tvOS
+simulator smoke test excludes that timing class while retaining every correctness,
+privacy, recovery, and scale case. Performance cases are also excluded from the
+sanitizer process because XCTest's `measure` machinery crashes inside XCTestCore
+when instrumented by Thread Sanitizer on Xcode 26.6; timing assertions
 would not be meaningful under sanitizer instrumentation in any case.

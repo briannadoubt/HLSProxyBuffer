@@ -899,6 +899,7 @@ public final class HLSFeedEngine {
     }
 
     private func startStreamingTelemetryObservation(for slot: Slot, token: UUID) {
+        guard analytics.isEnabled else { return }
         slot.streamingTelemetryTask?.cancel()
         slot.streamingTelemetryTask = Task { @MainActor [weak self, weak slot] in
             guard let slot else { return }
@@ -917,7 +918,8 @@ public final class HLSFeedEngine {
     }
 
     private func startAVMetricObservation(for slot: Slot, token: UUID) {
-        guard let player = slot.session.feedPlatformPlayer,
+        guard analytics.isEnabled,
+              let player = slot.session.feedPlatformPlayer,
               let attempt = slot.lease?.analyticsAttempt
         else {
             return

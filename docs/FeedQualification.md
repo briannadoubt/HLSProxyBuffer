@@ -11,6 +11,9 @@ cache, or playback regressions.
 | --- | --- | --- |
 | Planner/coordinator | 532 observations across all standard paging, reversal, fling, oscillation, and sustained-scroll traces | Preparation concurrency, resident items, estimated bytes, cancellation acknowledgement, and stale-result bounds |
 | Engine | 500 focus transitions | Player-pool bounds, unique leases, at least 99% successful handoffs, and zero remaining loads, observers, listeners, or players after teardown |
+| Analytics scale | 100,000 correlated events plus two slow subscribers | Exact summaries and bounded timeline, queue, memory, task, subscriber, and drop accounting |
+| Analytics delivery/privacy | Slow and offline exporters plus canonical/spooled payload scans | Priority shedding, bounded disk recovery, critical-summary survival, and no sensitive or unapproved identifiers |
+| Analytics overhead | Alternating enabled/disabled local-fixture engine runs after warmup | No more than 5 ms first-frame p95 overhead and no more than two CPU percentage points |
 | Production preparation | 100 local-origin transitions | Cold readiness at or below 250 ms, predicted-warm p95 at or below 50 ms, at least 90% revisit reuse, and cache/storage bounds |
 | Source coverage | VOD, live/DVR, compatible stitched clips | Prepared resources, validated live window, and two-playlist stitched timeline |
 | iOS UI | 14-item warmup plus 100 rapid accessibility navigations | Correct final item, decoded platform playback, predicted-warm first-frame p95 hard gate at or below 500 ms with release evidence at or below 400 ms, cancellation at or below 250 ms, and bounded post-warmup resources |
@@ -24,11 +27,16 @@ The SwiftPM tests write the following JSON files when
 - `hls-feed-engine-endurance.json`
 - `hls-feed-origin-readiness.json`
 - `hls-feed-source-coverage.json`
+- `hls-playback-analytics-scale-release.json`
+- `hls-playback-analytics-recovery-release.json`
+- `hls-playback-analytics-privacy-release.json`
+- `hls-playback-analytics-overhead-release.json`
 
 The iOS UI test attaches `hls-feed-ui-qualification.json` to its result bundle.
-`Scripts/run-ci.sh` places that bundle beside the JSON reports. GitHub Actions
-uploads the directory with `if: always()`, preserving the failing measurement
-instead of only reporting a red job.
+`Scripts/run-ci.sh` places that Release-mode bundle beside the JSON reports;
+Address Sanitizer and Thread Sanitizer logs are stored in the same directory.
+GitHub Actions uploads the directory with `if: always()`, preserving the
+failing measurement instead of only reporting a red job.
 
 Before HLS-31, the proxy-backed session published `.ready` as soon as its
 playlist and buffer were installed. The feed engine consequently labeled that

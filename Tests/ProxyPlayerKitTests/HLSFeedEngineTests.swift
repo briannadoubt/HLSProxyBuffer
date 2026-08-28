@@ -1,4 +1,5 @@
 import AVFoundation
+import Darwin
 import Foundation
 import XCTest
 @testable import HLSCore
@@ -497,16 +498,27 @@ final class HLSFeedEngineTests: XCTestCase {
             let finalAllocatedPlayerCount: Int
             let finalActiveLoadCount: Int
             let activeObserverCount: Int
+            let maximumAnalyticsObserverCount: Int
+            let finalAnalyticsObserverCount: Int
             let stoppedSessionCount: Int
             let handoffAttemptCount: UInt64
             let handoffSuccessCount: UInt64
             let handoffSuccessRate: Double
+            let analyticsEnabled: Bool
+            let analyticsMaximumActiveAttemptCount: Int
+            let analyticsFinalActiveAttemptCount: Int
+            let analyticsEmittedEventCount: UInt64
+            let analyticsDroppedEventCount: UInt64
+            let analyticsEmittedSummaryCount: UInt64
+            let analyticsDroppedSummaryCount: UInt64
+            let analyticsStaleEventCount: UInt64
         }
         let items = makeItems(count: 11)
         let policy = try makePolicy(maximumPlayerCount: 2)
         let factory = FakeFeedSessionFactory()
         let engine = try makeEngine(items: items, policy: policy, factory: factory)
         var maximumAllocatedPlayerCount = 0
+        var maximumAnalyticsObserverCount = 0
 
         for step in 0..<500 {
             let focused = items[step % items.count].id
@@ -522,6 +534,17 @@ final class HLSFeedEngineTests: XCTestCase {
                 maximumAllocatedPlayerCount,
                 snapshot.allocatedPlayerCount
             )
+            let analyticsObserverCount = factory.sessions.reduce(0) {
+                $0 + $1.activeStreamingObserverCount
+            }
+            maximumAnalyticsObserverCount = max(
+                maximumAnalyticsObserverCount,
+                analyticsObserverCount
+            )
+            XCTAssertLessThanOrEqual(
+                analyticsObserverCount,
+                policy.concurrency.maximumPlayerCount
+            )
             XCTAssertEqual(Set(snapshot.playbacks.map(\.itemID)).count, snapshot.playbacks.count)
         }
 
@@ -532,6 +555,7 @@ final class HLSFeedEngineTests: XCTestCase {
         XCTAssertEqual(engine.snapshot.activeLoadCount, 0)
         XCTAssertLessThanOrEqual(factory.sessions.count, 2)
         XCTAssertTrue(factory.sessions.allSatisfy { $0.activeStateObserverCount == 0 })
+        XCTAssertTrue(factory.sessions.allSatisfy { $0.activeStreamingObserverCount == 0 })
         XCTAssertTrue(factory.sessions.allSatisfy { $0.isStopped })
         let summary = try engine.telemetry.machineReadableSummary()
         let decoded = try JSONDecoder().decode(HLSFeedTelemetry.Snapshot.self, from: summary)
@@ -542,6 +566,12 @@ final class HLSFeedEngineTests: XCTestCase {
         }
         let handoffSuccessRate = Double(decoded.handoffSuccessCount) / Double(handoffAttemptCount)
         XCTAssertGreaterThanOrEqual(handoffSuccessRate, 0.99)
+        let analyticsSnapshot = engine.analytics.snapshot
+        XCTAssertTrue(engine.analytics.isEnabled)
+        XCTAssertEqual(analyticsSnapshot.activeAttemptCount, 0)
+        XCTAssertGreaterThan(analyticsSnapshot.emittedEventCount, 0)
+        XCTAssertGreaterThan(analyticsSnapshot.emittedSummaryCount, 0)
+        XCTAssertEqual(analyticsSnapshot.staleEventCount, 0)
         try QualificationArtifact.write(
             EnduranceReport(
                 transitionCount: 500,
@@ -553,10 +583,22 @@ final class HLSFeedEngineTests: XCTestCase {
                 finalAllocatedPlayerCount: engine.snapshot.allocatedPlayerCount,
                 finalActiveLoadCount: engine.snapshot.activeLoadCount,
                 activeObserverCount: factory.sessions.reduce(0) { $0 + $1.activeStateObserverCount },
+                maximumAnalyticsObserverCount: maximumAnalyticsObserverCount,
+                finalAnalyticsObserverCount: factory.sessions.reduce(0) {
+                    $0 + $1.activeStreamingObserverCount
+                },
                 stoppedSessionCount: factory.sessions.filter(\.isStopped).count,
                 handoffAttemptCount: handoffAttemptCount,
                 handoffSuccessCount: decoded.handoffSuccessCount,
-                handoffSuccessRate: handoffSuccessRate
+                handoffSuccessRate: handoffSuccessRate,
+                analyticsEnabled: engine.analytics.isEnabled,
+                analyticsMaximumActiveAttemptCount: analyticsSnapshot.maximumActiveAttemptCount,
+                analyticsFinalActiveAttemptCount: analyticsSnapshot.activeAttemptCount,
+                analyticsEmittedEventCount: analyticsSnapshot.emittedEventCount,
+                analyticsDroppedEventCount: analyticsSnapshot.droppedEventCount,
+                analyticsEmittedSummaryCount: analyticsSnapshot.emittedSummaryCount,
+                analyticsDroppedSummaryCount: analyticsSnapshot.droppedSummaryCount,
+                analyticsStaleEventCount: analyticsSnapshot.staleEventCount
             ),
             named: "hls-feed-engine-endurance.json"
         )
@@ -748,6 +790,8 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     ] = [:]
     private var streamingSnapshot = HLSStreamingTelemetry.Snapshot.empty
 
+    var activeStreamingObserverCount: Int { streamingContinuations.count }
+
     init(
         configuration: ProxyPlayerConfiguration,
         loadDelay: Duration,
@@ -874,5 +918,257 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     private static func itemID(from url: URL) -> FeedItemID {
         let name = url.deletingPathExtension().lastPathComponent
         return FeedItemID(rawValue: name)
+    }
+}
+
+@MainActor
+final class PlaybackAnalyticsPerformanceTests: XCTestCase {
+    private struct Run: Sendable {
+        let firstFrameP95Milliseconds: Double
+        let cpuPercent: Double
+        let emittedEventCount: UInt64
+        let emittedSummaryCount: UInt64
+    }
+
+    private struct OverheadReport: Codable {
+        let configuration: String
+        let measuredTransitionCountPerRun: Int
+        let warmupTransitionCountPerRun: Int
+        let runCountPerMode: Int
+        let disabledFirstFrameP95Milliseconds: Double
+        let enabledFirstFrameP95Milliseconds: Double
+        let firstFrameP95OverheadMilliseconds: Double
+        let firstFrameP95OverheadLimitMilliseconds: Double
+        let disabledCPUPercent: Double
+        let enabledCPUPercent: Double
+        let cpuOverheadPercentagePoints: Double
+        let cpuOverheadLimitPercentagePoints: Double
+        let enabledEmittedEventCount: UInt64
+        let enabledEmittedSummaryCount: UInt64
+        let disabledEmittedEventCount: UInt64
+        let disabledEmittedSummaryCount: UInt64
+    }
+
+    func testAnalyticsOverheadStaysBelowFirstFrameAndCPUBudgetsAfterWarmup() async throws {
+        let measuredTransitions = 1_000
+        let warmupTransitions = 100
+        let firstFrameLimitMilliseconds = 5.0
+        let cpuLimitPercentagePoints = 2.0
+        let runOrder = [false, true, true, false, false, true]
+        var enabledRuns: [Run] = []
+        var disabledRuns: [Run] = []
+
+        for isEnabled in runOrder {
+            let run = try await measureEngine(
+                analyticsEnabled: isEnabled,
+                measuredTransitions: measuredTransitions,
+                warmupTransitions: warmupTransitions
+            )
+            if isEnabled {
+                enabledRuns.append(run)
+            } else {
+                disabledRuns.append(run)
+            }
+        }
+
+        let disabledFirstFrameP95 = median(
+            disabledRuns.map(\.firstFrameP95Milliseconds)
+        )
+        let enabledFirstFrameP95 = median(
+            enabledRuns.map(\.firstFrameP95Milliseconds)
+        )
+        let disabledCPUPercent = median(disabledRuns.map(\.cpuPercent))
+        let enabledCPUPercent = median(enabledRuns.map(\.cpuPercent))
+        let firstFrameOverhead = max(0, enabledFirstFrameP95 - disabledFirstFrameP95)
+        let cpuOverhead = max(0, enabledCPUPercent - disabledCPUPercent)
+
+        XCTAssertLessThanOrEqual(
+            firstFrameOverhead,
+            firstFrameLimitMilliseconds,
+            "Analytics added \(firstFrameOverhead) ms to local-fixture first-frame p95"
+        )
+        XCTAssertLessThanOrEqual(
+            cpuOverhead,
+            cpuLimitPercentagePoints,
+            "Analytics added \(cpuOverhead) CPU percentage points after warmup"
+        )
+        XCTAssertTrue(enabledRuns.allSatisfy { $0.emittedEventCount > 0 })
+        XCTAssertTrue(enabledRuns.allSatisfy { $0.emittedSummaryCount > 0 })
+        XCTAssertTrue(disabledRuns.allSatisfy { $0.emittedEventCount == 0 })
+        XCTAssertTrue(disabledRuns.allSatisfy { $0.emittedSummaryCount == 0 })
+
+        try QualificationArtifact.write(
+            OverheadReport(
+                configuration: artifactConfiguration,
+                measuredTransitionCountPerRun: measuredTransitions,
+                warmupTransitionCountPerRun: warmupTransitions,
+                runCountPerMode: enabledRuns.count,
+                disabledFirstFrameP95Milliseconds: disabledFirstFrameP95,
+                enabledFirstFrameP95Milliseconds: enabledFirstFrameP95,
+                firstFrameP95OverheadMilliseconds: firstFrameOverhead,
+                firstFrameP95OverheadLimitMilliseconds: firstFrameLimitMilliseconds,
+                disabledCPUPercent: disabledCPUPercent,
+                enabledCPUPercent: enabledCPUPercent,
+                cpuOverheadPercentagePoints: cpuOverhead,
+                cpuOverheadLimitPercentagePoints: cpuLimitPercentagePoints,
+                enabledEmittedEventCount: enabledRuns.reduce(0) {
+                    $0 + $1.emittedEventCount
+                },
+                enabledEmittedSummaryCount: enabledRuns.reduce(0) {
+                    $0 + $1.emittedSummaryCount
+                },
+                disabledEmittedEventCount: disabledRuns.reduce(0) {
+                    $0 + $1.emittedEventCount
+                },
+                disabledEmittedSummaryCount: disabledRuns.reduce(0) {
+                    $0 + $1.emittedSummaryCount
+                }
+            ),
+            named: "hls-playback-analytics-overhead-\(artifactConfiguration).json"
+        )
+    }
+
+    private func measureEngine(
+        analyticsEnabled: Bool,
+        measuredTransitions: Int,
+        warmupTransitions: Int
+    ) async throws -> Run {
+        let items = (0..<11).map { index in
+            FeedPlaybackItem(
+                id: FeedItemID(rawValue: "analytics-overhead-\(index)"),
+                source: .stream(
+                    url: URL(fileURLWithPath: "/fixtures/analytics-overhead-\(index).m3u8"),
+                    kind: .videoOnDemand
+                ),
+                estimatedPreparationBytes: 1_024
+            )
+        }
+        var policy = FeedPlaybackPolicy.preset(.shortFormFeed)
+        policy.prefetch.aheadItemCount = 1
+        policy.prefetch.behindItemCount = 0
+        policy.budget.maximumResidentItems = 2
+        policy.concurrency.maximumPlayerCount = 2
+        policy.eviction.offscreenGracePeriod = 0
+        policy.lowPower.maximumPrefetchItems = 1
+        policy.lowPower.maximumPlayerCount = 2
+        policy = try policy.validated()
+        let coordinator = try FeedCoordinator(
+            items: items,
+            policy: policy,
+            backend: ImmediateFeedPreparationBackend()
+        )
+        let factory = FakeFeedSessionFactory()
+        let analytics = PlaybackAnalyticsTimeline(configuration: .init(
+            isEnabled: analyticsEnabled,
+            eventBufferCapacity: 128,
+            summaryBufferCapacity: 64,
+            maximumActiveAttemptCount: 4
+        ))
+        let engine = try HLSFeedEngine(
+            items: items,
+            policy: policy,
+            coordinator: coordinator,
+            sessionFactory: { configuration in factory.make(configuration: configuration) },
+            analytics: analytics
+        )
+        let clock = ContinuousClock()
+        var firstFrameSamples: [Double] = []
+        firstFrameSamples.reserveCapacity(measuredTransitions)
+        var measuredWallStart: ContinuousClock.Instant?
+        var measuredCPUStart = 0.0
+        let totalTransitions = warmupTransitions + measuredTransitions
+
+        for step in 0..<totalTransitions {
+            if step == warmupTransitions {
+                measuredWallStart = clock.now
+                measuredCPUStart = processCPUSeconds()
+            }
+            let focused = items[step % items.count].id
+            let startedAt = clock.now
+            try await engine.update(FeedViewportSignal(
+                generation: .init(rawValue: UInt64(step + 1)),
+                focusedItemID: focused,
+                visibleItems: [.init(
+                    itemID: focused,
+                    fraction: 1,
+                    distanceInViewports: 0
+                )],
+                velocityInViewportsPerSecond: step.isMultiple(of: 2) ? 8 : -8,
+                observedAt: .milliseconds(Int64(step))
+            ))
+            let settled = await engine.waitUntilSettled()
+            XCTAssertEqual(settled.activeItemID, focused)
+            XCTAssertEqual(settled.playback(for: focused)?.hasStartedPlayback, true)
+            if step >= warmupTransitions {
+                firstFrameSamples.append(milliseconds(startedAt.duration(to: clock.now)))
+            }
+        }
+
+        let wallStart = try XCTUnwrap(measuredWallStart)
+        let wallSeconds = seconds(wallStart.duration(to: clock.now))
+        let cpuSeconds = max(0, processCPUSeconds() - measuredCPUStart)
+        let analyticsObserverCount = factory.sessions.reduce(0) {
+            $0 + $1.activeStreamingObserverCount
+        }
+        if analyticsEnabled {
+            XCTAssertLessThanOrEqual(
+                analyticsObserverCount,
+                policy.concurrency.maximumPlayerCount
+            )
+        } else {
+            XCTAssertEqual(analyticsObserverCount, 0)
+        }
+        await engine.stop()
+        await Task.yield()
+        XCTAssertEqual(engine.snapshot.poolOccupancy, 0)
+        XCTAssertEqual(engine.snapshot.allocatedPlayerCount, 0)
+        XCTAssertEqual(engine.snapshot.activeLoadCount, 0)
+        XCTAssertTrue(factory.sessions.allSatisfy { $0.activeStateObserverCount == 0 })
+        XCTAssertTrue(factory.sessions.allSatisfy { $0.activeStreamingObserverCount == 0 })
+        XCTAssertTrue(factory.sessions.allSatisfy { $0.isStopped })
+
+        return Run(
+            firstFrameP95Milliseconds: percentile(firstFrameSamples, 0.95),
+            cpuPercent: wallSeconds > 0 ? cpuSeconds / wallSeconds * 100 : 0,
+            emittedEventCount: analytics.snapshot.emittedEventCount,
+            emittedSummaryCount: analytics.snapshot.emittedSummaryCount
+        )
+    }
+
+    private var artifactConfiguration: String {
+        ProcessInfo.processInfo.environment["HLS_ANALYTICS_QUALIFICATION_CONFIGURATION"]
+            ?? "debug"
+    }
+
+    private func percentile(_ values: [Double], _ quantile: Double) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let rank = max(1, Int(ceil(quantile * Double(sorted.count))))
+        return sorted[min(sorted.count - 1, rank - 1)]
+    }
+
+    private func median(_ values: [Double]) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let middle = sorted.count / 2
+        return sorted.count.isMultiple(of: 2)
+            ? (sorted[middle - 1] + sorted[middle]) / 2
+            : sorted[middle]
+    }
+
+    private func processCPUSeconds() -> Double {
+        var value = timespec()
+        precondition(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &value) == 0)
+        return Double(value.tv_sec) + Double(value.tv_nsec) / 1_000_000_000
+    }
+
+    private func milliseconds(_ duration: Duration) -> Double {
+        seconds(duration) * 1_000
+    }
+
+    private func seconds(_ duration: Duration) -> Double {
+        let components = duration.components
+        return Double(components.seconds)
+            + Double(components.attoseconds) / 1_000_000_000_000_000_000
     }
 }

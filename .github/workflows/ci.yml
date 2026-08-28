@@ -13,6 +13,12 @@ jobs:
       - uses: actions/checkout@v7
       - name: Release build with warnings as errors
         run: swift build -c release -Xswiftc -warnings-as-errors
+      - name: Address Sanitizer analytics qualification
+        run: |
+          mkdir -p ci-artifacts
+          swift test --sanitize=address \
+            --filter 'PlaybackAnalyticsQualificationTests' 2>&1 \
+            | tee ci-artifacts/address-sanitizer.log
       - name: Thread Sanitizer
         run: |
           mkdir -p ci-artifacts
