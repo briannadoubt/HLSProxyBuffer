@@ -79,7 +79,10 @@ final class HLSFeedEngineAVIntegrationTests: XCTestCase {
         let warmedPlayer = try XCTUnwrap(engine.platformPlayer(for: items[1].id))
         let warmedItem = try XCTUnwrap(warmedPlayer.currentItem)
         XCTAssertEqual(snapshot.playback(for: items[1].id)?.state.status, .ready)
-        XCTAssertTrue(warmedPlayer.isMuted, "the prepared neighbor must remain silent")
+        XCTAssertTrue(
+            isEffectivelyMuted(warmedPlayer),
+            "the prepared neighbor must remain silent"
+        )
 
         try await engine.update(signal(generation: 2, focused: items[1].id))
         snapshot = await engine.waitUntilSettled()
@@ -89,7 +92,8 @@ final class HLSFeedEngineAVIntegrationTests: XCTestCase {
         XCTAssertTrue(engine.platformPlayer(for: items[1].id) === warmedPlayer)
         XCTAssertTrue(warmedPlayer.currentItem === warmedItem)
         XCTAssertFalse(warmedPlayer.isMuted)
-        XCTAssertTrue(initiallyFocusedPlayer.isMuted)
+        XCTAssertGreaterThan(warmedPlayer.volume, 0)
+        XCTAssertTrue(isEffectivelyMuted(initiallyFocusedPlayer))
         XCTAssertEqual(snapshot.playback(for: items[1].id)?.phase, .focused)
         XCTAssertEqual(snapshot.maximumObservedPoolOccupancy, 2)
         XCTAssertEqual(snapshot.maximumObservedAudiblePlaybackCount, 1)
@@ -106,7 +110,7 @@ final class HLSFeedEngineAVIntegrationTests: XCTestCase {
         )
 
         await engine.stop()
-        XCTAssertTrue(warmedPlayer.isMuted)
+        XCTAssertTrue(isEffectivelyMuted(warmedPlayer))
     }
 
     private func signal(
@@ -124,6 +128,10 @@ final class HLSFeedEngineAVIntegrationTests: XCTestCase {
             velocityInViewportsPerSecond: 6,
             observedAt: .milliseconds(Int64(generation))
         )
+    }
+
+    private func isEffectivelyMuted(_ player: AVPlayer) -> Bool {
+        player.isMuted || player.volume == 0
     }
 }
 
@@ -157,6 +165,7 @@ private final class InsecureFeedPlayerSession: HLSFeedPlayerSession {
     }
     func play() { player.play() }
     func pause() { player.pause() }
+    func setMuted(_ isMuted: Bool) { player.setFeedPlaybackMuted(isMuted) }
     func setPlaybackRate(_ rate: Float) { player.setPlaybackRate(rate) }
     func jumpToLive() async throws { try await player.jumpToLive() }
     func seek(secondsBehindLiveEdge: TimeInterval) async throws {
