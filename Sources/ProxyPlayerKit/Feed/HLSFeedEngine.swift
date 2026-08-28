@@ -20,6 +20,9 @@ public struct HLSFeedPlayback: Sendable, Equatable {
     /// True after the focused platform player has entered its `.playing`
     /// time-control state for this lease.
     public let hasStartedPlayback: Bool
+    /// True only for the current, unsuspended focus owner. Warm and loading
+    /// leases are always muted even while AVFoundation primes their pipeline.
+    public let isAudible: Bool
 
     public var isImmediatelyPlayable: Bool {
         phase == .warm || phase == .focused
@@ -37,6 +40,7 @@ public struct HLSFeedEngineSnapshot: Sendable, Equatable {
     public let generation: FeedNavigationGeneration?
     public let targetFocusedItemID: FeedItemID?
     public let activeItemID: FeedItemID?
+    public let audibleItemID: FeedItemID?
     public let requestedDestinationItemID: FeedItemID?
     public let playbacks: [HLSFeedPlayback]
     public let failures: [Failure]
@@ -44,12 +48,15 @@ public struct HLSFeedEngineSnapshot: Sendable, Equatable {
     public let allocatedPlayerCount: Int
     public let activeLoadCount: Int
     public let maximumObservedPoolOccupancy: Int
+    public let maximumObservedAudiblePlaybackCount: Int
     public let staleCompletionCount: Int
+    public let isPlaybackSuspended: Bool
 
     public static let empty = Self(
         generation: nil,
         targetFocusedItemID: nil,
         activeItemID: nil,
+        audibleItemID: nil,
         requestedDestinationItemID: nil,
         playbacks: [],
         failures: [],
@@ -57,7 +64,9 @@ public struct HLSFeedEngineSnapshot: Sendable, Equatable {
         allocatedPlayerCount: 0,
         activeLoadCount: 0,
         maximumObservedPoolOccupancy: 0,
-        staleCompletionCount: 0
+        maximumObservedAudiblePlaybackCount: 0,
+        staleCompletionCount: 0,
+        isPlaybackSuspended: false
     )
 
     public func playback(for itemID: FeedItemID) -> HLSFeedPlayback? {
@@ -103,6 +112,7 @@ protocol HLSFeedPlayerSession: AnyObject {
     func prepareForImmediatePlayback() async -> Bool
     func play()
     func pause()
+    func setMuted(_ isMuted: Bool)
     func setPlaybackRate(_ rate: Float)
     func jumpToLive() async throws
     func seek(secondsBehindLiveEdge: TimeInterval) async throws
@@ -114,6 +124,10 @@ protocol HLSFeedPlayerSession: AnyObject {
 extension HLSFeedPlayerSession {
     func telemetryUpdates() async -> AsyncStream<HLSStreamingTelemetry.Snapshot> {
         AsyncStream { continuation in continuation.finish() }
+    }
+
+    func setMuted(_ isMuted: Bool) {
+        feedPlatformPlayer?.isMuted = isMuted
     }
 }
 
@@ -146,6 +160,10 @@ extension ProxyHLSPlayer: HLSFeedPlayerSession {
         }
     }
 
+    func setMuted(_ isMuted: Bool) {
+        player?.isMuted = isMuted
+    }
+
     func restartPlayback() async {
         guard let player else { return }
         player.currentItem?.cancelPendingSeeks()
@@ -173,6 +191,7 @@ public final class HLSFeedEngine {
         var state: PlayerState
         var didCompleteInitialLoad: Bool
         var hasStartedPlayback: Bool
+        var isAudible: Bool
         var telemetryPath: HLSFeedTelemetry.Path
         let analyticsAttempt: PlaybackAnalyticsTimeline.Attempt
         var stallStartedAt: Duration?
@@ -266,6 +285,7 @@ public final class HLSFeedEngine {
     @ObservationIgnored private var cacheSampleTask: Task<Void, Never>?
     @ObservationIgnored private var continuations: [UUID: AsyncStream<HLSFeedEngineSnapshot>.Continuation] = [:]
     @ObservationIgnored private var maximumObservedPoolOccupancy = 0
+    @ObservationIgnored private var maximumObservedAudiblePlaybackCount = 0
     @ObservationIgnored private var staleCompletionCount = 0
     @ObservationIgnored private var pendingFocus: PendingFocus?
     @ObservationIgnored private var latestCancellationAcknowledgementCount = 0
@@ -277,6 +297,7 @@ public final class HLSFeedEngine {
         diskBytes: 0
     )
     @ObservationIgnored private var isStopped = false
+    @ObservationIgnored private var isPlaybackSuspended = false
 
     /// Creates a production engine with one shared bounded cache underneath
     /// predictive preparation and all pooled playback sessions.
@@ -355,6 +376,13 @@ public final class HLSFeedEngine {
         let previousPendingFocus = pendingFocus
         let previousTarget = targetFocusedItemID
         let focusChanged = signal.focusedItemID != previousTarget
+        let canAffectCurrentFocus = latestCoordinatorSnapshot?.generation.map {
+            signal.generation >= $0
+        } ?? true
+        let didSilenceActivePlayback = focusChanged && canAffectCurrentFocus
+        if didSilenceActivePlayback {
+            deactivateActivePlayback()
+        }
         if focusChanged {
             pendingFocus = signal.focusedItemID.map {
                 makePendingFocus(itemID: $0, generation: signal.generation)
@@ -367,6 +395,11 @@ public final class HLSFeedEngine {
             if pendingFocus?.generation == signal.generation {
                 pendingFocus = previousPendingFocus
             }
+            if didSilenceActivePlayback,
+               let previousTarget,
+               let previous = slot(for: previousTarget) {
+                activate(previous)
+            }
             throw error
         }
         if value.generation == signal.generation {
@@ -378,6 +411,11 @@ public final class HLSFeedEngine {
             failuresByItemID.removeAll(keepingCapacity: true)
         } else if pendingFocus?.generation == signal.generation {
             pendingFocus = previousPendingFocus
+            if didSilenceActivePlayback,
+               let previousTarget,
+               let previous = slot(for: previousTarget) {
+                activate(previous)
+            }
         }
         acceptCoordinatorSnapshot(value)
         return snapshot
@@ -392,6 +430,28 @@ public final class HLSFeedEngine {
             cacheMetrics = await sharedCache.metrics()
             rebuildSnapshot()
         }
+    }
+
+    /// Suspends audible playback without discarding the prepared working set.
+    /// Hosts can forward inactive/background lifecycle state here and resume
+    /// later without manually pausing or recreating pooled players.
+    @discardableResult
+    public func setPlaybackSuspended(_ isSuspended: Bool) -> HLSFeedEngineSnapshot {
+        guard !isStopped, isPlaybackSuspended != isSuspended else { return snapshot }
+        isPlaybackSuspended = isSuspended
+        if isSuspended {
+            if pendingFocus != nil { completePendingFocus(succeeded: false) }
+            recordPlaybackLifecycle(.backgrounded)
+            deactivateActivePlayback()
+        } else {
+            recordPlaybackLifecycle(.resumed)
+            if let targetFocusedItemID,
+               let destination = slot(for: targetFocusedItemID) {
+                activate(destination)
+            }
+        }
+        rebuildSnapshot()
+        return snapshot
     }
 
     /// Replaces feed contents while retaining leases only for identical items.
@@ -550,12 +610,15 @@ public final class HLSFeedEngine {
             slot.isReleasing = true
             if var lease = slot.lease {
                 finishStallIfNeeded(in: &lease)
+                lease.isAudible = false
                 slot.lease = lease
             }
             slot.loadTask?.cancel()
             slot.releaseTask?.cancel()
             slot.cancelLeaseObservers()
             analyticsTasks += slot.cancelAnalyticsObservers()
+            slot.session.setMuted(true)
+            slot.session.pause()
         }
         await coordinatorObservationTask?.value
         await cacheSampleTask?.value
@@ -636,7 +699,8 @@ public final class HLSFeedEngine {
             )
         }
 
-        if let targetFocusedItemID,
+        if !isPlaybackSuspended,
+           let targetFocusedItemID,
            let slot = slot(for: targetFocusedItemID),
            slot.lease.map({ $0.phase == .warm || $0.phase == .focused }) == true {
             activate(slot)
@@ -738,6 +802,7 @@ public final class HLSFeedEngine {
         let analyticsAttempt = analytics.beginAttempt(
             attribution: Self.analyticsAttribution(from: telemetryPath)
         )
+        slot.session.setMuted(true)
         if hadPreviousLease { slot.session.pause() }
         slot.lease = Lease(
             token: token,
@@ -749,6 +814,7 @@ public final class HLSFeedEngine {
             state: slot.session.state,
             didCompleteInitialLoad: false,
             hasStartedPlayback: false,
+            isAudible: false,
             telemetryPath: telemetryPath,
             analyticsAttempt: analyticsAttempt,
             stallStartedAt: nil
@@ -808,6 +874,7 @@ public final class HLSFeedEngine {
                     self.recordStaleCompletion()
                     return
                 }
+                slot.session.setMuted(true)
                 let isPreparedForImmediatePlayback = await slot.session
                     .prepareForImmediatePlayback()
                 guard self.owns(slot, token: token), !Task.isCancelled else {
@@ -876,6 +943,7 @@ public final class HLSFeedEngine {
         }
         slot.lease = lease
         startAVMetricObservation(for: slot, token: token)
+        slot.session.setMuted(true)
         slot.session.pause()
         if let failedMessage {
             failuresByItemID[lease.itemID] = .init(
@@ -890,7 +958,9 @@ public final class HLSFeedEngine {
         } else {
             installPlaybackEndObserver(for: slot, token: token)
         }
-        if lease.itemID == targetFocusedItemID, lease.phase == .warm {
+        if !isPlaybackSuspended,
+           lease.itemID == targetFocusedItemID,
+           lease.phase == .warm {
             activate(slot)
         }
         rebuildSnapshot()
@@ -986,6 +1056,9 @@ public final class HLSFeedEngine {
             finishStallIfNeeded(in: &lease)
             lease.phase = .failed(message)
             lease.hasStartedPlayback = false
+            lease.isAudible = false
+            slot.session.setMuted(true)
+            slot.session.pause()
             failuresByItemID[lease.itemID] = .init(
                 itemID: lease.itemID,
                 generation: lease.generation,
@@ -1009,28 +1082,33 @@ public final class HLSFeedEngine {
                 await self.release(slot, token: token)
             }
         }
-        if lease.itemID == targetFocusedItemID, lease.phase == .warm {
+        if !isPlaybackSuspended,
+           lease.itemID == targetFocusedItemID,
+           lease.phase == .warm {
             activate(slot)
         }
         rebuildSnapshot()
     }
 
     private func activate(_ destination: Slot) {
-        guard var destinationLease = destination.lease,
+        guard !isPlaybackSuspended,
+              let targetFocusedItemID,
+              let destinationLease = destination.lease,
+              destinationLease.itemID == targetFocusedItemID,
+              destinationLease.generation == latestCoordinatorSnapshot?.generation,
               destinationLease.phase == .warm || destinationLease.phase == .focused
         else { return }
-        if activeItemID == destinationLease.itemID, destinationLease.phase == .focused {
+        if activeItemID == destinationLease.itemID,
+           destinationLease.phase == .focused,
+           destinationLease.isAudible {
             return
         }
-        if activeItemID != destinationLease.itemID,
-           let current = activeItemID.flatMap({ slot(for: $0) }),
-           var currentLease = current.lease {
-            current.session.pause()
-            finishStallIfNeeded(in: &currentLease)
-            if currentLease.phase == .focused { currentLease.phase = .warm }
-            currentLease.hasStartedPlayback = false
-            current.lease = currentLease
-        }
+        deactivateActivePlayback()
+        guard var destinationLease = destination.lease,
+              destinationLease.itemID == targetFocusedItemID,
+              destinationLease.generation == latestCoordinatorSnapshot?.generation,
+              destinationLease.phase == .warm || destinationLease.phase == .focused
+        else { return }
         destinationLease.telemetryPath = Self.telemetryPath(
             reuse: destinationLease.telemetryPath.reuse,
             role: .focused,
@@ -1048,8 +1126,10 @@ public final class HLSFeedEngine {
         )
         destinationLease.phase = .focused
         destinationLease.hasStartedPlayback = false
+        destinationLease.isAudible = true
         destination.lease = destinationLease
         activeItemID = destinationLease.itemID
+        destination.session.setMuted(false)
         let hasPlatformPlayer = destination.session.feedPlatformPlayer != nil
         if hasPlatformPlayer {
             observeActivatedPlayback(in: destination, token: destinationLease.token)
@@ -1058,6 +1138,24 @@ public final class HLSFeedEngine {
         if !hasPlatformPlayer {
             confirmActivatedPlayback(in: destination, token: destinationLease.token)
         }
+    }
+
+    private func deactivateActivePlayback() {
+        let previouslyActiveItemID = activeItemID
+        for slot in slots {
+            slot.session.setMuted(true)
+            guard var lease = slot.lease else { continue }
+            lease.isAudible = false
+            if lease.itemID == previouslyActiveItemID {
+                slot.session.pause()
+                finishStallIfNeeded(in: &lease)
+                if lease.phase == .focused { lease.phase = .warm }
+                lease.hasStartedPlayback = false
+            }
+            slot.lease = lease
+        }
+        activeItemID = nil
+        rebuildSnapshot()
     }
 
     private func observeActivatedPlayback(in slot: Slot, token: UUID) {
@@ -1092,7 +1190,11 @@ public final class HLSFeedEngine {
     private func confirmActivatedPlayback(in slot: Slot, token: UUID) {
         guard owns(slot, token: token),
               var lease = slot.lease,
-              lease.itemID == activeItemID
+              !isPlaybackSuspended,
+              lease.itemID == activeItemID,
+              lease.itemID == targetFocusedItemID,
+              lease.generation == latestCoordinatorSnapshot?.generation,
+              lease.isAudible
         else {
             return
         }
@@ -1100,7 +1202,8 @@ public final class HLSFeedEngine {
         slot.lease = lease
         slot.playbackStartObservation?.invalidate()
         slot.playbackStartObservation = nil
-        if pendingFocus?.itemID == slot.lease?.itemID {
+        if pendingFocus?.itemID == lease.itemID,
+           pendingFocus?.generation == lease.generation {
             completePendingFocus(succeeded: true)
         }
         rebuildSnapshot()
@@ -1163,6 +1266,7 @@ public final class HLSFeedEngine {
         slot.loadTask = nil
         let observationTask = slot.cancelLeaseObservers()
         let analyticsTasks = slot.cancelAnalyticsObservers()
+        slot.session.setMuted(true)
         slot.session.pause()
         slotIDByItemID.removeValue(forKey: itemID)
         slot.lease = nil
@@ -1215,6 +1319,7 @@ public final class HLSFeedEngine {
         rebuildSnapshot()
         let observationTask = slot.cancelLeaseObservers()
         let analyticsTasks = slot.cancelAnalyticsObservers()
+        slot.session.setMuted(true)
         slot.session.pause()
         slotIDByItemID.removeValue(forKey: lease.itemID)
         slot.lease = nil
@@ -1268,7 +1373,9 @@ public final class HLSFeedEngine {
 
     private func playbackEnded(in slot: Slot, token: UUID) async {
         guard owns(slot, token: token), let lease = slot.lease,
-              lease.itemID == activeItemID
+              !isPlaybackSuspended,
+              lease.itemID == activeItemID,
+              lease.isAudible
         else { return }
         switch effectivePolicy.looping {
         case .disabled:
@@ -1462,6 +1569,18 @@ public final class HLSFeedEngine {
         }
     }
 
+    private func recordPlaybackLifecycle(_ lifecycle: PlaybackAnalytics.Lifecycle) {
+        let attempt = activeItemID.flatMap { slot(for: $0)?.lease?.analyticsAttempt }
+            ?? targetFocusedItemID.flatMap { slot(for: $0)?.lease?.analyticsAttempt }
+        guard let attempt else { return }
+        analytics.record(
+            source: .feedEngine,
+            lifecycle: lifecycle,
+            priority: .important,
+            attempt: attempt
+        )
+    }
+
     private func rebuildSnapshot() {
         let itemIndices = Dictionary(uniqueKeysWithValues: items.enumerated().map { ($1.id, $0) })
         let playbacks = slots.compactMap(\.lease).sorted { lhs, rhs in
@@ -1476,9 +1595,15 @@ public final class HLSFeedEngine {
                 role: lease.role,
                 phase: lease.phase,
                 state: lease.state,
-                hasStartedPlayback: lease.hasStartedPlayback
+                hasStartedPlayback: lease.hasStartedPlayback,
+                isAudible: lease.isAudible
             )
         }
+        let audibleItemIDs = playbacks.filter(\.isAudible).map(\.itemID)
+        maximumObservedAudiblePlaybackCount = max(
+            maximumObservedAudiblePlaybackCount,
+            audibleItemIDs.count
+        )
         let activeLoads = slots.reduce(into: 0) { count, slot in
             if slot.loadTask != nil { count += 1 }
         }
@@ -1486,6 +1611,7 @@ public final class HLSFeedEngine {
             generation: latestCoordinatorSnapshot?.generation,
             targetFocusedItemID: targetFocusedItemID,
             activeItemID: activeItemID,
+            audibleItemID: audibleItemIDs.count == 1 ? audibleItemIDs[0] : nil,
             requestedDestinationItemID: requestedDestinationItemID,
             playbacks: playbacks,
             failures: failuresByItemID.values.sorted { lhs, rhs in
@@ -1498,7 +1624,9 @@ public final class HLSFeedEngine {
             allocatedPlayerCount: slots.count,
             activeLoadCount: activeLoads,
             maximumObservedPoolOccupancy: maximumObservedPoolOccupancy,
-            staleCompletionCount: staleCompletionCount
+            maximumObservedAudiblePlaybackCount: maximumObservedAudiblePlaybackCount,
+            staleCompletionCount: staleCompletionCount,
+            isPlaybackSuspended: isPlaybackSuspended
         )
         recordResourceSample()
         for continuation in continuations.values { continuation.yield(snapshot) }
