@@ -5,6 +5,34 @@ QUALIFICATION_ARTIFACT_DIR="${HLS_CI_ARTIFACT_DIR:-$PWD/ci-artifacts}"
 mkdir -p "$QUALIFICATION_ARTIFACT_DIR"
 export HLS_CI_ARTIFACT_DIR="$QUALIFICATION_ARTIFACT_DIR"
 
+CI_DERIVED_DATA_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/hlsproxy-ci-derived.XXXXXX")
+
+remove_derived_data() {
+  local path="$1"
+  case "$path" in
+    "$CI_DERIVED_DATA_ROOT"/*)
+      rm -rf -- "$path"
+      ;;
+    *)
+      echo "Refusing to remove DerivedData outside $CI_DERIVED_DATA_ROOT: $path"
+      return 1
+      ;;
+  esac
+}
+
+cleanup_ci_storage() {
+  case "$CI_DERIVED_DATA_ROOT" in
+    "${TMPDIR:-/tmp}"/hlsproxy-ci-derived.*)
+      rm -rf -- "$CI_DERIVED_DATA_ROOT"
+      ;;
+    *)
+      echo "Refusing to remove unexpected CI storage root: $CI_DERIVED_DATA_ROOT"
+      ;;
+  esac
+}
+
+trap cleanup_ci_storage EXIT
+
 wait_for_simulator_boot() {
   local udid="$1"
   local timeout="${2:-180}"
@@ -43,6 +71,13 @@ if [ ! -s "$FEED_QUALIFICATION_REPORT" ]; then
 fi
 echo "Feed qualification report: $FEED_QUALIFICATION_REPORT"
 
+# The simulator builds use Xcode's own package products, so the SwiftPM
+# intermediates from the host/sanitizer gates only consume runner storage now.
+# Reclaim them before Xcode creates multiple platform SDK/module caches.
+swift package clean
+echo "Storage before simulator qualification:"
+df -h "$PWD" "$CI_DERIVED_DATA_ROOT"
+
 if command -v xcodebuild >/dev/null 2>&1; then
   IOS_SIM_NAME="iPhone Air"
   IOS_SIM_UDID=$(xcrun simctl list devices "iOS" | grep "$IOS_SIM_NAME" | head -n 1 | sed -n 's/.*(\([0-9A-F-]*\)).*/\1/p' || true)
@@ -55,17 +90,24 @@ if command -v xcodebuild >/dev/null 2>&1; then
     fi
 
     echo "Building HLSProxyBuffer for $IOS_SIM_NAME..."
+    IOS_PACKAGE_DERIVED_DATA="$CI_DERIVED_DATA_ROOT/ios-package"
     xcodebuild \
       -scheme HLSProxyBuffer \
       -destination "platform=iOS Simulator,id=$IOS_SIM_UDID" \
       -sdk iphonesimulator \
+      -derivedDataPath "$IOS_PACKAGE_DERIVED_DATA" \
+      ONLY_ACTIVE_ARCH=YES \
       build
+    remove_derived_data "$IOS_PACKAGE_DERIVED_DATA"
 
     echo "Building the automatic SwiftUI feed demo for $IOS_SIM_NAME..."
+    FEED_DEMO_DERIVED_DATA="$CI_DERIVED_DATA_ROOT/feed-demo"
     xcodebuild \
       -scheme HLSProxyFeedDemo \
       -destination "platform=iOS Simulator,id=$IOS_SIM_UDID" \
       -sdk iphonesimulator \
+      -derivedDataPath "$FEED_DEMO_DERIVED_DATA" \
+      ONLY_ACTIVE_ARCH=YES \
       build
 
     echo "Running the Release-mode automatic feed UI qualification on $IOS_SIM_NAME..."
@@ -75,7 +117,10 @@ if command -v xcodebuild >/dev/null 2>&1; then
       -scheme HLSProxyFeedQualification \
       -destination "platform=iOS Simulator,id=$IOS_SIM_UDID" \
       -resultBundlePath "$UI_RESULT_BUNDLE" \
+      -derivedDataPath "$FEED_DEMO_DERIVED_DATA" \
+      ONLY_ACTIVE_ARCH=YES \
       test
+    remove_derived_data "$FEED_DEMO_DERIVED_DATA"
   else
     echo "iOS simulator build skipped (no $IOS_SIM_NAME available)."
   fi
@@ -89,14 +134,21 @@ if command -v xcodebuild >/dev/null 2>&1; then
       echo "tvOS simulator boot timed out; skipping tvOS smoke test."
     else
       echo "Running tvOS Simulator smoke test on $TVOS_SIM_NAME..."
+      TVOS_DERIVED_DATA="$CI_DERIVED_DATA_ROOT/tvos-package"
       xcodebuild \
         -scheme HLSProxyBuffer-Package \
         -destination "platform=tvOS Simulator,id=$TVOS_SIM_UDID" \
+        -derivedDataPath "$TVOS_DERIVED_DATA" \
+        ONLY_ACTIVE_ARCH=YES \
         -skip-testing:ProxyPlayerKitTests/PlaybackAnalyticsPerformanceTests \
         test
+      remove_derived_data "$TVOS_DERIVED_DATA"
     fi
 
   else
     echo "tvOS simulator run skipped (no $TVOS_SIM_NAME available)."
   fi
 fi
+
+echo "Storage after simulator qualification:"
+df -h "$PWD" "$CI_DERIVED_DATA_ROOT"
