@@ -76,6 +76,7 @@ public struct HLSFeedEngineSnapshot: Sendable, Equatable {
 
 public enum HLSFeedEngineError: Error, Equatable, LocalizedError, Sendable {
     case stopped
+    case backgroundWarmingUnavailable
     case noFocusedItem
     case itemUnavailable(FeedItemID)
     case disallowedSourceURL(URL)
@@ -86,6 +87,8 @@ public enum HLSFeedEngineError: Error, Equatable, LocalizedError, Sendable {
         switch self {
         case .stopped:
             "The feed engine has been stopped"
+        case .backgroundWarmingUnavailable:
+            "Background warming is unavailable for this injected feed engine"
         case .noFocusedItem:
             "The feed engine has no focused playback item"
         case .itemUnavailable(let itemID):
@@ -263,6 +266,9 @@ public final class HLSFeedEngine {
     /// One ordered, privacy-bounded timeline spanning feed, player, proxy,
     /// origin, cache, scheduler, and native AVFoundation metrics.
     public let analytics: PlaybackAnalyticsTimeline
+    /// Player-free opportunistic warming backed by the engine's persistent
+    /// segment cache. Production initializers always provide this service.
+    public let backgroundWarmer: HLSFeedBackgroundWarmer?
 
     @ObservationIgnored private var items: [FeedPlaybackItem]
     @ObservationIgnored private var itemsByID: [FeedItemID: FeedPlaybackItem]
@@ -305,6 +311,7 @@ public final class HLSFeedEngine {
         items: [FeedPlaybackItem],
         policy: FeedPlaybackPolicy,
         sourceTransportPolicy: HLSFeedSourceTransportPolicy = .secureOnly,
+        backgroundWarmingPolicy: HLSFeedBackgroundWarmingPolicy = .shortFormFeed,
         telemetryConfiguration: HLSFeedTelemetry.Configuration = .init(),
         analyticsConfiguration: PlaybackAnalyticsTimeline.Configuration = .init()
     ) throws {
@@ -323,6 +330,12 @@ public final class HLSFeedEngine {
             policy: validatedPolicy,
             backend: backend
         )
+        let backgroundWarmer = try HLSFeedBackgroundWarmer(
+            feedPolicy: validatedPolicy,
+            policy: backgroundWarmingPolicy,
+            sourceTransportPolicy: sourceTransportPolicy,
+            sharedCache: sharedCache
+        )
         try self.init(
             items: items,
             policy: validatedPolicy,
@@ -332,6 +345,7 @@ public final class HLSFeedEngine {
             },
             telemetry: telemetry,
             analytics: analytics,
+            backgroundWarmer: backgroundWarmer,
             sharedCache: sharedCache,
             sourceTransportPolicy: sourceTransportPolicy
         )
@@ -344,6 +358,7 @@ public final class HLSFeedEngine {
         sessionFactory: @escaping SessionFactory,
         telemetry: HLSFeedTelemetry = HLSFeedTelemetry(),
         analytics: PlaybackAnalyticsTimeline = PlaybackAnalyticsTimeline(),
+        backgroundWarmer: HLSFeedBackgroundWarmer? = nil,
         sharedCache: HLSSegmentCache? = nil,
         telemetryClock: FeedCoordinatorClock = .continuous,
         sourceTransportPolicy: HLSFeedSourceTransportPolicy = .secureOnly
@@ -362,6 +377,7 @@ public final class HLSFeedEngine {
         self.sessionFactory = sessionFactory
         self.telemetry = telemetry
         self.analytics = analytics
+        self.backgroundWarmer = backgroundWarmer
         self.sharedCache = sharedCache
         self.telemetryClock = telemetryClock
         startCoordinatorObservation()
@@ -432,6 +448,30 @@ public final class HLSFeedEngine {
         }
     }
 
+    /// Runs one system-granted, strictly bounded background opportunity without
+    /// exposing players, proxy servers, fetchers, or cache objects to the host.
+    @discardableResult
+    public func warmInBackground(
+        _ request: HLSFeedBackgroundWarmingRequest
+    ) async throws -> HLSFeedBackgroundWarmingResult {
+        guard !isStopped else { throw HLSFeedEngineError.stopped }
+        guard let backgroundWarmer else {
+            throw HLSFeedEngineError.backgroundWarmingUnavailable
+        }
+        return await backgroundWarmer.warm(request)
+    }
+
+    /// Atomically replaces the independent caps for future background work.
+    public func updateBackgroundWarmingPolicy(
+        _ policy: HLSFeedBackgroundWarmingPolicy
+    ) async throws {
+        guard !isStopped else { throw HLSFeedEngineError.stopped }
+        guard let backgroundWarmer else {
+            throw HLSFeedEngineError.backgroundWarmingUnavailable
+        }
+        try await backgroundWarmer.updatePolicy(policy)
+    }
+
     /// Suspends audible playback without discarding the prepared working set.
     /// Hosts can forward inactive/background lifecycle state here and resume
     /// later without manually pausing or recreating pooled players.
@@ -496,6 +536,7 @@ public final class HLSFeedEngine {
             for: validatedPolicy,
             sourceTransportPolicy: sourceTransportPolicy
         )
+        try await backgroundWarmer?.updateFeedPolicy(validatedPolicy)
         let value = try await coordinator.updatePolicy(validatedPolicy)
         basePolicy = validatedPolicy
         effectivePolicy = validatedPolicy
@@ -599,6 +640,7 @@ public final class HLSFeedEngine {
         cacheSampleTask?.cancel()
         self.coordinatorObservationTask = nil
         self.cacheSampleTask = nil
+        await backgroundWarmer?.stop()
         await coordinator.stop()
 
         let loadTasks = slots.compactMap(\.loadTask)
