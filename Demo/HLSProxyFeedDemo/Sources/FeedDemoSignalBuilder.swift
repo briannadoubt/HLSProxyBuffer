@@ -2,6 +2,61 @@ import CoreGraphics
 import Foundation
 import ProxyPlayerKit
 
+struct FeedDemoScrollGeometrySample: Equatable, Sendable {
+    static let samplesPerPage: Double = 60
+
+    let pageOffset: Double
+    let viewportSize: CGSize
+
+    init(contentOffsetY: CGFloat, viewportSize: CGSize) {
+        self.viewportSize = viewportSize
+        guard viewportSize.height > 0 else {
+            pageOffset = 0
+            return
+        }
+        let rawPageOffset = Double(contentOffsetY / viewportSize.height)
+        pageOffset = (rawPageOffset * Self.samplesPerPage).rounded()
+            / Self.samplesPerPage
+    }
+}
+
+enum FeedDemoScrollGeometryProjector {
+    static func frames(
+        itemIDs: [FeedItemID],
+        focusedItemID: FeedItemID?,
+        sample: FeedDemoScrollGeometrySample,
+        itemsBehind: Int,
+        itemsAhead: Int
+    ) -> [FeedItemID: CGRect] {
+        guard sample.viewportSize.height > 0, !itemIDs.isEmpty else { return [:] }
+        let nearestIndex = min(
+            itemIDs.count - 1,
+            max(0, Int(sample.pageOffset.rounded()))
+        )
+        let lowerIndex = max(0, nearestIndex - itemsBehind - 1)
+        let upperIndex = min(itemIDs.count - 1, nearestIndex + itemsAhead + 1)
+        var indexes = Set(lowerIndex...upperIndex)
+        if let focusedItemID,
+           let focusedIndex = itemIDs.firstIndex(of: focusedItemID) {
+            indexes.insert(focusedIndex)
+        }
+
+        let height = sample.viewportSize.height
+        return Dictionary(uniqueKeysWithValues: indexes.map { index in
+            let originY = (CGFloat(index) - CGFloat(sample.pageOffset)) * height
+            return (
+                itemIDs[index],
+                CGRect(
+                    x: 0,
+                    y: originY,
+                    width: sample.viewportSize.width,
+                    height: height
+                )
+            )
+        })
+    }
+}
+
 struct FeedDemoSignalBuilder {
     private(set) var orderedItemIDs: [FeedItemID]
     private(set) var focusedItemID: FeedItemID?

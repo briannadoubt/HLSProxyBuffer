@@ -221,6 +221,84 @@ final class HLSProxyFeedDemoTests: XCTestCase {
         XCTAssertEqual(advanced.predictedDestinations.first?.itemID, itemIDs[2])
     }
 
+    func testModernScrollGeometryIsCoarsenedAndProjectsOnlyABoundedWindow() throws {
+        let itemIDs = (0..<12).map { FeedItemID(rawValue: "item-\($0)") }
+        let sample = FeedDemoScrollGeometrySample(
+            contentOffsetY: 460,
+            viewportSize: CGSize(width: 200, height: 100)
+        )
+        let frames = FeedDemoScrollGeometryProjector.frames(
+            itemIDs: itemIDs,
+            focusedItemID: itemIDs[0],
+            sample: sample,
+            itemsBehind: 2,
+            itemsAhead: 2
+        )
+
+        XCTAssertEqual(sample.pageOffset, 4.6, accuracy: 0.0001)
+        XCTAssertEqual(frames.count, 8)
+        XCTAssertEqual(try XCTUnwrap(frames[itemIDs[4]]).minY, -60, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(frames[itemIDs[5]]).minY, 40, accuracy: 0.0001)
+        XCTAssertNotNil(frames[itemIDs[0]], "The previous focus stays measurable during a fling")
+
+        let zeroHeight = FeedDemoScrollGeometrySample(
+            contentOffsetY: 100,
+            viewportSize: CGSize(width: 200, height: 0)
+        )
+        XCTAssertEqual(zeroHeight.pageOffset, 0)
+        XCTAssertTrue(FeedDemoScrollGeometryProjector.frames(
+            itemIDs: itemIDs,
+            focusedItemID: nil,
+            sample: zeroHeight,
+            itemsBehind: 2,
+            itemsAhead: 2
+        ).isEmpty)
+    }
+
+    func testProjectedScrollGeometryDrivesFastForwardAndReversePrediction() throws {
+        let itemIDs = (0..<8).map { FeedItemID(rawValue: "item-\($0)") }
+        let viewport = CGRect(x: 0, y: 0, width: 100, height: 100)
+        var builder = FeedDemoSignalBuilder(orderedItemIDs: itemIDs)
+
+        func frames(pageOffset: CGFloat, focusedItemID: FeedItemID?) -> [FeedItemID: CGRect] {
+            FeedDemoScrollGeometryProjector.frames(
+                itemIDs: itemIDs,
+                focusedItemID: focusedItemID,
+                sample: FeedDemoScrollGeometrySample(
+                    contentOffsetY: pageOffset * 100,
+                    viewportSize: viewport.size
+                ),
+                itemsBehind: 2,
+                itemsAhead: 2
+            )
+        }
+
+        let initial = try XCTUnwrap(builder.makeSignal(
+            frames: frames(pageOffset: 2, focusedItemID: nil),
+            viewport: viewport,
+            observedAt: .zero
+        ))
+        XCTAssertEqual(initial.focusedItemID, itemIDs[2])
+
+        let forward = try XCTUnwrap(builder.makeSignal(
+            frames: frames(pageOffset: 3.2, focusedItemID: itemIDs[2]),
+            viewport: viewport,
+            observedAt: .milliseconds(100)
+        ))
+        XCTAssertEqual(forward.focusedItemID, itemIDs[3])
+        XCTAssertGreaterThan(forward.velocityInViewportsPerSecond, 2)
+        XCTAssertEqual(forward.predictedDestinations.first?.itemID, itemIDs[4])
+
+        let reversed = try XCTUnwrap(builder.makeSignal(
+            frames: frames(pageOffset: 2.1, focusedItemID: itemIDs[3]),
+            viewport: viewport,
+            observedAt: .milliseconds(200)
+        ))
+        XCTAssertEqual(reversed.focusedItemID, itemIDs[2])
+        XCTAssertLessThan(reversed.velocityInViewportsPerSecond, -2)
+        XCTAssertEqual(reversed.predictedDestinations.first?.itemID, itemIDs[1])
+    }
+
     func testAnalyticsInspectorBoundsTypedRowsAndSanitizedCanonicalPreview() async throws {
         let inspector = FeedDemoAnalyticsInspector()
         let sources: [PlaybackAnalytics.Source] = [
