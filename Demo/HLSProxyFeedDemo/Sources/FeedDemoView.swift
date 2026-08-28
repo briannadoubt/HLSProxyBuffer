@@ -6,11 +6,17 @@ struct FeedDemoRootView: View {
     let model: FeedDemoModel
 
     var body: some View {
+        let arguments = ProcessInfo.processInfo.arguments
         Group {
-            if ProcessInfo.processInfo.arguments.contains("--qualification-mode") {
+            if arguments.contains("--qualification-mode") {
                 FeedDemoQualificationView(model: model)
             } else {
-                FeedDemoShell(model: model)
+                FeedDemoShell(
+                    model: model,
+                    showsQualificationControls: arguments.contains(
+                        "--vertical-qualification-mode"
+                    )
+                )
             }
         }
             .task {
@@ -163,6 +169,7 @@ private struct FeedDemoShell: View {
     @State private var isInspectorPresented = false
 
     let model: FeedDemoModel
+    let showsQualificationControls: Bool
 
     var body: some View {
         ZStack {
@@ -183,12 +190,18 @@ private struct FeedDemoShell: View {
             )
         }
         .overlay(alignment: .bottomTrailing) {
-            FeedDemoAnalyticsLauncher(
-                inspector: model.analyticsInspector,
-                onOpen: { isInspectorPresented = true }
-            )
-            .padding(.trailing, 16)
-            .padding(.bottom, 184)
+            if showsQualificationControls {
+                FeedDemoVerticalQualificationControls(model: model)
+                    .padding(.trailing, 12)
+                    .padding(.bottom, 172)
+            } else {
+                FeedDemoAnalyticsLauncher(
+                    inspector: model.analyticsInspector,
+                    onOpen: { isInspectorPresented = true }
+                )
+                .padding(.trailing, 16)
+                .padding(.bottom, 184)
+            }
         }
         .tint(.mint)
         .sheet(isPresented: $isInspectorPresented) {
@@ -197,6 +210,94 @@ private struct FeedDemoShell: View {
                 onClose: { isInspectorPresented = false }
             )
         }
+    }
+}
+
+private struct FeedDemoVerticalQualificationControls: View {
+    let model: FeedDemoModel
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 6) {
+            HStack(spacing: 6) {
+                qualificationButton(
+                    title: "Normal",
+                    identifier: "vertical-network-normal"
+                ) {
+                    await model.setQualificationNetworkCondition(.normal)
+                }
+                qualificationButton(
+                    title: "Poor",
+                    identifier: "vertical-network-poor"
+                ) {
+                    await model.setQualificationNetworkCondition(.poor)
+                }
+                qualificationButton(
+                    title: "Offline",
+                    identifier: "vertical-network-offline"
+                ) {
+                    await model.setQualificationNetworkCondition(.offline)
+                }
+            }
+            HStack(spacing: 6) {
+                qualificationButton(
+                    title: "Pressure",
+                    identifier: "vertical-memory-pressure"
+                ) {
+                    await model.handleQualificationMemoryPressure()
+                }
+                qualificationButton(
+                    title: "Finish",
+                    identifier: "vertical-qualification-finish"
+                ) {
+                    await model.finishVerticalQualification()
+                }
+            }
+            qualificationValue(
+                model.qualificationNetworkCondition.rawValue,
+                identifier: "vertical-network-condition"
+            )
+            qualificationValue(
+                model.engineSnapshot.activeItemID?.rawValue ?? "none",
+                identifier: "vertical-active-item"
+            )
+            qualificationValue(
+                model.engineSnapshot.audibleItemID?.rawValue ?? "none",
+                identifier: "vertical-audible-item"
+            )
+            qualificationValue(
+                String(model.metrics.cancellationCount),
+                identifier: "vertical-cancellation-count"
+            )
+            qualificationValue(
+                model.verticalQualificationReport?.json ?? "pending",
+                identifier: "vertical-qualification-report"
+            )
+        }
+        .padding(8)
+        .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func qualificationButton(
+        title: LocalizedStringKey,
+        identifier: String,
+        action: @escaping @MainActor @Sendable () async -> Void
+    ) -> some View {
+        Button(title) {
+            Task { await action() }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .accessibilityIdentifier(identifier)
+    }
+
+    private func qualificationValue(_ value: String, identifier: String) -> some View {
+        Text(verbatim: value)
+            .font(.system(size: 1))
+            .lineLimit(1)
+            .frame(width: 1, height: 1)
+            .opacity(0.01)
+            .accessibilityIdentifier(identifier)
+            .accessibilityValue(value)
     }
 }
 

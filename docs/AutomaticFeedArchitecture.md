@@ -167,6 +167,16 @@ forward/backward, and direction-reversal behavior observable to UI tests. The
 button-driven qualification view remains available only through its explicit
 launch argument as a lower-level 100-navigation performance fixture.
 
+Release UI qualification drives that same vertical pager with real XCUITest
+gestures. A test-only overlay changes the loopback fixture origin between
+normal, bandwidth-limited, and offline states, forwards memory pressure through
+`HLSFeedEngine.handleMemoryPressure()`, and publishes only aggregate ownership
+and telemetry values. It never bypasses the viewport-signal adapter or borrows
+an engine player. The attached `vertical_paging_ui` report has fixed scenario
+and eviction cardinality and excludes item IDs, URLs, paths, headers, and error
+text. CI extracts the report from the xcresult bundle and fails closed if it is
+absent or does not pass.
+
 Audio ownership is stricter than surface attachment. Every newly allocated or
 recycled player is muted before loading or preroll. An accepted focus change
 first mutes and pauses the old owner, then unmutes a destination only after its

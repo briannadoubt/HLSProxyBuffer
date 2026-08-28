@@ -2,10 +2,136 @@ import Foundation
 import XCTest
 @testable import HLSProxyFeedDemo
 import HLSCore
-import ProxyPlayerKit
+@testable import ProxyPlayerKit
 
 @MainActor
 final class HLSProxyFeedDemoTests: XCTestCase {
+    func testVerticalQualificationReportIsBoundedSanitizedAndCoversEveryMetric() throws {
+        let telemetry = HLSFeedTelemetry(configuration: .init(
+            latencyUpperBounds: [0.05, 0.1, 0.25],
+            eventBufferCapacity: 2,
+            maximumSubscriberCount: 1
+        ))
+        let path = HLSFeedTelemetry.Path(
+            reuse: .warm,
+            intent: .focused,
+            mediaKind: .videoOnDemand
+        )
+        telemetry.record(.init(path: path, payload: .firstFrame(latency: 0.04)))
+        telemetry.record(.init(path: path, payload: .stall(duration: 0.02)))
+        telemetry.record(.init(
+            path: path,
+            payload: .cache(hits: 3, misses: 1, originBytesAvoided: 4_096)
+        ))
+        telemetry.record(.init(
+            path: path,
+            payload: .network(originRequests: 2, originBytesFetched: 8_192)
+        ))
+        telemetry.record(.init(
+            path: path,
+            payload: .cancellation(latency: 0.03, outcome: .acknowledged)
+        ))
+        telemetry.record(.init(
+            path: path,
+            payload: .handoff(wasReady: true, succeeded: true)
+        ))
+        telemetry.record(.init(payload: .resources(
+            memoryBytes: 8_192,
+            diskBytes: 16_384,
+            playerPoolOccupancy: 2,
+            proxyPoolOccupancy: 2
+        )))
+        telemetry.record(.init(payload: .cacheResources(
+            memoryEntryCount: 1,
+            diskEntryCount: 2,
+            evictionCounts: [.memoryPressure: 1]
+        )))
+
+        let focused: FeedItemID = "fixture-focus"
+        let generation = FeedNavigationGeneration(rawValue: 7)
+        let engine = HLSFeedEngineSnapshot(
+            generation: generation,
+            targetFocusedItemID: focused,
+            activeItemID: focused,
+            audibleItemID: focused,
+            requestedDestinationItemID: nil,
+            playbacks: [HLSFeedPlayback(
+                itemID: focused,
+                generation: generation,
+                role: .focused,
+                phase: .focused,
+                state: PlayerState(status: .ready),
+                hasStartedPlayback: true,
+                isAudible: true
+            )],
+            failures: [],
+            poolOccupancy: 1,
+            allocatedPlayerCount: 1,
+            activeLoadCount: 0,
+            maximumObservedPoolOccupancy: 2,
+            maximumObservedAudiblePlaybackCount: 1,
+            staleCompletionCount: 0,
+            isPlaybackSuspended: false
+        )
+        let origin = FeedDemoFixtureOrigin.Snapshot(
+            requestCount: 4,
+            responseByteCount: 12_288,
+            conditionalRequestCount: 1,
+            notModifiedCount: 1,
+            failureCount: 0,
+            offlineRequestCount: 0,
+            activeRequestCount: 0,
+            maximumActiveRequestCount: 2,
+            requestsByPath: ["https://forbidden.invalid/path": 1],
+            bytesByPath: ["authorization": 1],
+            records: []
+        )
+        let report = FeedDemoVerticalQualificationReport.make(
+            focusedItemID: focused,
+            engine: engine,
+            telemetry: telemetry.snapshot,
+            origin: origin,
+            policy: .preset(.shortFormFeed),
+            networkConditionTransitionCount: 3,
+            memoryPressureActionCount: 1,
+            backgroundTransitionCount: 1,
+            foregroundTransitionCount: 1
+        )
+
+        XCTAssertTrue(report.passed, report.failureCodes.joined(separator: ", "))
+        XCTAssertEqual(report.qualificationKind, "vertical_paging_ui")
+        XCTAssertEqual(report.scenarioIDs.count, 8)
+        XCTAssertEqual(
+            report.evictionCounts.map(\.reason),
+            HLSFeedTelemetry.CacheEvictionReason.allCases
+        )
+        XCTAssertEqual(report.firstFrameLatency.count, 1)
+        XCTAssertEqual(
+            try XCTUnwrap(report.cancellationLatency.maximumMilliseconds),
+            30,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(report.cacheHitBytes, 4_096)
+        XCTAssertEqual(report.originByteCount, 8_192)
+        XCTAssertEqual(report.fixtureResponseByteCount, 12_288)
+
+        let json = report.json
+        XCTAssertTrue(json.contains("\"passed\":true"))
+        for forbidden in [
+            "http://", "https://", "authorization", "cookie", "bearer",
+            "requestHeaders", "responseHeaders", "fixture-focus",
+        ] {
+            XCTAssertFalse(json.localizedCaseInsensitiveContains(forbidden), forbidden)
+        }
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                FeedDemoVerticalQualificationReport.self,
+                from: Data(json.utf8)
+            ),
+            report
+        )
+    }
+
     func testPrimaryShortFormCatalogHasTwentyFourStableDistinctHLSItems() async throws {
         let origin = try FeedDemoFixtureOrigin()
         let baseURL = try await origin.start()

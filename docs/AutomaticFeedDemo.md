@@ -67,8 +67,16 @@ Focus is deterministic: the highest visible fraction wins, then distance from vi
 - `qualification-focus`, `qualification-navigation-count`, and
   `qualification-playback-state`
 - `qualification-result` and `qualification-report`
+- `vertical-network-normal`, `vertical-network-poor`, and
+  `vertical-network-offline`
+- `vertical-active-item`, `vertical-audible-item`, and
+  `vertical-cancellation-count`
+- `vertical-memory-pressure`, `vertical-qualification-finish`, and
+  `vertical-qualification-report`
 
-These identifiers are the contract used by the rapid-navigation UI qualification ticket.
+These identifiers are the contract used by the release UI qualification. The
+vertical controls appear only with `--vertical-qualification-mode`; normal
+launches retain the production-shaped feed chrome.
 
 ## Live metrics
 
@@ -94,13 +102,32 @@ identifiers, item IDs, URLs, application metadata, or error text.
 
 `HLSProxyFeedDemoTests` validates that every mode produces a nonempty, uniquely identified local catalog and a valid policy; that each can enter the public engine path; that geometry produces stable focus, velocity, and prediction signals; and that the fixture origin honors byte ranges and validators. Lifecycle tests inject the scheduler, clock, and network environment to cover registration, refresh/processing submission, system denial, resubmission, foreground cancellation, expiration, policy bounds, audio suspension, and sanitized metrics without depending on simulator background scheduling.
 
-The `HLSProxyFeedQualification` scheme launches the app with
-`--qualification-mode`, warms every short-form item, then drives 100 rapid
-accessibility-owned focus changes. It requires the requested and active item to
-match, the final platform player to be playing, predicted-warm first-frame p95
-to remain at or below 500 ms, obsolete work to drain inside 250 ms, configured
-memory/disk/player bounds to hold, and managed post-warmup memory growth to stay
-within 1 MiB. The JSON report is attached to the `.xcresult` bundle.
+The primary `HLSProxyFeedQualification` UI gate launches the actual paged feed
+with `--vertical-qualification-mode`. XCUITest performs controlled page swipes,
+forward/backward revisit, a poor-network rapid fling and immediate reversal,
+offline reuse, recovery to normal networking, memory pressure, and an actual
+background/foreground transition. Every settled gesture must converge the
+focused, active, and audible owners on one playing item. The final
+`vertical_paging_ui` JSON attachment contains fixed-cardinality first-frame,
+stall, cache, origin-network, cancellation, handoff, memory/disk, eviction, and
+player-pool evidence. `Scripts/run-ci.sh` exports and validates that attachment
+as `hls-feed-vertical-ui-qualification.json`; a missing or failing report fails
+CI.
+
+The same scheme separately launches `--qualification-mode`, warms every
+short-form item, then drives 100 rapid accessibility-owned focus changes. This
+button harness remains a lower-level throughput/resource fixture. It requires
+the requested and active item to match, the final platform player to be
+playing, predicted-warm first-frame p95 to remain at or below 500 ms, obsolete
+work to drain inside 250 ms, configured memory/disk/player bounds to hold, and
+managed post-warmup memory growth to stay within 1 MiB.
+
+Simulator backgrounding proves lifecycle reconciliation but not background-task
+scheduling: iOS decides whether and when `BGAppRefreshTask` or
+`BGProcessingTask` launches. Device runs are still required for energy, thermal,
+radio, decoder, and real scheduler qualification. The deterministic injected
+lifecycle and network tests cover those decisions in CI without claiming that a
+simulator models them.
 
 The host qualification complements that UI run with 532 standard trace
 observations, a separate 500-transition engine ownership/teardown test,
