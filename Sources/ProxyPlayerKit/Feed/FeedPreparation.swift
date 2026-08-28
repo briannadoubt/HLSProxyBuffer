@@ -367,15 +367,26 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
             of: ResourceOutcome.self,
             returning: [ResourceOutcome].self
         ) { group in
-            for resource in resources {
+            let concurrencyLimit = min(request.maximumConcurrentFetches, resources.count)
+            var nextResourceIndex = 0
+            while nextResourceIndex < concurrencyLimit {
+                let resource = resources[nextResourceIndex]
                 group.addTask { [self] in
                     try await fetch(resource)
                 }
+                nextResourceIndex += 1
             }
             var values: [ResourceOutcome] = []
             values.reserveCapacity(resources.count)
             for try await value in group {
                 values.append(value)
+                if nextResourceIndex < resources.count {
+                    let resource = resources[nextResourceIndex]
+                    group.addTask { [self] in
+                        try await fetch(resource)
+                    }
+                    nextResourceIndex += 1
+                }
             }
             return values
         }

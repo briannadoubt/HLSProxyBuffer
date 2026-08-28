@@ -208,6 +208,36 @@ lands, but its caller-owned player registration model is transitional. New
 integrations should target `HLSFeedEngine` rather than manually registering
 players.
 
+## Opportunistic background warming
+
+`HLSFeedBackgroundWarmer` is the player-free engine boundary for work that the
+system chooses to run in the background. A platform adapter provides ordered
+predictions, cache-freshness facts, current network cost/constrained state,
+Low Power Mode, and the execution time still available. The validated
+`HLSFeedBackgroundWarmingPolicy` independently caps admitted items, leading
+segments, estimated bytes, concurrent preparations, and elapsed time. The
+short-form default warms at most two items, one leading segment per item, one
+preparation at a time, and 4 MiB of planning reservations.
+
+Fresh cache entries with sufficient validity remaining are skipped. Stale,
+near-expiry, absent, and unknown entries may use the canonical manifest and
+segment preparation path, including conditional validation and the same
+bounded disk cache. Offline, cellular, constrained, expensive, and Low Power
+Mode conditions are denied unless their explicit policy allows admission.
+Expiration and caller cancellation propagate through structured tasks; bytes
+completed before cancellation remain present in the aggregate report. A second
+invocation is denied while one is active, so system callbacks cannot create an
+unbounded warming fleet.
+
+Scheduling is deliberately outside this UI-independent actor. On iOS, a later
+adapter may submit supported background refresh or processing requests, but the
+operating system decides whether and when they execute; warming is always
+best-effort and is never promised. Fixed-cardinality Codable snapshots and a
+newest-only `AsyncStream` report admitted/completed/expired/cancelled/denied
+outcomes plus cache and origin byte counts. Aggregate-only privacy is a typed
+policy invariant: item IDs, URLs, application metadata, and error strings are
+absent from telemetry and its machine-readable JSON.
+
 ## Policy and capability composition
 
 `FeedPlaybackPolicy` exposes typed presets for short-form, paged,
