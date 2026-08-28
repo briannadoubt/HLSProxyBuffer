@@ -425,6 +425,15 @@ public final class HLSFeedEngine {
             targetFocusedItemID = signal.focusedItemID
             requestedDestinationItemID = nil
             failuresByItemID.removeAll(keepingCapacity: true)
+            // coordinator.submit suspends this MainActor method. Its observation
+            // task may publish during that suspension and reactivate the old
+            // target, so close the reentrancy window before accepting the new
+            // generation. A ready destination is activated immediately below.
+            if didSilenceActivePlayback,
+               let activeItemID,
+               activeItemID != targetFocusedItemID {
+                deactivateActivePlayback()
+            }
         } else if pendingFocus?.generation == signal.generation {
             pendingFocus = previousPendingFocus
             if didSilenceActivePlayback,
