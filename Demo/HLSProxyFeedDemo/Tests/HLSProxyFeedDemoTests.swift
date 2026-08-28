@@ -407,6 +407,155 @@ final class HLSProxyFeedDemoTests: XCTestCase {
         await model.stop()
     }
 
+    func testBackgroundSchedulerRegistersSubmitsAndCancelsTypedRequests() throws {
+        let scheduler = RecordingBackgroundScheduler()
+        scheduler.deniedKinds = [.processing]
+        let anchor = Date(timeIntervalSince1970: 1_700_000_000)
+        let lifecycle = FeedDemoBackgroundLifecycle(
+            scheduler: scheduler,
+            policy: .shortFormFeed,
+            now: { anchor }
+        )
+
+        lifecycle.recordRegistration(.refresh, accepted: true)
+        lifecycle.recordRegistration(.processing, accepted: false)
+        lifecycle.scheduleAll()
+
+        XCTAssertEqual(lifecycle.snapshot.count(for: .registered), 1)
+        XCTAssertEqual(lifecycle.snapshot.count(for: .registrationDenied), 1)
+        XCTAssertEqual(lifecycle.snapshot.count(for: .scheduled), 1)
+        XCTAssertEqual(lifecycle.snapshot.count(for: .systemDenied), 1)
+        XCTAssertEqual(scheduler.requests.map(\.kind), [.refresh, .processing])
+        XCTAssertEqual(
+            scheduler.requests[0].earliestBeginDate,
+            anchor.addingTimeInterval(15 * 60)
+        )
+        XCTAssertFalse(scheduler.requests[0].requiresNetworkConnectivity)
+        XCTAssertEqual(
+            scheduler.requests[1].earliestBeginDate,
+            anchor.addingTimeInterval(60 * 60)
+        )
+        XCTAssertTrue(scheduler.requests[1].requiresNetworkConnectivity)
+        XCTAssertTrue(scheduler.requests.allSatisfy { !$0.requiresExternalPower })
+
+        lifecycle.cancelPending()
+        XCTAssertEqual(scheduler.cancelledKinds, [.refresh, .processing])
+    }
+
+    func testBackgroundLifecycleRecordsBoundedSanitizedTerminalOutcomes() async throws {
+        let scheduler = RecordingBackgroundScheduler()
+        let lifecycle = FeedDemoBackgroundLifecycle(scheduler: scheduler)
+        let request = try backgroundRequest(candidateCount: 2)
+
+        let completed = await lifecycle.run(kind: .refresh, request: request) {
+            FeedDemoBackgroundWorkResult(outcome: .completed, admittedItemCount: 2)
+        }
+        let denied = await lifecycle.run(kind: .processing, request: request) {
+            FeedDemoBackgroundWorkResult(outcome: .policyDenied, admittedItemCount: 0)
+        }
+
+        XCTAssertTrue(completed)
+        XCTAssertTrue(denied)
+        XCTAssertEqual(lifecycle.snapshot.count(for: .admitted), 2)
+        XCTAssertEqual(lifecycle.snapshot.count(for: .completed), 1)
+        XCTAssertEqual(lifecycle.snapshot.count(for: .policyDenied), 1)
+        XCTAssertEqual(lifecycle.snapshot.maximumCandidateCount, 2)
+        XCTAssertEqual(lifecycle.snapshot.maximumAdmittedItemCount, 2)
+        XCTAssertNil(lifecycle.snapshot.activeTaskKind)
+
+        let json = String(
+            decoding: try lifecycle.machineReadableSummary(),
+            as: UTF8.self
+        )
+        XCTAssertFalse(json.contains("fixture.invalid"))
+        XCTAssertFalse(json.contains("item-"))
+        XCTAssertFalse(json.localizedCaseInsensitiveContains("url"))
+        XCTAssertFalse(json.localizedCaseInsensitiveContains("identifier"))
+    }
+
+    func testBackgroundExpirationCancelsWorkAndIsNotReportedAsGenericCancellation() async throws {
+        let lifecycle = FeedDemoBackgroundLifecycle(
+            scheduler: RecordingBackgroundScheduler()
+        )
+        let request = try backgroundRequest(candidateCount: 1)
+        let run = Task { @MainActor in
+            await lifecycle.run(kind: .processing, request: request) {
+                try await ContinuousClock().sleep(for: .seconds(30))
+                return FeedDemoBackgroundWorkResult(
+                    outcome: .completed,
+                    admittedItemCount: 1
+                )
+            }
+        }
+
+        while lifecycle.snapshot.activeTaskKind == nil {
+            await Task.yield()
+        }
+        lifecycle.expire(.processing)
+
+        let succeeded = await run.value
+        XCTAssertFalse(succeeded)
+        XCTAssertEqual(lifecycle.snapshot.count(for: .expired), 1)
+        XCTAssertEqual(lifecycle.snapshot.count(for: .cancelled), 0)
+        XCTAssertNil(lifecycle.snapshot.activeTaskKind)
+    }
+
+    func testDemoBackgroundTransitionSilencesPlaybackResubmitsAndHonorsWarmCap() async {
+        let scheduler = RecordingBackgroundScheduler()
+        let environment = FeedDemoStaticBackgroundEnvironment(current: .init(
+            networkInterface: .wifi
+        ))
+        let model = FeedDemoModel(
+            backgroundScheduler: scheduler,
+            backgroundEnvironment: environment
+        )
+        await model.start()
+        XCTAssertEqual(model.status, .running)
+
+        model.handleApplicationPhase(.background)
+        XCTAssertTrue(model.engine?.snapshot.isPlaybackSuspended == true)
+        XCTAssertNil(model.engine?.snapshot.audibleItemID)
+        XCTAssertEqual(scheduler.requests.map(\.kind), [.refresh, .processing])
+
+        _ = await model.performBackgroundTask(.refresh)
+        XCTAssertEqual(scheduler.requests.map(\.kind), [.refresh, .processing, .refresh])
+        XCTAssertLessThanOrEqual(
+            model.backgroundSnapshot.maximumCandidateCount,
+            HLSFeedBackgroundWarmingPolicy.shortFormFeed.maximumItemCount
+        )
+        XCTAssertLessThanOrEqual(
+            model.backgroundSnapshot.maximumAdmittedItemCount,
+            HLSFeedBackgroundWarmingPolicy.shortFormFeed.maximumItemCount
+        )
+        XCTAssertNil(model.engine?.snapshot.audibleItemID)
+
+        model.handleApplicationPhase(.active)
+        XCTAssertTrue(model.engine?.snapshot.isPlaybackSuspended == false)
+        XCTAssertEqual(scheduler.cancelledKinds, [.refresh, .processing])
+        await model.stop()
+    }
+
+    private func backgroundRequest(
+        candidateCount: Int
+    ) throws -> HLSFeedBackgroundWarmingRequest {
+        HLSFeedBackgroundWarmingRequest(
+            candidates: try (0..<candidateCount).map { index in
+                HLSFeedBackgroundWarmingCandidate(item: FeedPlaybackItem(
+                    id: .init(rawValue: "item-\(index)"),
+                    source: .stream(
+                        url: try XCTUnwrap(
+                            URL(string: "https://fixture.invalid/\(index).m3u8")
+                        ),
+                        kind: .videoOnDemand
+                    ),
+                    estimatedPreparationBytes: 1_024
+                ))
+            },
+            environment: .init(networkInterface: .wifi),
+            availableExecutionTime: .seconds(15)
+        )
+    }
+
     private func waitForAnalytics(
         in model: FeedDemoModel,
         mode: FeedDemoMode
@@ -422,5 +571,23 @@ final class HLSProxyFeedDemoTests: XCTestCase {
             try? await clock.sleep(for: .milliseconds(25))
         }
         return false
+    }
+}
+
+@MainActor
+private final class RecordingBackgroundScheduler: FeedDemoBackgroundScheduling {
+    var deniedKinds: Set<FeedDemoBackgroundTaskKind> = []
+    private(set) var requests: [FeedDemoBackgroundScheduleRequest] = []
+    private(set) var cancelledKinds: [FeedDemoBackgroundTaskKind] = []
+
+    func submit(_ request: FeedDemoBackgroundScheduleRequest) throws {
+        requests.append(request)
+        if deniedKinds.contains(request.kind) {
+            throw FeedDemoUnavailableBackgroundScheduler.Unavailable()
+        }
+    }
+
+    func cancel(_ kind: FeedDemoBackgroundTaskKind) {
+        cancelledKinds.append(kind)
     }
 }

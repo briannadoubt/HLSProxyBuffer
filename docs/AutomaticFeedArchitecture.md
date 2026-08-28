@@ -252,14 +252,29 @@ completed before cancellation remain present in the aggregate report. A second
 invocation is denied while one is active, so system callbacks cannot create an
 unbounded warming fleet.
 
-Scheduling is deliberately outside this UI-independent actor. On iOS, a later
-adapter may submit supported background refresh or processing requests, but the
-operating system decides whether and when they execute; warming is always
-best-effort and is never promised. Fixed-cardinality Codable snapshots and a
-newest-only `AsyncStream` report admitted/completed/expired/cancelled/denied
-outcomes plus cache and origin byte counts. Aggregate-only privacy is a typed
-policy invariant: item IDs, URLs, application metadata, and error strings are
-absent from telemetry and its machine-readable JSON.
+Scheduling stays outside this UI-independent actor. The iOS demo registers an
+identifier-based SwiftUI app-refresh task and an iOS-17-compatible
+`BGProcessingTask` launch handler before application launch completes. A typed,
+injectable adapter submits both request forms, replaces consumed requests for a
+future opportunity, and cancels obsolete pending or active work when the app
+returns to the foreground. The app manifest declares the exact identifiers and
+the `fetch` and `processing` background modes.
+
+Scene reconciliation calls only `setPlaybackSuspended(_:)`: inactive and
+background phases immediately remove the audible owner, while foregrounding
+resumes only the still-current focus. System expiration cancels the structured
+warming task. `NWPathMonitor` contributes only typed interface, constrained,
+and expensive facts; Low Power Mode is sampled at execution. The engine then
+enforces the stricter cellular, Low Data Mode, Low Power Mode, item, segment,
+byte, concurrency, cache-validation, and elapsed-time policy.
+
+iOS decides whether and when submitted work runs. The demo and public
+documentation describe warming as opportunistic, never guaranteed.
+Fixed-cardinality Codable lifecycle metrics distinguish registration,
+scheduled, admitted, completed, expired, cancelled, system-denied,
+policy-denied, and failed events. They compose with the warmer's cache and
+origin-byte snapshot while retaining no item IDs, URLs, application metadata,
+or error strings.
 
 ## Policy and capability composition
 

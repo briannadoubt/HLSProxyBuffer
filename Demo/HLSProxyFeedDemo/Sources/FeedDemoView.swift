@@ -3,7 +3,7 @@ import ProxyPlayerKit
 import SwiftUI
 
 struct FeedDemoRootView: View {
-    @State private var model = FeedDemoModel()
+    let model: FeedDemoModel
 
     var body: some View {
         Group {
@@ -249,6 +249,10 @@ private struct FeedDemoPrimaryChrome: View {
                     Task { await model.select(mode) }
                 }
             )
+            Text("iOS schedules tiny background warmups opportunistically.", bundle: #bundle)
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.68))
+                .accessibilityIdentifier("background-warming-disclosure")
             if model.selectedMode == .liveDVR, model.engine != nil {
                 FeedDemoLiveControls(
                     onSeek: { seconds in

@@ -63,7 +63,13 @@ let package = Package(
                 "ProxyPlayerKit",
             ],
             path: "Demo/HLSProxyFeedDemo",
-            exclude: ["Tests", "UITests", "project.yml", "HLSProxyFeedDemoApp.xcodeproj"],
+            exclude: [
+                "Tests",
+                "UITests",
+                "Supporting",
+                "project.yml",
+                "HLSProxyFeedDemoApp.xcodeproj",
+            ],
             resources: [.copy("Fixtures")]
         ),
         .testTarget(
