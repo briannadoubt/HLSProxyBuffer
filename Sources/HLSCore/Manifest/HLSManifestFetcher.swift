@@ -1,6 +1,30 @@
 import Foundation
 
 public struct HLSManifestFetcher: Sendable, HLSManifestSource {
+    public struct Validation: Equatable, Sendable {
+        public let eTag: String?
+        public let lastModified: String?
+        public let maximumAge: TimeInterval?
+        public let allowsStorage: Bool
+
+        public init(
+            eTag: String? = nil,
+            lastModified: String? = nil,
+            maximumAge: TimeInterval? = nil,
+            allowsStorage: Bool = true
+        ) {
+            self.eTag = eTag
+            self.lastModified = lastModified
+            self.maximumAge = maximumAge.map { max(0, $0) }
+            self.allowsStorage = allowsStorage
+        }
+    }
+
+    public enum ValidatedManifest: Equatable, Sendable {
+        case modified(String, validation: Validation)
+        case notModified(validation: Validation)
+    }
+
     public struct RetryPolicy: Sendable, Equatable {
         public static let `default` = RetryPolicy(maxAttempts: 3, retryDelay: 0.25)
 
@@ -88,6 +112,26 @@ public struct HLSManifestFetcher: Sendable, HLSManifestSource {
     }
 
     public func fetchManifest(from url: URL, allowInsecure: Bool, requestTimeout: TimeInterval? = nil) async throws -> String {
+        let result = try await fetchValidatedManifest(
+            from: url,
+            allowInsecure: allowInsecure,
+            requestTimeout: requestTimeout
+        )
+        guard case .modified(let manifest, _) = result else {
+            throw FetchError.invalidResponse(nil)
+        }
+        return manifest
+    }
+
+    /// Fetches a manifest with optional conditional validators. A 304 response
+    /// is represented explicitly so the caller can reuse its persisted bytes.
+    public func fetchValidatedManifest(
+        from url: URL,
+        allowInsecure: Bool,
+        requestTimeout: TimeInterval? = nil,
+        ifNoneMatch: String? = nil,
+        ifModifiedSince: String? = nil
+    ) async throws -> ValidatedManifest {
         guard allowInsecure || url.scheme?.lowercased() == "https" else {
             throw FetchError.insecureScheme
         }
@@ -96,7 +140,12 @@ public struct HLSManifestFetcher: Sendable, HLSManifestSource {
         for attempt in 1...retryPolicy.maxAttempts {
             do {
                 try Task.checkCancellation()
-                return try await fetchOnce(from: url, requestTimeout: requestTimeout)
+                return try await fetchOnce(
+                    from: url,
+                    requestTimeout: requestTimeout,
+                    ifNoneMatch: ifNoneMatch,
+                    ifModifiedSince: ifModifiedSince
+                )
             } catch let fetchError as FetchError where !fetchError.isRetryable {
                 throw fetchError
             } catch {
@@ -120,10 +169,21 @@ public struct HLSManifestFetcher: Sendable, HLSManifestSource {
         throw FetchError.retryExhausted(lastError ?? FetchError.emptyBody)
     }
 
-    private func fetchOnce(from url: URL, requestTimeout: TimeInterval?) async throws -> String {
+    private func fetchOnce(
+        from url: URL,
+        requestTimeout: TimeInterval?,
+        ifNoneMatch: String?,
+        ifModifiedSince: String?
+    ) async throws -> ValidatedManifest {
         var request = URLRequest(url: url)
         request.timeoutInterval = requestTimeout ?? networkPolicy.requestTimeout
         request.cachePolicy = .reloadIgnoringLocalCacheData
+        if let ifNoneMatch = Self.safeValidator(ifNoneMatch) {
+            request.setValue(ifNoneMatch, forHTTPHeaderField: "If-None-Match")
+        }
+        if let ifModifiedSince = Self.safeValidator(ifModifiedSince) {
+            request.setValue(ifModifiedSince, forHTTPHeaderField: "If-Modified-Since")
+        }
 
         let (data, response) = try await session.data(for: request)
 
@@ -131,6 +191,19 @@ public struct HLSManifestFetcher: Sendable, HLSManifestSource {
             throw FetchError.invalidResponse(response)
         }
 
+        let validation = Validation(
+            eTag: httpResponse.value(forHTTPHeaderField: "ETag"),
+            lastModified: httpResponse.value(forHTTPHeaderField: "Last-Modified"),
+            maximumAge: Self.maximumAge(
+                from: httpResponse.value(forHTTPHeaderField: "Cache-Control")
+            ),
+            allowsStorage: Self.allowsStorage(
+                cacheControl: httpResponse.value(forHTTPHeaderField: "Cache-Control")
+            )
+        )
+        if httpResponse.statusCode == 304 {
+            return .notModified(validation: validation)
+        }
         guard (200..<300).contains(httpResponse.statusCode) else {
             throw FetchError.httpStatus(httpResponse.statusCode)
         }
@@ -143,6 +216,45 @@ public struct HLSManifestFetcher: Sendable, HLSManifestSource {
             throw FetchError.utf8Decoding
         }
 
-        return string
+        return .modified(string, validation: validation)
+    }
+
+    private static func maximumAge(from cacheControl: String?) -> TimeInterval? {
+        guard let cacheControl else { return nil }
+        for directive in cacheControl.split(separator: ",") {
+            let pair = directive.split(separator: "=", maxSplits: 1)
+            if pair[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare("no-cache") == .orderedSame {
+                return 0
+            }
+            guard pair.count == 2,
+                  pair[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                    .caseInsensitiveCompare("max-age") == .orderedSame
+            else { continue }
+            let raw = pair[1]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            guard let value = TimeInterval(raw), value.isFinite else { return nil }
+            return max(0, value)
+        }
+        return nil
+    }
+
+    private static func allowsStorage(cacheControl: String?) -> Bool {
+        guard let cacheControl else { return true }
+        return !cacheControl.split(separator: ",").contains { directive in
+            directive.split(separator: "=", maxSplits: 1)[0]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare("no-store") == .orderedSame
+        }
+    }
+
+    private static func safeValidator(_ value: String?) -> String? {
+        guard let value,
+              !value.unicodeScalars.contains(where: {
+                  $0.value < 0x20 || $0.value == 0x7F
+              })
+        else { return nil }
+        return String(value.prefix(512))
     }
 }

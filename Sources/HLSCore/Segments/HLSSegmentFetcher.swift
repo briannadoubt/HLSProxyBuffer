@@ -150,6 +150,37 @@ public actor HLSSegmentFetcher: SegmentSource {
         }
     }
 
+    public struct OriginValidation: Equatable, Sendable {
+        public let eTag: String?
+        public let lastModified: String?
+        public let maximumAge: TimeInterval?
+        public let allowsStorage: Bool
+
+        public init(
+            eTag: String? = nil,
+            lastModified: String? = nil,
+            maximumAge: TimeInterval? = nil,
+            allowsStorage: Bool = true
+        ) {
+            self.eTag = eTag
+            self.lastModified = lastModified
+            self.maximumAge = maximumAge.map { max(0, $0) }
+            self.allowsStorage = allowsStorage
+        }
+    }
+
+    public enum ValidatedResource: Equatable, Sendable {
+        case modified(Data, validation: OriginValidation)
+        case notModified(validation: OriginValidation)
+
+        fileprivate var byteCount: Int {
+            switch self {
+            case .modified(let data, _): data.count
+            case .notModified: 0
+            }
+        }
+    }
+
     public struct FetchMetrics: Sendable {
         public let url: URL
         public let byteCount: Int
@@ -247,11 +278,13 @@ public actor HLSSegmentFetcher: SegmentSource {
     private struct FetchKey: Hashable, Sendable {
         let url: URL
         let byteRange: ClosedRange<Int>?
+        let ifNoneMatch: String?
+        let ifModifiedSince: String?
     }
 
     private struct InFlight: Sendable {
         let id: UUID
-        let task: Task<Data, Error>
+        let task: Task<ValidatedResource, Error>
         var waiters: Set<UUID>
     }
 
@@ -295,17 +328,35 @@ public actor HLSSegmentFetcher: SegmentSource {
     }
 
     public func fetchSegment(_ segment: HLSSegment) async throws -> Data {
-        try await fetchSegment(from: segment.url, metadata: segment)
+        try await requiredData(
+            from: fetchValidatedResource(
+                at: segment.url,
+                byteRange: segment.byteRange
+            )
+        )
     }
 
     public func fetchSegment(from url: URL) async throws -> Data {
-        try await fetchSegment(from: url, metadata: nil)
+        try await requiredData(from: fetchValidatedResource(at: url, byteRange: nil))
     }
 
     public func fetchResource(at url: URL, byteRange: ClosedRange<Int>?) async throws -> Data {
+        try await requiredData(from: fetchValidatedResource(at: url, byteRange: byteRange))
+    }
+
+    /// Fetches one resource with optional conditional validators. A 304 keeps
+    /// cached bytes authoritative and avoids charging response-body bytes.
+    public func fetchValidatedResource(
+        at url: URL,
+        byteRange: ClosedRange<Int>?,
+        ifNoneMatch: String? = nil,
+        ifModifiedSince: String? = nil
+    ) async throws -> ValidatedResource {
         try await fetchSegment(
             from: url,
-            metadata: HLSSegment(url: url, duration: 0, sequence: 0, byteRange: byteRange)
+            metadata: HLSSegment(url: url, duration: 0, sequence: 0, byteRange: byteRange),
+            ifNoneMatch: ifNoneMatch,
+            ifModifiedSince: ifModifiedSince
         )
     }
 
@@ -321,11 +372,21 @@ public actor HLSSegmentFetcher: SegmentSource {
         latestMetricsValue
     }
 
-    private func fetchSegment(from url: URL, metadata: HLSSegment?) async throws -> Data {
-        let key = FetchKey(url: url, byteRange: metadata?.byteRange)
+    private func fetchSegment(
+        from url: URL,
+        metadata: HLSSegment?,
+        ifNoneMatch: String?,
+        ifModifiedSince: String?
+    ) async throws -> ValidatedResource {
+        let key = FetchKey(
+            url: url,
+            byteRange: metadata?.byteRange,
+            ifNoneMatch: ifNoneMatch,
+            ifModifiedSince: ifModifiedSince
+        )
         let waiterID = UUID()
         let inFlightID: UUID
-        let task: Task<Data, Error>
+        let task: Task<ValidatedResource, Error>
 
         if var existing = inFlight[key] {
             existing.waiters.insert(waiterID)
@@ -334,7 +395,14 @@ public actor HLSSegmentFetcher: SegmentSource {
             task = existing.task
         } else {
             let id = UUID()
-            let newTask = Task { try await performFetch(from: url, metadata: metadata) }
+            let newTask = Task {
+                try await performFetch(
+                    from: url,
+                    metadata: metadata,
+                    ifNoneMatch: ifNoneMatch,
+                    ifModifiedSince: ifModifiedSince
+                )
+            }
             inFlight[key] = InFlight(id: id, task: newTask, waiters: [waiterID])
             inFlightID = id
             task = newTask
@@ -342,9 +410,9 @@ public actor HLSSegmentFetcher: SegmentSource {
 
         do {
             let data = try await withTaskCancellationHandler {
-                let data = try await task.value
+                let resource = try await task.value
                 try Task.checkCancellation()
-                return data
+                return resource
             } onCancel: {
                 Task {
                     await self.cancelWaiter(key: key, inFlightID: inFlightID, waiterID: waiterID)
@@ -383,16 +451,26 @@ public actor HLSSegmentFetcher: SegmentSource {
         }
     }
 
-    private func performFetch(from url: URL, metadata: HLSSegment?) async throws -> Data {
+    private func performFetch(
+        from url: URL,
+        metadata: HLSSegment?,
+        ifNoneMatch: String?,
+        ifModifiedSince: String?
+    ) async throws -> ValidatedResource {
         try Task.checkCancellation()
         let start = retryClock.now()
 
         for attempt in 1...retryPolicy.maxAttempts {
             do {
-                let data = try await fetchAttempt(from: url, metadata: metadata)
+                let resource = try await fetchAttempt(
+                    from: url,
+                    metadata: metadata,
+                    ifNoneMatch: ifNoneMatch,
+                    ifModifiedSince: ifModifiedSince
+                )
                 let metrics = FetchMetrics(
                     url: url,
-                    byteCount: data.count,
+                    byteCount: resource.byteCount,
                     duration: max(0, retryClock.now().timeIntervalSince(start)),
                     attemptCount: attempt,
                     retryCount: attempt - 1
@@ -404,12 +482,12 @@ public actor HLSSegmentFetcher: SegmentSource {
                 await emitEvent(
                     url: url,
                     start: start,
-                    byteCount: data.count,
+                    byteCount: resource.byteCount,
                     attemptCount: attempt,
                     outcome: attempt > 1 ? .successAfterRetry : .successWithoutRetry,
                     errorCategory: nil
                 )
-                return data
+                return resource
             } catch {
                 let failure = error as? AttemptFailure
                 let underlying = failure?.underlying ?? error
@@ -469,18 +547,42 @@ public actor HLSSegmentFetcher: SegmentSource {
         throw FetchError.invalidResponse
     }
 
-    private func fetchAttempt(from url: URL, metadata: HLSSegment?) async throws -> Data {
+    private func fetchAttempt(
+        from url: URL,
+        metadata: HLSSegment?,
+        ifNoneMatch: String?,
+        ifModifiedSince: String?
+    ) async throws -> ValidatedResource {
         try Task.checkCancellation()
         var request = URLRequest(url: url)
         request.timeoutInterval = networkPolicy.requestTimeout
         if let range = metadata?.byteRange {
             request.setValue("bytes=\(range.lowerBound)-\(range.upperBound)", forHTTPHeaderField: "Range")
         }
+        if let ifNoneMatch = Self.safeValidator(ifNoneMatch) {
+            request.setValue(ifNoneMatch, forHTTPHeaderField: "If-None-Match")
+        }
+        if let ifModifiedSince = Self.safeValidator(ifModifiedSince) {
+            request.setValue(ifModifiedSince, forHTTPHeaderField: "If-Modified-Since")
+        }
 
         let (receivedData, response) = try await session.data(for: request)
 
         guard let http = response as? HTTPURLResponse else {
             throw FetchError.invalidResponse
+        }
+        let originValidation = OriginValidation(
+            eTag: http.value(forHTTPHeaderField: "ETag"),
+            lastModified: http.value(forHTTPHeaderField: "Last-Modified"),
+            maximumAge: Self.maximumAge(
+                from: http.value(forHTTPHeaderField: "Cache-Control")
+            ),
+            allowsStorage: Self.allowsStorage(
+                cacheControl: http.value(forHTTPHeaderField: "Cache-Control")
+            )
+        )
+        if http.statusCode == 304 {
+            return .notModified(validation: originValidation)
         }
         guard (200..<300).contains(http.statusCode) else {
             throw AttemptFailure(
@@ -498,7 +600,53 @@ public actor HLSSegmentFetcher: SegmentSource {
         }
 
         try validate(data: data, metadata: metadata)
+        return .modified(data, validation: originValidation)
+    }
+
+    private func requiredData(from resource: ValidatedResource) throws -> Data {
+        guard case .modified(let data, _) = resource else {
+            throw FetchError.invalidResponse
+        }
         return data
+    }
+
+    private static func maximumAge(from cacheControl: String?) -> TimeInterval? {
+        guard let cacheControl else { return nil }
+        for directive in cacheControl.split(separator: ",") {
+            let pair = directive.split(separator: "=", maxSplits: 1)
+            if pair[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare("no-cache") == .orderedSame {
+                return 0
+            }
+            guard pair.count == 2,
+                  pair[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                    .caseInsensitiveCompare("max-age") == .orderedSame
+            else { continue }
+            let raw = pair[1]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            guard let value = TimeInterval(raw), value.isFinite else { return nil }
+            return max(0, value)
+        }
+        return nil
+    }
+
+    private static func allowsStorage(cacheControl: String?) -> Bool {
+        guard let cacheControl else { return true }
+        return !cacheControl.split(separator: ",").contains { directive in
+            directive.split(separator: "=", maxSplits: 1)[0]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare("no-store") == .orderedSame
+        }
+    }
+
+    private static func safeValidator(_ value: String?) -> String? {
+        guard let value,
+              !value.unicodeScalars.contains(where: {
+                  $0.value < 0x20 || $0.value == 0x7F
+              })
+        else { return nil }
+        return String(value.prefix(512))
     }
 
     private func isRetryable(_ error: Error) -> Bool {

@@ -40,6 +40,15 @@ public struct MetricsHandler: Sendable {
             hlsproxy_cache_bytes \(metrics.totalBytes)
             # HELP hlsproxy_cache_disk_bytes Number of bytes spilled to disk
             hlsproxy_cache_disk_bytes \(metrics.diskBytes)
+            # HELP hlsproxy_cache_entries Number of cache entries by storage tier
+            # TYPE hlsproxy_cache_entries gauge
+            hlsproxy_cache_entries{tier="memory"} \(metrics.memoryEntryCount)
+            hlsproxy_cache_entries{tier="disk"} \(metrics.diskEntryCount)
+            # HELP hlsproxy_cache_high_water_bytes Maximum observed cache bytes by storage tier
+            # TYPE hlsproxy_cache_high_water_bytes gauge
+            hlsproxy_cache_high_water_bytes{tier="memory"} \(metrics.memoryHighWaterBytes)
+            hlsproxy_cache_high_water_bytes{tier="disk"} \(metrics.diskHighWaterBytes)
+            \(evictionReasonMetricsBody(metrics))
             \(namespaceMetricsBody(metrics))
             # HELP hlsproxy_buffer_depth_seconds Prefetch depth in seconds
             # TYPE hlsproxy_buffer_depth_seconds gauge
@@ -65,6 +74,19 @@ public struct MetricsHandler: Sendable {
                 body: Data(body.utf8)
             )
         }
+    }
+
+    private func evictionReasonMetricsBody(_ metrics: HLSSegmentCache.Metrics) -> String {
+        var lines = [
+            "# HELP hlsproxy_cache_evictions_total Cache removals by fixed reason",
+            "# TYPE hlsproxy_cache_evictions_total counter"
+        ]
+        for reason in HLSSegmentCache.EvictionReason.allCases {
+            lines.append(
+                "hlsproxy_cache_evictions_total{reason=\"\(reason.rawValue)\"} \(metrics.evictionCounts[reason, default: 0])"
+            )
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func namespaceMetricsBody(_ metrics: HLSSegmentCache.Metrics) -> String {

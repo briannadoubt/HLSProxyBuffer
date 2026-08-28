@@ -214,6 +214,190 @@ final class FeedCoordinatorTests: XCTestCase {
         XCTAssertGreaterThan(diskMetrics.diskBytes, 0)
     }
 
+    func testExpiredDiskLaunchRevalidatesEveryResourceWithoutDownloadingDuplicateBytes() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        defer { origin.stop() }
+        let diskDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HLSProxyBuffer-HLS36-Revalidation-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: diskDirectory) }
+        var policy = singleItemPolicy()
+        policy.eviction.usesDiskCache = true
+        policy.eviction.diskDirectory = diskDirectory
+        policy.eviction.timeToLive = 0
+        policy.retry.manifest = .init(maxAttempts: 1, retryDelay: 0)
+        policy.retry.segment = .init(maxAttempts: 1, initialDelay: 0, jitterRatio: 0)
+        let playlistURL = origin.fixturePlaylistURL(named: "short-a")
+        let item = FeedPlaybackItem(
+            id: "revalidated-item",
+            source: .stream(url: playlistURL, kind: .videoOnDemand),
+            estimatedPreparationBytes: 512 * 1_024
+        )
+        let request = FeedPreparationRequest(
+            item: item,
+            generation: .init(rawValue: 1),
+            role: .focused,
+            maximumLeadingSegments: 1,
+            maximumConcurrentFetches: 2
+        )
+        let coldBackend = try HLSFeedPreparationBackend(
+            policy: policy,
+            allowsInsecureManifests: true
+        )
+        let cold = try await coldBackend.prepare(request)
+        XCTAssertEqual(cold.originFetchCount, 3)
+        XCTAssertEqual(cold.cacheHitCount, 0)
+
+        origin.resetTimeline()
+        let relaunchedBackend = try HLSFeedPreparationBackend(
+            policy: policy,
+            allowsInsecureManifests: true
+        )
+        let revalidated = try await relaunchedBackend.prepare(.init(
+            item: item,
+            generation: .init(rawValue: 2),
+            role: .focused,
+            maximumLeadingSegments: 1,
+            maximumConcurrentFetches: 2
+        ))
+
+        XCTAssertEqual(revalidated.manifestURLs, cold.manifestURLs)
+        XCTAssertEqual(revalidated.mediaPlaylistCount, 1)
+        XCTAssertEqual(revalidated.leadingSegmentCount, 1)
+        XCTAssertEqual(revalidated.originFetchCount, 3, "Each stale object performs exactly one validator request")
+        XCTAssertEqual(revalidated.cacheHitCount, 3)
+        XCTAssertEqual(revalidated.originFetchByteCount, 0, "304 responses must not redownload media bytes")
+        XCTAssertEqual(revalidated.cacheHitByteCount, cold.originFetchByteCount)
+        let timeline = origin.timelineSnapshot()
+        let started = timeline.filter { $0.kind == .requestStarted }
+        XCTAssertEqual(started.count, 3)
+        XCTAssertEqual(Dictionary(grouping: started, by: \.path).values.map(\.count), [1, 1, 1])
+        XCTAssertEqual(
+            timeline.filter { $0.kind == .responseStarted }.compactMap(\.statusCode),
+            [304, 304, 304]
+        )
+        let metrics = await relaunchedBackend.cacheMetrics()
+        XCTAssertEqual(metrics.diskEntryCount, 3)
+        XCTAssertGreaterThan(metrics.diskHighWaterBytes, 0)
+        XCTAssertEqual(metrics.evictionCounts[.expired, default: 0], 0)
+    }
+
+    func testOfflineWarmDiskLaunchSucceedsAndUncachedLaunchFailsCleanly() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        let playlistURL = origin.fixturePlaylistURL(named: "short-a")
+        let diskDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HLSProxyBuffer-HLS36-Offline-\(UUID().uuidString)", isDirectory: true)
+        let emptyDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HLSProxyBuffer-HLS36-OfflineMiss-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: diskDirectory)
+            try? FileManager.default.removeItem(at: emptyDirectory)
+        }
+        var policy = singleItemPolicy()
+        policy.eviction.usesDiskCache = true
+        policy.eviction.diskDirectory = diskDirectory
+        policy.eviction.timeToLive = 60
+        policy.network = .init(requestTimeout: 0.25, resourceTimeout: 0.25)
+        policy.retry.manifest = .init(maxAttempts: 1, retryDelay: 0)
+        policy.retry.segment = .init(maxAttempts: 1, initialDelay: 0, jitterRatio: 0)
+        let item = FeedPlaybackItem(
+            id: "offline-item",
+            source: .stream(url: playlistURL, kind: .videoOnDemand),
+            estimatedPreparationBytes: 512 * 1_024
+        )
+        let request = FeedPreparationRequest(
+            item: item,
+            generation: .init(rawValue: 1),
+            role: .focused,
+            maximumLeadingSegments: 1,
+            maximumConcurrentFetches: 2
+        )
+        let online = try HLSFeedPreparationBackend(
+            policy: policy,
+            allowsInsecureManifests: true
+        )
+        let cold = try await online.prepare(request)
+        origin.stop()
+
+        let warmOffline = try HLSFeedPreparationBackend(
+            policy: policy,
+            allowsInsecureManifests: true
+        )
+        let warm = try await warmOffline.prepare(.init(
+            item: item,
+            generation: .init(rawValue: 2),
+            role: .focused,
+            maximumLeadingSegments: 1,
+            maximumConcurrentFetches: 2
+        ))
+        XCTAssertEqual(warm.originFetchCount, 0)
+        XCTAssertEqual(warm.cacheHitCount, 3)
+        XCTAssertEqual(warm.cacheHitByteCount, cold.originFetchByteCount)
+
+        policy.eviction.diskDirectory = emptyDirectory
+        let uncachedOffline = try HLSFeedPreparationBackend(
+            policy: policy,
+            allowsInsecureManifests: true
+        )
+        do {
+            _ = try await uncachedOffline.prepare(.init(
+                item: item,
+                generation: .init(rawValue: 3),
+                role: .focused,
+                maximumLeadingSegments: 1,
+                maximumConcurrentFetches: 2
+            ))
+            XCTFail("An uncached offline launch must fail instead of inventing playback bytes")
+        } catch {
+            XCTAssertFalse(error is CancellationError)
+        }
+    }
+
+    func testPoorNetworkPreparationContinuesCanonicalTimelineWithoutDuplicateRequests() async throws {
+        let origin = try FeedFixtureOrigin(profile: .init(
+            responseDelay: .milliseconds(10),
+            bytesPerSecond: 64 * 1_024
+        ))
+        try await origin.start()
+        defer { origin.stop() }
+        var policy = singleItemPolicy()
+        policy.concurrency.maximumConcurrentFetches = 2
+        policy.network = .init(
+            requestTimeout: 3,
+            resourceTimeout: 3,
+            maximumConnectionsPerHost: 2
+        )
+        policy.retry.manifest = .init(maxAttempts: 1, retryDelay: 0)
+        policy.retry.segment = .init(maxAttempts: 1, initialDelay: 0, jitterRatio: 0)
+        let playlistURL = origin.fixturePlaylistURL(named: "short-a")
+        let item = FeedPlaybackItem(
+            id: "constrained-item",
+            source: .stream(url: playlistURL, kind: .videoOnDemand),
+            estimatedPreparationBytes: 512 * 1_024
+        )
+        let backend = try HLSFeedPreparationBackend(
+            policy: policy,
+            allowsInsecureManifests: true
+        )
+
+        let prepared = try await backend.prepare(.init(
+            item: item,
+            generation: .init(rawValue: 1),
+            role: .focused,
+            maximumLeadingSegments: 2,
+            maximumConcurrentFetches: 2
+        ))
+
+        XCTAssertEqual(prepared.manifestURLs, [playlistURL])
+        XCTAssertEqual(prepared.mediaPlaylistCount, 1)
+        XCTAssertEqual(prepared.leadingSegmentCount, 2)
+        XCTAssertEqual(prepared.originFetchCount, 4, "manifest, one map, and two canonical segments")
+        let started = origin.timelineSnapshot().filter { $0.kind == .requestStarted }
+        XCTAssertEqual(started.count, 4)
+        XCTAssertTrue(Dictionary(grouping: started, by: \.path).values.allSatisfy { $0.count == 1 })
+    }
+
     func testProductionBackendValidatesAndPreparesCompatibleClipTimeline() async throws {
         let origin = try FeedFixtureOrigin()
         try await origin.start()

@@ -208,6 +208,158 @@ final class HLSSegmentCacheTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(metrics.diskBytes, 2)
     }
 
+    func testMemoryPressureDropsOnlyMemoryAndRecordsHighWaterAndReason() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = HLSSegmentCache(
+            capacityBytes: 16,
+            diskDirectory: directory,
+            diskCapacityBytes: 16
+        )
+        await cache.put(Data([0x01, 0x02, 0x03]), for: "segment-pressure")
+
+        await cache.handleMemoryPressure()
+
+        var metrics = await cache.metrics()
+        XCTAssertEqual(metrics.totalBytes, 0)
+        XCTAssertEqual(metrics.memoryEntryCount, 0)
+        XCTAssertEqual(metrics.memoryHighWaterBytes, 3)
+        XCTAssertEqual(metrics.diskBytes, 3)
+        XCTAssertEqual(metrics.diskEntryCount, 1)
+        XCTAssertEqual(metrics.diskHighWaterBytes, 3)
+        XCTAssertEqual(metrics.evictionCounts[.memoryPressure], 1)
+        XCTAssertEqual(metrics.metrics(for: .video).memoryEvictionCount, 1)
+
+        let restored = await cache.get("segment-pressure")
+        XCTAssertEqual(restored, Data([0x01, 0x02, 0x03]))
+        metrics = await cache.metrics()
+        XCTAssertEqual(metrics.diskHitCount, 1)
+        XCTAssertEqual(metrics.totalBytes, 3)
+    }
+
+    func testOriginPolicyRemovalClearsBothTiersAndRecordsReason() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = HLSSegmentCache(
+            capacityBytes: 16,
+            diskDirectory: directory,
+            diskCapacityBytes: 16
+        )
+        await cache.put(Data([0x01]), for: "manifest-no-store")
+
+        await cache.remove("manifest-no-store")
+
+        let metrics = await cache.metrics()
+        XCTAssertEqual(metrics.totalBytes, 0)
+        XCTAssertEqual(metrics.diskBytes, 0)
+        XCTAssertEqual(metrics.evictionCounts[.originPolicy], 2)
+        let value = await cache.get("manifest-no-store")
+        XCTAssertNil(value)
+    }
+
+    func testValidationMetadataPersistsAndExpiredBytesRemainAvailableForRevalidation() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let testClock = TestCacheClock()
+        let validation = HLSSegmentCache.ValidationMetadata(
+            eTag: "\"feed-v1\"",
+            lastModified: "Wed, 26 Aug 2026 00:00:00 GMT",
+            freshUntil: testClock.wallNow.addingTimeInterval(5)
+        )
+        let first = HLSSegmentCache(
+            capacityBytes: 0,
+            diskDirectory: directory,
+            diskCapacityBytes: 16,
+            timeToLive: 60,
+            clock: testClock.cacheClock
+        )
+        await first.put(Data([0xAA]), for: "manifest-feed", validation: validation)
+        testClock.advance(by: 6)
+
+        let reloaded = HLSSegmentCache(
+            capacityBytes: 0,
+            diskDirectory: directory,
+            diskCapacityBytes: 16,
+            timeToLive: 60,
+            clock: testClock.cacheClock
+        )
+        let stale = await reloaded.entry(for: "manifest-feed", allowingExpired: true)
+
+        XCTAssertEqual(stale?.data, Data([0xAA]))
+        XCTAssertEqual(stale?.validation, validation)
+        XCTAssertEqual(stale?.isExpired, true)
+        let metrics = await reloaded.metrics()
+        XCTAssertEqual(metrics.missCount, 1)
+        XCTAssertEqual(metrics.metrics(for: .video).expirationCount, 1)
+        XCTAssertEqual(metrics.diskBytes, 1, "Revalidation keeps stale bytes until the origin answers")
+    }
+
+    func testValidationMetadataRejectsControlCharactersAndBoundsPersistedValues() {
+        let metadata = HLSSegmentCache.ValidationMetadata(
+            eTag: "safe\r\ninjected",
+            lastModified: String(repeating: "a", count: 4_096)
+        )
+
+        XCTAssertNil(metadata.eTag)
+        XCTAssertEqual(metadata.lastModified?.count, 512)
+    }
+
+    func testLongCanonicalKeyUsesBoundedPersistentIdentity() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let key = "manifest-https://media.example/playlist.m3u8?token="
+            + String(repeating: "abcdef0123456789", count: 128)
+        let first = HLSSegmentCache(
+            capacityBytes: 0,
+            diskDirectory: directory,
+            diskCapacityBytes: 16
+        )
+        await first.put(Data([0x01]), for: key)
+        let ownedFiles = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        let dataFile = try XCTUnwrap(ownedFiles.first { $0.hasPrefix("hlsproxy-v2-") })
+        XCTAssertLessThan(dataFile.utf8.count, 128)
+
+        let reloaded = HLSSegmentCache(
+            capacityBytes: 0,
+            diskDirectory: directory,
+            diskCapacityBytes: 16
+        )
+        let restored = await reloaded.get(key)
+        XCTAssertEqual(restored, Data([0x01]))
+    }
+
+    func testEvictionReasonsDistinguishByteAndEntryLimits() async throws {
+        let memory = HLSSegmentCache(capacityBytes: 1, maximumEntryCount: 2)
+        await memory.put(Data([0x01, 0x02]), for: "too-large")
+        await memory.put(Data(), for: "zero-1")
+        await memory.put(Data(), for: "zero-2")
+        await memory.put(Data(), for: "zero-3")
+        let memoryMetrics = await memory.metrics()
+        XCTAssertEqual(memoryMetrics.evictionCounts[.memoryByteLimit], 1)
+        XCTAssertEqual(memoryMetrics.evictionCounts[.memoryEntryLimit], 1)
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let disk = HLSSegmentCache(
+            capacityBytes: 0,
+            diskDirectory: directory,
+            diskCapacityBytes: 1,
+            maximumEntryCount: 2
+        )
+        await disk.put(Data([0x01, 0x02]), for: "too-large")
+        await disk.put(Data(), for: "zero-1")
+        await disk.put(Data(), for: "zero-2")
+        await disk.put(Data(), for: "zero-3")
+        let diskMetrics = await disk.metrics()
+        XCTAssertEqual(diskMetrics.evictionCounts[.diskByteLimit], 1)
+        XCTAssertEqual(diskMetrics.evictionCounts[.diskEntryLimit], 1)
+    }
+
     func testClearPreservesFilesNotOwnedByCache() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -239,6 +391,10 @@ private final class TestCacheClock: @unchecked Sendable {
             monotonicNow: { [self] in lock.withLock { state.monotonic } },
             wallNow: { [self] in lock.withLock { state.wall } }
         )
+    }
+
+    var wallNow: Date {
+        lock.withLock { state.wall }
     }
 
     func advance(by duration: TimeInterval) {

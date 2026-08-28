@@ -69,6 +69,58 @@ final class HLSManifestFetcherTests: XCTestCase {
         XCTAssertEqual(MockURLProtocol.lastRequest?.cachePolicy, .reloadIgnoringLocalCacheData)
     }
 
+    func testConditionalFetchReturnsNotModifiedAndCapturesFreshness() async throws {
+        MockURLProtocol.enqueue(
+            data: Data(),
+            statusCode: 304,
+            headerFields: [
+                "ETag": "\"manifest-v1\"",
+                "Last-Modified": "Wed, 26 Aug 2026 00:00:00 GMT",
+                "Cache-Control": "public, max-age=45",
+            ]
+        )
+        let fetcher = makeFetcher()
+        let url = URL(string: "https://example.com/master.m3u8")!
+
+        let result = try await fetcher.fetchValidatedManifest(
+            from: url,
+            allowInsecure: false,
+            ifNoneMatch: "\"manifest-v1\"",
+            ifModifiedSince: "Wed, 26 Aug 2026 00:00:00 GMT"
+        )
+
+        guard case .notModified(let validation) = result else {
+            return XCTFail("Expected a conditional 304 result")
+        }
+        XCTAssertEqual(validation.eTag, "\"manifest-v1\"")
+        XCTAssertEqual(validation.lastModified, "Wed, 26 Aug 2026 00:00:00 GMT")
+        XCTAssertEqual(validation.maximumAge, 45)
+        XCTAssertEqual(MockURLProtocol.lastRequest?.value(forHTTPHeaderField: "If-None-Match"), "\"manifest-v1\"")
+        XCTAssertEqual(
+            MockURLProtocol.lastRequest?.value(forHTTPHeaderField: "If-Modified-Since"),
+            "Wed, 26 Aug 2026 00:00:00 GMT"
+        )
+    }
+
+    func testNoStoreAndNoCacheDirectivesDisablePersistenceAndForceRevalidation() async throws {
+        MockURLProtocol.enqueue(
+            data: Data("#EXTM3U".utf8),
+            statusCode: 200,
+            headerFields: ["Cache-Control": "private, no-cache, no-store"]
+        )
+
+        let result = try await makeFetcher().fetchValidatedManifest(
+            from: URL(string: "https://example.com/master.m3u8")!,
+            allowInsecure: false
+        )
+
+        guard case .modified(_, let validation) = result else {
+            return XCTFail("Expected a modified manifest")
+        }
+        XCTAssertEqual(validation.maximumAge, 0)
+        XCTAssertFalse(validation.allowsStorage)
+    }
+
     private func makeFetcher(
         retryPolicy: HLSManifestFetcher.RetryPolicy = .default,
         networkPolicy: HLSOriginNetworkPolicy = .default
@@ -128,12 +180,16 @@ private final class MockURLProtocol: URLProtocol {
 
     override func stopLoading() {}
 
-    static func enqueue(data: Data, statusCode: Int) {
+    static func enqueue(
+        data: Data,
+        statusCode: Int,
+        headerFields: [String: String]? = nil
+    ) {
         let response = HTTPURLResponse(
             url: URL(string: "https://example.com/master.m3u8")!,
             statusCode: statusCode,
             httpVersion: nil,
-            headerFields: nil
+            headerFields: headerFields
         )!
         storage.enqueue(Stub(data: data, response: response, error: nil))
     }

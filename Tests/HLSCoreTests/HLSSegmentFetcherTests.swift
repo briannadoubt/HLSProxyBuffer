@@ -367,6 +367,40 @@ final class HLSSegmentFetcherTests: XCTestCase {
         XCTAssertEqual(SegmentFetcherURLProtocol.lastRequest()?.timeoutInterval, 9)
     }
 
+    func testConditionalResourceFetchReturnsNotModifiedWithoutBodyBytes() async throws {
+        SegmentFetcherURLProtocol.enqueue(
+            data: Data(),
+            statusCode: 304,
+            headers: [
+                "ETag": "\"segment-v1\"",
+                "Last-Modified": "Wed, 26 Aug 2026 00:00:00 GMT",
+                "Cache-Control": "public, max-age=30",
+            ]
+        )
+        let fetcher = makeFetcher()
+        let url = URL(string: "https://cdn.example.com/conditional.m4s")!
+
+        let result = try await fetcher.fetchValidatedResource(
+            at: url,
+            byteRange: nil,
+            ifNoneMatch: "\"segment-v1\"",
+            ifModifiedSince: "Wed, 26 Aug 2026 00:00:00 GMT"
+        )
+
+        guard case .notModified(let validation) = result else {
+            return XCTFail("Expected a conditional 304 result")
+        }
+        XCTAssertEqual(validation.eTag, "\"segment-v1\"")
+        XCTAssertEqual(validation.lastModified, "Wed, 26 Aug 2026 00:00:00 GMT")
+        XCTAssertEqual(validation.maximumAge, 30)
+        XCTAssertEqual(
+            SegmentFetcherURLProtocol.lastRequest()?.value(forHTTPHeaderField: "If-None-Match"),
+            "\"segment-v1\""
+        )
+        let metrics = await fetcher.latestMetrics()
+        XCTAssertEqual(metrics?.byteCount, 0)
+    }
+
     private func makeFetcher(
         validation: HLSSegmentFetcher.ValidationPolicy = .init(),
         networkPolicy: HLSOriginNetworkPolicy = .default,
