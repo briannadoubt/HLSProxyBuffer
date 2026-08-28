@@ -13,6 +13,13 @@ compatible clip stitching. `long-form` provides eight seconds of media. The
 hand-authored `live/playlist.m3u8` is a rolling three-segment window over the
 last three long-form fragments and intentionally omits `EXT-X-ENDLIST`.
 
+At runtime the demo origin gives the checked-in short media twenty-four stable,
+unique `/feed/feed-NN/` URL namespaces. Generated manifests use two- and
+three-segment timelines while the underlying fragments retain their real,
+slightly varied byte sizes. The origin also supplies deterministic response
+latency, throughput, transient-failure, offline, validator, byte-range, and
+bounded request-accounting controls for tests and qualification scenarios.
+
 Regeneration is never required to run tests or CI. To deliberately replace the
 canonical generated media, install FFmpeg and run:
 

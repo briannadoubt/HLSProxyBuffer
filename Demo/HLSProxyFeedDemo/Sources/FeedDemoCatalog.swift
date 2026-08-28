@@ -84,15 +84,64 @@ struct FeedDemoEntry: Identifiable, Sendable {
     let accentIndex: Int
 }
 
+/// Stable, ordered fixture identities shared by the demo catalog and its
+/// loopback origin. Each identity receives its own URL namespace even though
+/// the tiny checked-in media fragments are intentionally reused.
+enum FeedDemoFixtureCatalog {
+    struct ShortItem: Sendable {
+        let index: Int
+        let fixtureID: String
+        let sourceFixture: String
+        let segmentCount: Int
+        let title: String
+
+        var estimatedByteCount: Int {
+            segmentCount == 2 ? 384 * 1_024 : 512 * 1_024
+        }
+    }
+
+    static let shortItems: [ShortItem] = {
+        let titles = [
+            "Violet rush", "Blue hour", "Neon crossing", "Coastal light",
+            "City pulse", "Afterglow", "Night current", "Open road",
+            "Electric sky", "Quiet motion", "Color drift", "Fast lane",
+            "Golden frame", "Midnight loop", "Daybreak", "Signal bloom",
+            "Soft focus", "Parallel lines", "Bright turn", "Last light",
+            "New horizon", "Moving color", "Small wonder", "One more",
+        ]
+        return titles.enumerated().map { index, title in
+            ShortItem(
+                index: index,
+                fixtureID: String(format: "feed-%02d", index + 1),
+                sourceFixture: index.isMultiple(of: 2) ? "short-a" : "short-b",
+                segmentCount: index.isMultiple(of: 3) ? 2 : 3,
+                title: title
+            )
+        }
+    }()
+}
+
 enum FeedDemoCatalog {
     static func entries(for mode: FeedDemoMode, baseURL: URL) -> [FeedDemoEntry] {
         switch mode {
         case .shortForm:
-            return repeatedShortEntries(count: 14, prefix: "short", baseURL: baseURL)
+            return shortEntries(
+                fixtures: FeedDemoFixtureCatalog.shortItems,
+                prefix: "short",
+                baseURL: baseURL
+            )
         case .paged:
-            return repeatedShortEntries(count: 10, prefix: "page", baseURL: baseURL)
+            return shortEntries(
+                fixtures: Array(FeedDemoFixtureCatalog.shortItems.prefix(20)),
+                prefix: "page",
+                baseURL: baseURL
+            )
         case .continuous:
-            return repeatedShortEntries(count: 18, prefix: "window", baseURL: baseURL)
+            return shortEntries(
+                fixtures: FeedDemoFixtureCatalog.shortItems,
+                prefix: "window",
+                baseURL: baseURL
+            )
         case .longForm:
             return [streamEntry(
                 id: "long-form",
@@ -114,7 +163,11 @@ enum FeedDemoCatalog {
                 accentIndex: 3
             )]
         case .offlineFirst:
-            return repeatedShortEntries(count: 12, prefix: "offline", baseURL: baseURL)
+            return shortEntries(
+                fixtures: Array(FeedDemoFixtureCatalog.shortItems.prefix(20)),
+                prefix: "offline",
+                baseURL: baseURL
+            )
         case .looping:
             return [streamEntry(
                 id: "looping-short",
@@ -158,23 +211,27 @@ enum FeedDemoCatalog {
         }
     }
 
-    private static func repeatedShortEntries(
-        count: Int,
+    private static func shortEntries(
+        fixtures: [FeedDemoFixtureCatalog.ShortItem],
         prefix: String,
         baseURL: URL
     ) -> [FeedDemoEntry] {
-        (0..<count).map { index in
-            let fixture = index.isMultiple(of: 2) ? "short-a" : "short-b"
+        fixtures.map { fixture in
             return streamEntry(
-                id: FeedItemID(rawValue: "\(prefix)-\(index)"),
-                fixture: fixture,
-                title: LocalizedStringResource("Clip \(index + 1)", bundle: #bundle),
-                detail: index.isMultiple(of: 2)
-                    ? LocalizedStringResource("Warm violet fixture", bundle: #bundle)
-                    : LocalizedStringResource("Cool blue fixture", bundle: #bundle),
+                id: FeedItemID(rawValue: "\(prefix)-\(fixture.index)"),
+                fixture: "feed/\(fixture.fixtureID)",
+                title: LocalizedStringResource(
+                    "Moment \(fixture.index + 1): \(fixture.title)",
+                    bundle: #bundle
+                ),
+                detail: LocalizedStringResource(
+                    "\(fixture.segmentCount)-second local HLS fixture",
+                    bundle: #bundle
+                ),
                 kind: .videoOnDemand,
                 baseURL: baseURL,
-                accentIndex: index
+                accentIndex: fixture.index,
+                estimatedPreparationBytes: fixture.estimatedByteCount
             )
         }
     }
@@ -186,7 +243,8 @@ enum FeedDemoCatalog {
         detail: LocalizedStringResource,
         kind: FeedStreamKind,
         baseURL: URL,
-        accentIndex: Int
+        accentIndex: Int,
+        estimatedPreparationBytes: Int? = nil
     ) -> FeedDemoEntry {
         FeedDemoEntry(
             id: id,
@@ -195,7 +253,8 @@ enum FeedDemoCatalog {
             item: FeedPlaybackItem(
                 id: id,
                 source: .stream(url: playlistURL(fixture: fixture, baseURL: baseURL), kind: kind),
-                estimatedPreparationBytes: fixture == "long-form" ? 2_048 * 1_024 : 512 * 1_024
+                estimatedPreparationBytes: estimatedPreparationBytes
+                    ?? (fixture == "long-form" ? 2_048 * 1_024 : 512 * 1_024)
             ),
             accentIndex: accentIndex
         )
