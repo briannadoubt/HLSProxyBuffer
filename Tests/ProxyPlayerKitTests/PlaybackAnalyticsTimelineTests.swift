@@ -60,17 +60,26 @@ final class PlaybackAnalyticsTimelineTests: XCTestCase {
             path: .init(reuse: .warm, intent: .focused, mediaKind: .stitched),
             payload: .cancellation(latency: 0.02, outcome: .acknowledged)
         ), attempt: attempt)
+        timeline.record(feed: .init(
+            path: .init(reuse: .warm, intent: .focused, mediaKind: .stitched),
+            payload: .network(originRequests: 2, originBytesFetched: 4_096)
+        ), attempt: attempt)
+        timeline.record(feed: .init(payload: .cacheResources(
+            memoryEntryCount: 3,
+            diskEntryCount: 5,
+            evictionCounts: [.memoryPressure: 1, .diskByteLimit: 2]
+        )), attempt: attempt)
         timeline.end(attempt, lifecycle: .cancelled)
         timeline.finish()
 
         let events = await collect(timeline.events)
-        XCTAssertEqual(events.count, 15)
+        XCTAssertEqual(events.count, 17)
         XCTAssertTrue(events.allSatisfy { $0.correlation == attempt.correlation })
         XCTAssertEqual(
             events.flatMap(\.measurements)
                 .filter { $0.name.encodedValue == "timeline_sequence" }
                 .map(\.value),
-            Array(1...15).map(Double.init)
+            Array(1...17).map(Double.init)
         )
         XCTAssertTrue(events.allSatisfy {
             $0.timestamp.anchor == events.first?.timestamp.anchor
@@ -88,6 +97,9 @@ final class PlaybackAnalyticsTimelineTests: XCTestCase {
             "handoff_success_count",
             "stitched_boundary_success_count",
             "cancellation_acknowledged_count",
+            "memory_cache_entry_count",
+            "disk_cache_entry_count",
+            "cache_eviction_count",
             "playback_rate",
         ]))
         XCTAssertTrue(events.contains {

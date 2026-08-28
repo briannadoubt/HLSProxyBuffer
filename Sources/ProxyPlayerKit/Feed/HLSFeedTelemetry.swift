@@ -79,6 +79,18 @@ public final class HLSFeedTelemetry {
         case failed
     }
 
+    /// Fixed-cardinality cache removal reasons mirrored from the shared cache
+    /// without exposing cache ownership through the feed API.
+    public enum CacheEvictionReason: String, CaseIterable, Codable, Sendable {
+        case memoryByteLimit = "memory_byte_limit"
+        case memoryEntryLimit = "memory_entry_limit"
+        case memoryPressure = "memory_pressure"
+        case diskByteLimit = "disk_byte_limit"
+        case diskEntryLimit = "disk_entry_limit"
+        case originPolicy = "origin_policy"
+        case expired
+    }
+
     public struct Distribution: Equatable, Codable, Sendable {
         public let upperBounds: [TimeInterval]
         /// Non-cumulative counts; the final bucket is positive infinity.
@@ -124,6 +136,8 @@ public final class HLSFeedTelemetry {
         public let cacheHitCount: UInt64
         public let cacheMissCount: UInt64
         public let originBytesAvoided: UInt64
+        public let originRequestCount: UInt64
+        public let originBytesFetched: UInt64
         public let cancellationOutcomeCounts: [CancellationOutcome: UInt64]
         /// Focus requests, requests whose destination was warm at submission,
         /// and destinations that subsequently entered platform playback.
@@ -146,6 +160,9 @@ public final class HLSFeedTelemetry {
         public let maximumPlayerPoolOccupancy: Int
         public let proxyPoolOccupancy: Int
         public let maximumProxyPoolOccupancy: Int
+        public let memoryEntryCount: Int
+        public let diskEntryCount: Int
+        public let evictionCounts: [CacheEvictionReason: UInt64]
 
         public static let empty = Self(
             memoryResidentBytes: 0,
@@ -155,7 +172,10 @@ public final class HLSFeedTelemetry {
             playerPoolOccupancy: 0,
             maximumPlayerPoolOccupancy: 0,
             proxyPoolOccupancy: 0,
-            maximumProxyPoolOccupancy: 0
+            maximumProxyPoolOccupancy: 0,
+            memoryEntryCount: 0,
+            diskEntryCount: 0,
+            evictionCounts: [:]
         )
     }
 
@@ -221,6 +241,7 @@ public final class HLSFeedTelemetry {
             case firstFrame(latency: TimeInterval)
             case stall(duration: TimeInterval)
             case cache(hits: Int, misses: Int, originBytesAvoided: Int)
+            case network(originRequests: Int, originBytesFetched: Int)
             case cancellation(latency: TimeInterval, outcome: CancellationOutcome)
             case handoff(wasReady: Bool, succeeded: Bool)
             case resources(
@@ -228,6 +249,11 @@ public final class HLSFeedTelemetry {
                 diskBytes: Int,
                 playerPoolOccupancy: Int,
                 proxyPoolOccupancy: Int
+            )
+            case cacheResources(
+                memoryEntryCount: Int,
+                diskEntryCount: Int,
+                evictionCounts: [CacheEvictionReason: Int]
             )
         }
 
@@ -285,6 +311,8 @@ public final class HLSFeedTelemetry {
         var cacheHitCount: UInt64 = 0
         var cacheMissCount: UInt64 = 0
         var originBytesAvoided: UInt64 = 0
+        var originRequestCount: UInt64 = 0
+        var originBytesFetched: UInt64 = 0
         var cancellationOutcomeCounts: [CancellationOutcome: UInt64] = [:]
         var handoffAttemptCount: UInt64 = 0
         var handoffReadyCount: UInt64 = 0
@@ -306,6 +334,8 @@ public final class HLSFeedTelemetry {
                 cacheHitCount: cacheHitCount,
                 cacheMissCount: cacheMissCount,
                 originBytesAvoided: originBytesAvoided,
+                originRequestCount: originRequestCount,
+                originBytesFetched: originBytesFetched,
                 cancellationOutcomeCounts: cancellationOutcomeCounts,
                 handoffAttemptCount: handoffAttemptCount,
                 handoffReadyCount: handoffReadyCount,
@@ -364,6 +394,17 @@ public final class HLSFeedTelemetry {
                     UInt64(max(0, avoidedBytes))
                 )
             }
+        case .network(let requests, let bytes):
+            mutatePath(for: event) { path in
+                path.originRequestCount = Self.saturatingAdd(
+                    path.originRequestCount,
+                    UInt64(max(0, requests))
+                )
+                path.originBytesFetched = Self.saturatingAdd(
+                    path.originBytesFetched,
+                    UInt64(max(0, bytes))
+                )
+            }
         case .cancellation(let latency, let outcome):
             mutatePath(for: event) { path in
                 path.cancellationLatency.record(latency)
@@ -409,9 +450,28 @@ public final class HLSFeedTelemetry {
                 maximumProxyPoolOccupancy: max(
                     resources.maximumProxyPoolOccupancy,
                     normalizedProxies
-                )
+                ),
+                memoryEntryCount: resources.memoryEntryCount,
+                diskEntryCount: resources.diskEntryCount,
+                evictionCounts: resources.evictionCounts
             )
             signposter.emitEvent("Resource Sample")
+        case .cacheResources(let memoryEntries, let diskEntries, let evictionCounts):
+            resources = ResourceSnapshot(
+                memoryResidentBytes: resources.memoryResidentBytes,
+                maximumMemoryResidentBytes: resources.maximumMemoryResidentBytes,
+                diskResidentBytes: resources.diskResidentBytes,
+                maximumDiskResidentBytes: resources.maximumDiskResidentBytes,
+                playerPoolOccupancy: resources.playerPoolOccupancy,
+                maximumPlayerPoolOccupancy: resources.maximumPlayerPoolOccupancy,
+                proxyPoolOccupancy: resources.proxyPoolOccupancy,
+                maximumProxyPoolOccupancy: resources.maximumProxyPoolOccupancy,
+                memoryEntryCount: max(0, memoryEntries),
+                diskEntryCount: max(0, diskEntries),
+                evictionCounts: evictionCounts.reduce(into: [:]) { result, entry in
+                    result[entry.key] = UInt64(max(0, entry.value))
+                }
+            )
         }
 
         eventCount = Self.saturatingAdd(eventCount, 1)

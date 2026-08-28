@@ -35,6 +35,155 @@ final class HLSFeedQualificationTests: XCTestCase {
         let liveMediaSequenceUpperBound: Int
     }
 
+    @MainActor
+    func testStableQualificationReportCoversEveryMetricAndScenario() throws {
+        let telemetry = HLSFeedTelemetry(configuration: .init(
+            latencyUpperBounds: [0.05, 0.1, 0.5],
+            eventBufferCapacity: 4,
+            maximumSubscriberCount: 1
+        ))
+        let path = HLSFeedTelemetry.Path(
+            reuse: .warm,
+            intent: .focused,
+            mediaKind: .videoOnDemand
+        )
+        telemetry.record(.init(path: path, payload: .firstFrame(latency: 0.04)))
+        telemetry.record(.init(path: path, payload: .firstFrame(latency: 0.08)))
+        telemetry.record(.init(path: path, payload: .stall(duration: 0.2)))
+        telemetry.record(.init(
+            path: path,
+            payload: .cache(hits: 6, misses: 2, originBytesAvoided: 9_000)
+        ))
+        telemetry.record(.init(
+            path: path,
+            payload: .network(originRequests: 2, originBytesFetched: 4_000)
+        ))
+        telemetry.record(.init(
+            path: path,
+            payload: .cancellation(latency: 0.03, outcome: .acknowledged)
+        ))
+        telemetry.record(.init(
+            path: path,
+            payload: .handoff(wasReady: true, succeeded: true)
+        ))
+        telemetry.record(.init(payload: .resources(
+            memoryBytes: 10_000,
+            diskBytes: 20_000,
+            playerPoolOccupancy: 2,
+            proxyPoolOccupancy: 2
+        )))
+        telemetry.record(.init(payload: .cacheResources(
+            memoryEntryCount: 3,
+            diskEntryCount: 5,
+            evictionCounts: [.memoryPressure: 1, .diskByteLimit: 2]
+        )))
+
+        let engine = HLSFeedEngineSnapshot(
+            generation: .init(rawValue: 13),
+            targetFocusedItemID: nil,
+            activeItemID: nil,
+            audibleItemID: nil,
+            requestedDestinationItemID: nil,
+            playbacks: [],
+            failures: [],
+            poolOccupancy: 0,
+            allocatedPlayerCount: 0,
+            activeLoadCount: 0,
+            maximumObservedPoolOccupancy: 2,
+            maximumObservedAudiblePlaybackCount: 1,
+            staleCompletionCount: 0,
+            isPlaybackSuspended: false
+        )
+        let policy = FeedPlaybackPolicy.preset(.shortFormFeed)
+        let report = HLSFeedQualificationReport(
+            scenarios: HLSFeedQualificationScenarioID.allCases.reversed().map {
+                HLSFeedQualificationScenarioResult(id: $0, passed: true)
+            },
+            telemetry: telemetry.snapshot,
+            engine: engine,
+            policy: policy
+        )
+
+        XCTAssertTrue(report.passed, report.failureCodes.joined(separator: ", "))
+        XCTAssertEqual(report.schemaVersion, 1)
+        XCTAssertEqual(report.metrics.firstFrameLatency.count, 2)
+        XCTAssertEqual(report.metrics.firstFrameLatency.p95Milliseconds, 100)
+        XCTAssertEqual(report.metrics.stallDuration.count, 1)
+        XCTAssertEqual(report.metrics.cacheHitRequestCount, 6)
+        XCTAssertEqual(report.metrics.cacheMissRequestCount, 2)
+        XCTAssertEqual(report.metrics.cacheHitBytes, 9_000)
+        XCTAssertEqual(report.metrics.originRequestCount, 2)
+        XCTAssertEqual(report.metrics.originByteCount, 4_000)
+        XCTAssertEqual(report.metrics.evictionCounts.map { $0.reason }, [
+            HLSFeedTelemetry.CacheEvictionReason.diskByteLimit,
+            HLSFeedTelemetry.CacheEvictionReason.memoryPressure,
+        ])
+        let scenarioIDs = report.scenarios.map { $0.id.rawValue }
+        XCTAssertEqual(scenarioIDs, scenarioIDs.sorted())
+
+        let data = try report.machineReadableData()
+        XCTAssertEqual(
+            try JSONDecoder().decode(HLSFeedQualificationReport.self, from: data),
+            report
+        )
+        try QualificationArtifact.write(report, named: "hls-feed-qualification.json")
+        let json = String(decoding: data, as: UTF8.self)
+        XCTAssertFalse(json.contains("http://"))
+        XCTAssertFalse(json.contains("https://"))
+        XCTAssertFalse(json.localizedCaseInsensitiveContains("authorization"))
+    }
+
+    @MainActor
+    func testStableQualificationReportFailsClosedForMissingDuplicateAndUnsafeState() {
+        let telemetry = HLSFeedTelemetry()
+        telemetry.record(.init(payload: .resources(
+            memoryBytes: 65 * 1_024 * 1_024,
+            diskBytes: 513 * 1_024 * 1_024,
+            playerPoolOccupancy: 4,
+            proxyPoolOccupancy: 4
+        )))
+        let engine = HLSFeedEngineSnapshot(
+            generation: .init(rawValue: 2),
+            targetFocusedItemID: "focused",
+            activeItemID: "stale",
+            audibleItemID: "stale",
+            requestedDestinationItemID: nil,
+            playbacks: [],
+            failures: [],
+            poolOccupancy: 4,
+            allocatedPlayerCount: 4,
+            activeLoadCount: 1,
+            maximumObservedPoolOccupancy: 4,
+            maximumObservedAudiblePlaybackCount: 2,
+            staleCompletionCount: 1,
+            isPlaybackSuspended: false
+        )
+        let report = HLSFeedQualificationReport(
+            scenarios: [
+                .init(id: .coldLaunchWithoutCache, passed: false),
+                .init(id: .coldLaunchWithoutCache, passed: true),
+            ],
+            telemetry: telemetry.snapshot,
+            engine: engine,
+            policy: .preset(.shortFormFeed),
+            staleFocusedPlaybackCount: 1,
+            resourceLeakCount: 1
+        )
+
+        XCTAssertFalse(report.passed)
+        XCTAssertTrue(report.failureCodes.contains("duplicate_scenario"))
+        XCTAssertTrue(report.failureCodes.contains(
+            "failed_scenario:cold_launch_without_cache"
+        ))
+        XCTAssertTrue(report.failureCodes.contains("missing_scenario:revisit"))
+        XCTAssertTrue(report.failureCodes.contains("memory_budget_exceeded"))
+        XCTAssertTrue(report.failureCodes.contains("disk_budget_exceeded"))
+        XCTAssertTrue(report.failureCodes.contains("player_pool_exceeded"))
+        XCTAssertTrue(report.failureCodes.contains("multiple_audible_players"))
+        XCTAssertTrue(report.failureCodes.contains("stale_playback_observed"))
+        XCTAssertTrue(report.failureCodes.contains("resource_leak_observed"))
+    }
+
     func testLocalOriginReadinessAndReuseMeetFeedReleaseThresholds() async throws {
         let origin = try FeedFixtureOrigin()
         try await origin.start()

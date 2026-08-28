@@ -872,6 +872,16 @@ public final class HLSFeedEngine {
                 originBytesAvoided: prepared.cacheHitByteCount
             )
         ), attempt: analyticsAttempt)
+        // The analytics preparation event above already carries origin requests
+        // and bytes. Feed telemetry owns its separate aggregate without emitting
+        // the same values into the correlated analytics timeline twice.
+        telemetry.record(.init(
+            path: telemetryPath,
+            payload: .network(
+                originRequests: prepared.originFetchCount,
+                originBytesFetched: prepared.originFetchByteCount
+            )
+        ))
 
         let configuration = playerConfiguration
         slot.loadTask = Task { @MainActor [weak self, weak slot] in
@@ -1599,6 +1609,19 @@ public final class HLSFeedEngine {
             ?? targetFocusedItemID.flatMap { slot(for: $0)?.lease?.analyticsAttempt }
             ?? slots.compactMap({ $0.lease?.analyticsAttempt }).first
         recordTelemetry(event, attempt: attempt)
+        let evictionCounts = cacheMetrics.evictionCounts.reduce(into: [
+            HLSFeedTelemetry.CacheEvictionReason: Int
+        ]()) { result, entry in
+            guard let reason = HLSFeedTelemetry.CacheEvictionReason(
+                rawValue: entry.key.rawValue
+            ) else { return }
+            result[reason] = entry.value
+        }
+        recordTelemetry(.init(payload: .cacheResources(
+            memoryEntryCount: cacheMetrics.memoryEntryCount,
+            diskEntryCount: cacheMetrics.diskEntryCount,
+            evictionCounts: evictionCounts
+        )), attempt: attempt)
     }
 
     private func recordTelemetry(

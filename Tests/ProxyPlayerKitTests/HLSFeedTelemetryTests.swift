@@ -39,10 +39,14 @@ final class HLSFeedTelemetryTests: XCTestCase {
             }
             telemetry.record(event)
         }
+        telemetry.record(.init(
+            path: path,
+            payload: .network(originRequests: 7, originBytesFetched: 12_345)
+        ))
 
         let snapshot = telemetry.snapshot
         let metrics = try XCTUnwrap(snapshot.metrics(for: path))
-        XCTAssertEqual(snapshot.eventCount, 100_000)
+        XCTAssertEqual(snapshot.eventCount, 100_001)
         XCTAssertEqual(snapshot.paths.count, 12)
         XCTAssertEqual(snapshot.storageBound.pathCount, 12)
         XCTAssertEqual(snapshot.storageBound.histogramCount, 36)
@@ -61,6 +65,8 @@ final class HLSFeedTelemetryTests: XCTestCase {
         XCTAssertEqual(metrics.cacheMissCount, 20_000)
         XCTAssertEqual(try XCTUnwrap(metrics.cacheHitRate), 0.75, accuracy: 0.0001)
         XCTAssertEqual(metrics.originBytesAvoided, 2_000_000)
+        XCTAssertEqual(metrics.originRequestCount, 7)
+        XCTAssertEqual(metrics.originBytesFetched, 12_345)
     }
 
     func testSlowConsumerDropsOldestEventsAndCountsEveryDrop() async throws {
@@ -112,6 +118,11 @@ final class HLSFeedTelemetryTests: XCTestCase {
             playerPoolOccupancy: 1,
             proxyPoolOccupancy: 1
         )))
+        telemetry.record(.init(payload: .cacheResources(
+            memoryEntryCount: 2,
+            diskEntryCount: 5,
+            evictionCounts: [.memoryPressure: 1, .diskByteLimit: 3]
+        )))
 
         XCTAssertEqual(telemetry.snapshot.resources.memoryResidentBytes, 1_024)
         XCTAssertEqual(telemetry.snapshot.resources.maximumMemoryResidentBytes, 4_096)
@@ -121,6 +132,10 @@ final class HLSFeedTelemetryTests: XCTestCase {
         XCTAssertEqual(telemetry.snapshot.resources.maximumPlayerPoolOccupancy, 3)
         XCTAssertEqual(telemetry.snapshot.resources.proxyPoolOccupancy, 1)
         XCTAssertEqual(telemetry.snapshot.resources.maximumProxyPoolOccupancy, 2)
+        XCTAssertEqual(telemetry.snapshot.resources.memoryEntryCount, 2)
+        XCTAssertEqual(telemetry.snapshot.resources.diskEntryCount, 5)
+        XCTAssertEqual(telemetry.snapshot.resources.evictionCounts[.memoryPressure], 1)
+        XCTAssertEqual(telemetry.snapshot.resources.evictionCounts[.diskByteLimit], 3)
     }
 
     func testPathMatrixDistinguishesWarmColdFocusedPredictedLiveAndStitched() throws {

@@ -336,6 +336,16 @@ public final class PlaybackAnalyticsTimeline {
                 ]),
                 attempt: attempt
             )
+        case .network(let requests, let bytes):
+            emit(
+                source: .origin,
+                lifecycle: .resourceCompleted,
+                measurements: Self.measurements([
+                    ("origin_request_count", Double(max(0, requests)), .count),
+                    ("origin_bytes", Double(max(0, bytes)), .bytes),
+                ]),
+                attempt: attempt
+            )
         case .cancellation(let latency, let outcome):
             let name = switch outcome {
             case .acknowledged: "cancellation_acknowledged_count"
@@ -373,6 +383,23 @@ public final class PlaybackAnalyticsTimeline {
                     ("disk_resident_bytes", Double(max(0, disk)), .bytes),
                     ("player_pool_occupancy", Double(max(0, players)), .count),
                     ("proxy_pool_occupancy", Double(max(0, proxies)), .count),
+                ]),
+                attempt: attempt
+            )
+        case .cacheResources(let memoryEntries, let diskEntries, let evictionCounts):
+            emit(
+                source: .cache,
+                lifecycle: .resourceCompleted,
+                measurements: Self.measurements([
+                    ("memory_cache_entry_count", Double(max(0, memoryEntries)), .count),
+                    ("disk_cache_entry_count", Double(max(0, diskEntries)), .count),
+                    (
+                        "cache_eviction_count",
+                        evictionCounts.values.reduce(0.0) {
+                            $0 + Double(max(0, $1))
+                        },
+                        .count
+                    ),
                 ]),
                 attempt: attempt
             )
