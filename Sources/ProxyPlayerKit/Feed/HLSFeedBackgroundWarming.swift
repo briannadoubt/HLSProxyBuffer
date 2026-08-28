@@ -235,6 +235,10 @@ public struct HLSFeedBackgroundWarmingSnapshot: Equatable, Codable, Sendable {
     public let originFetchByteCount: UInt64
     public let maximumObservedConcurrentPreparations: Int
     public let maximumOutcomeCardinality: Int
+    public let activeSubscriberCount: Int
+    public let rejectedSubscriberCount: UInt64
+    public let maximumSubscriberCount: Int
+    public let eventBufferCapacityPerSubscriber: Int
 
     public func count(for outcome: Outcome) -> UInt64 {
         outcomes.first { $0.outcome == outcome }?.count ?? 0
@@ -313,6 +317,7 @@ public actor HLSFeedBackgroundWarmer {
     private var policy: HLSFeedBackgroundWarmingPolicy
     private let backend: any FeedPreparing
     private let clock: HLSFeedBackgroundWarmingClock
+    private var feedPolicy: FeedPlaybackPolicy?
     private var nextGeneration: UInt64 = 0
     private var isRunning = false
     private var outcomeCounts: [HLSFeedBackgroundWarmingSnapshot.Outcome: UInt64] = Dictionary(
@@ -334,6 +339,8 @@ public actor HLSFeedBackgroundWarmer {
     private var cacheHitByteCount: UInt64 = 0
     private var originFetchByteCount: UInt64 = 0
     private var maximumObservedConcurrentPreparations = 0
+    private let maximumSubscriberCount = 4
+    private var rejectedSubscriberCount: UInt64 = 0
     private var continuations: [
         UUID: AsyncStream<HLSFeedBackgroundWarmingSnapshot>.Continuation
     ] = [:]
@@ -346,6 +353,7 @@ public actor HLSFeedBackgroundWarmer {
         self.policy = try policy.validated()
         self.backend = backend
         self.clock = clock
+        self.feedPolicy = nil
     }
 
     /// Creates the production, cache-sharing preparation path without players.
@@ -356,8 +364,9 @@ public actor HLSFeedBackgroundWarmer {
         clock: HLSFeedBackgroundWarmingClock = .continuous
     ) throws {
         let validated = try policy.validated()
+        let validatedFeedPolicy = try feedPolicy.validated()
         let backendPolicy = try Self.backendPolicy(
-            from: feedPolicy,
+            from: validatedFeedPolicy,
             warmingPolicy: validated
         )
         self.policy = validated
@@ -366,12 +375,59 @@ public actor HLSFeedBackgroundWarmer {
             allowsInsecureManifests: sourceTransportPolicy.allowsInsecureManifests
         )
         self.clock = clock
+        self.feedPolicy = validatedFeedPolicy
+    }
+
+    init(
+        feedPolicy: FeedPlaybackPolicy,
+        policy: HLSFeedBackgroundWarmingPolicy,
+        sourceTransportPolicy: HLSFeedSourceTransportPolicy,
+        sharedCache: HLSSegmentCache,
+        clock: HLSFeedBackgroundWarmingClock = .continuous
+    ) throws {
+        let validated = try policy.validated()
+        let validatedFeedPolicy = try feedPolicy.validated()
+        let backendPolicy = try Self.backendPolicy(
+            from: validatedFeedPolicy,
+            warmingPolicy: validated
+        )
+        self.policy = validated
+        self.backend = try HLSFeedPreparationBackend(
+            policy: backendPolicy,
+            allowsInsecureManifests: sourceTransportPolicy.allowsInsecureManifests,
+            cache: sharedCache
+        )
+        self.clock = clock
+        self.feedPolicy = validatedFeedPolicy
     }
 
     public func updatePolicy(_ policy: HLSFeedBackgroundWarmingPolicy) async throws {
         let validated = try policy.validated()
         guard !isRunning else { throw HLSFeedBackgroundWarmingError.busy }
+        isRunning = true
+        defer { isRunning = false }
+        if let feedPolicy {
+            try await backend.update(policy: Self.backendPolicy(
+                from: feedPolicy,
+                warmingPolicy: validated
+            ))
+        }
         self.policy = validated
+    }
+
+    /// Reconfigures the production preparation/cache primitives while keeping
+    /// the independent background caps. Injected test backends also receive
+    /// the validated, background-adapted policy.
+    public func updateFeedPolicy(_ feedPolicy: FeedPlaybackPolicy) async throws {
+        let validatedFeedPolicy = try feedPolicy.validated()
+        guard !isRunning else { throw HLSFeedBackgroundWarmingError.busy }
+        isRunning = true
+        defer { isRunning = false }
+        try await backend.update(policy: Self.backendPolicy(
+            from: validatedFeedPolicy,
+            warmingPolicy: policy
+        ))
+        self.feedPolicy = validatedFeedPolicy
     }
 
     public func snapshot() -> HLSFeedBackgroundWarmingSnapshot {
@@ -380,6 +436,15 @@ public actor HLSFeedBackgroundWarmer {
 
     /// Newest-only observation with bounded subscriber storage.
     public func updates() -> AsyncStream<HLSFeedBackgroundWarmingSnapshot> {
+        guard continuations.count < maximumSubscriberCount else {
+            rejectedSubscriberCount = Self.add(rejectedSubscriberCount, 1)
+            publishSnapshot()
+            let value = snapshotValue()
+            return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+                continuation.yield(value)
+                continuation.finish()
+            }
+        }
         let id = UUID()
         return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             continuations[id] = continuation
@@ -696,7 +761,11 @@ public actor HLSFeedBackgroundWarmer {
             cacheHitByteCount: cacheHitByteCount,
             originFetchByteCount: originFetchByteCount,
             maximumObservedConcurrentPreparations: maximumObservedConcurrentPreparations,
-            maximumOutcomeCardinality: HLSFeedBackgroundWarmingSnapshot.Outcome.allCases.count
+            maximumOutcomeCardinality: HLSFeedBackgroundWarmingSnapshot.Outcome.allCases.count,
+            activeSubscriberCount: continuations.count,
+            rejectedSubscriberCount: rejectedSubscriberCount,
+            maximumSubscriberCount: maximumSubscriberCount,
+            eventBufferCapacityPerSubscriber: 1
         )
     }
 

@@ -171,6 +171,42 @@ final class HLSFeedBackgroundWarmingTests: XCTestCase {
         XCTAssertEqual(audit.requests.count, 1)
     }
 
+    func testFeedAndWarmingPolicyUpdatesKeepBackendOnBackgroundCaps() async throws {
+        let backend = BackgroundPreparingFake()
+        let initial = makePolicy(
+            maximumLeadingSegmentsPerItem: 1,
+            maximumEstimatedByteCount: 1_024,
+            maximumConcurrentPreparations: 1
+        )
+        let warmer = try HLSFeedBackgroundWarmer(policy: initial, backend: backend)
+        var feedPolicy = FeedPlaybackPolicy.shortFormFeed
+        feedPolicy.concurrency.maximumConcurrentPreparations = 4
+        feedPolicy.concurrency.maximumConcurrentFetches = 6
+
+        try await warmer.updateFeedPolicy(feedPolicy)
+        var audit = await backend.audit()
+        var adapted = try XCTUnwrap(audit.latestPolicy)
+        XCTAssertEqual(adapted.prefetch.aheadItemCount, 0)
+        XCTAssertEqual(adapted.prefetch.behindItemCount, 0)
+        XCTAssertEqual(adapted.prefetch.maximumLeadingSegments, 1)
+        XCTAssertEqual(adapted.budget.maximumEstimatedPreparationBytes, 1_024)
+        XCTAssertEqual(adapted.concurrency.maximumConcurrentPreparations, 1)
+        XCTAssertEqual(adapted.concurrency.maximumConcurrentFetches, 1)
+
+        let replacement = makePolicy(
+            maximumLeadingSegmentsPerItem: 2,
+            maximumEstimatedByteCount: 2_048,
+            maximumConcurrentPreparations: 2
+        )
+        try await warmer.updatePolicy(replacement)
+        audit = await backend.audit()
+        adapted = try XCTUnwrap(audit.latestPolicy)
+        XCTAssertEqual(adapted.prefetch.maximumLeadingSegments, 2)
+        XCTAssertEqual(adapted.budget.maximumEstimatedPreparationBytes, 2_048)
+        XCTAssertEqual(adapted.concurrency.maximumConcurrentPreparations, 2)
+        XCTAssertEqual(adapted.concurrency.maximumConcurrentFetches, 1)
+    }
+
     func testFreshCacheIsSkippedWhileNearExpiryAndStaleCandidatesRevalidate() async throws {
         let backend = BackgroundPreparingFake()
         let policy = makePolicy(minimumRemainingCacheValidity: .seconds(30))
@@ -319,6 +355,23 @@ final class HLSFeedBackgroundWarmingTests: XCTestCase {
         XCTAssertFalse(text.contains("backend-secret-error"))
     }
 
+    func testMetricUpdateStreamsHaveFixedSubscriberAndBufferBounds() async throws {
+        let warmer = try HLSFeedBackgroundWarmer(
+            policy: makePolicy(),
+            backend: BackgroundPreparingFake()
+        )
+        var streams: [AsyncStream<HLSFeedBackgroundWarmingSnapshot>] = []
+        for _ in 0..<5 { streams.append(await warmer.updates()) }
+
+        let snapshot = await warmer.snapshot()
+
+        XCTAssertEqual(streams.count, 5)
+        XCTAssertEqual(snapshot.activeSubscriberCount, 4)
+        XCTAssertEqual(snapshot.rejectedSubscriberCount, 1)
+        XCTAssertEqual(snapshot.maximumSubscriberCount, 4)
+        XCTAssertEqual(snapshot.eventBufferCapacityPerSubscriber, 1)
+    }
+
     private func makePolicy(
         maximumItemCount: Int = 2,
         maximumLeadingSegmentsPerItem: Int = 1,
@@ -380,6 +433,7 @@ private actor BackgroundPreparingFake: FeedPreparing {
         let maximumActiveCount: Int
         let cancellationCount: Int
         let completedCount: Int
+        let latestPolicy: FeedPlaybackPolicy?
     }
 
     struct Failure: Error, Sendable {
@@ -394,6 +448,7 @@ private actor BackgroundPreparingFake: FeedPreparing {
     private var maximumActiveCount = 0
     private var cancellationCount = 0
     private var completedCount = 0
+    private var latestPolicy: FeedPlaybackPolicy?
 
     init(
         delay: Duration = .zero,
@@ -403,6 +458,10 @@ private actor BackgroundPreparingFake: FeedPreparing {
         self.delay = delay
         self.delaysByItemID = delaysByItemID
         self.failingItemIDs = failingItemIDs
+    }
+
+    func update(policy: FeedPlaybackPolicy) async throws {
+        latestPolicy = try policy.validated()
     }
 
     func prepare(_ request: FeedPreparationRequest) async throws -> FeedPreparedItem {
@@ -441,7 +500,8 @@ private actor BackgroundPreparingFake: FeedPreparing {
             requests: requests,
             maximumActiveCount: maximumActiveCount,
             cancellationCount: cancellationCount,
-            completedCount: completedCount
+            completedCount: completedCount,
+            latestPolicy: latestPolicy
         )
     }
 }
