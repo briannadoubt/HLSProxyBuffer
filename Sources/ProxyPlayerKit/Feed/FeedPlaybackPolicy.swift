@@ -24,18 +24,27 @@ public struct FeedPlaybackPolicy: Sendable, Equatable {
         public var focusedBufferSeconds: TimeInterval
         public var warmBufferSeconds: TimeInterval
 
+        /// Viewports per second at which navigation direction begins to affect
+        /// preparation order, and at which it becomes a strong directional bias.
+        public var directionalVelocityThreshold: Double
+        public var fastVelocityThreshold: Double
+
         public init(
             aheadItemCount: Int,
             behindItemCount: Int,
             maximumLeadingSegments: Int,
             focusedBufferSeconds: TimeInterval,
-            warmBufferSeconds: TimeInterval
+            warmBufferSeconds: TimeInterval,
+            directionalVelocityThreshold: Double = 0.25,
+            fastVelocityThreshold: Double = 2
         ) {
             self.aheadItemCount = aheadItemCount
             self.behindItemCount = behindItemCount
             self.maximumLeadingSegments = maximumLeadingSegments
             self.focusedBufferSeconds = focusedBufferSeconds
             self.warmBufferSeconds = warmBufferSeconds
+            self.directionalVelocityThreshold = directionalVelocityThreshold
+            self.fastVelocityThreshold = fastVelocityThreshold
         }
     }
 
@@ -179,6 +188,7 @@ public struct FeedPlaybackPolicy: Sendable, Equatable {
 
     public enum ValidationIssue: String, CaseIterable, Sendable {
         case prefetchItemCountsMustBeNonnegative
+        case velocityThresholdsAreInvalid
         case leadingSegmentCountMustBePositive
         case bufferDurationsAreInvalid
         case residentItemBudgetIsInvalid
@@ -250,13 +260,13 @@ public struct FeedPlaybackPolicy: Sendable, Equatable {
                 playerPreset: .highThroughput,
                 prefetch: .init(
                     aheadItemCount: 2,
-                    behindItemCount: 1,
+                    behindItemCount: 2,
                     maximumLeadingSegments: 2,
                     focusedBufferSeconds: 4,
                     warmBufferSeconds: 2
                 ),
                 budget: .init(
-                    maximumResidentItems: 4,
+                    maximumResidentItems: 5,
                     maximumEstimatedPreparationBytes: 96 * mebibyte,
                     memoryCacheBytes: 64 * mebibyte,
                     diskCacheBytes: 512 * mebibyte,
@@ -538,6 +548,10 @@ public struct FeedPlaybackPolicy: Sendable, Equatable {
             maximumConcurrentPreparations: concurrency.maximumConcurrentPreparations,
             maximumEstimatedPreparationBytes: budget.maximumEstimatedPreparationBytes,
             neighborPredictionHorizon: max(prefetch.aheadItemCount, prefetch.behindItemCount),
+            maximumAheadItems: prefetch.aheadItemCount,
+            maximumBehindItems: prefetch.behindItemCount,
+            directionalVelocityThreshold: prefetch.directionalVelocityThreshold,
+            fastVelocityThreshold: prefetch.fastVelocityThreshold,
             cancellationDeadline: .milliseconds(100)
         )
     }
@@ -561,6 +575,13 @@ public struct FeedPlaybackPolicy: Sendable, Equatable {
         record(
             .prefetchItemCountsMustBeNonnegative,
             when: prefetch.aheadItemCount < 0 || prefetch.behindItemCount < 0 || prefetchOverflow
+        )
+        record(
+            .velocityThresholdsAreInvalid,
+            when: !prefetch.directionalVelocityThreshold.isFinite
+                || prefetch.directionalVelocityThreshold < 0
+                || !prefetch.fastVelocityThreshold.isFinite
+                || prefetch.fastVelocityThreshold < prefetch.directionalVelocityThreshold
         )
         record(.leadingSegmentCountMustBePositive, when: prefetch.maximumLeadingSegments < 1)
         record(

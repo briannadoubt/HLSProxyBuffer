@@ -7,9 +7,23 @@ import Foundation
 public struct FeedPlanningLimits: Hashable, Sendable {
     public let maximumResidentItems: Int
     public let maximumPrefetchItems: Int
+
+    /// Hard ordered-collection bounds relative to the current anchor.
+    /// Predictions and visible items outside this window are never admitted.
+    public let maximumAheadItems: Int
+    public let maximumBehindItems: Int
     public let maximumConcurrentPreparations: Int
     public let maximumEstimatedPreparationBytes: Int
+
+    /// Compatibility fallback used for both directional bounds when callers
+    /// do not provide `maximumAheadItems` and `maximumBehindItems`.
     public let neighborPredictionHorizon: Int
+
+    /// Speeds below the directional threshold use symmetric nearest-first
+    /// priority. Speeds at or above the fast threshold exhaust the direction
+    /// of travel before ranking the opposite side.
+    public let directionalVelocityThreshold: Double
+    public let fastVelocityThreshold: Double
     public let cancellationDeadline: Duration
 
     public init(
@@ -18,13 +32,27 @@ public struct FeedPlanningLimits: Hashable, Sendable {
         maximumConcurrentPreparations: Int = 2,
         maximumEstimatedPreparationBytes: Int = 64 * 1_024 * 1_024,
         neighborPredictionHorizon: Int = 2,
+        maximumAheadItems: Int? = nil,
+        maximumBehindItems: Int? = nil,
+        directionalVelocityThreshold: Double = 0.25,
+        fastVelocityThreshold: Double = 2,
         cancellationDeadline: Duration = .milliseconds(100)
     ) {
+        let normalizedHorizon = max(0, neighborPredictionHorizon)
+        let normalizedDirectionalThreshold = directionalVelocityThreshold.isFinite
+            ? max(0, directionalVelocityThreshold)
+            : 0
         self.maximumResidentItems = max(1, maximumResidentItems)
         self.maximumPrefetchItems = max(0, maximumPrefetchItems)
+        self.maximumAheadItems = max(0, maximumAheadItems ?? normalizedHorizon)
+        self.maximumBehindItems = max(0, maximumBehindItems ?? normalizedHorizon)
         self.maximumConcurrentPreparations = max(1, maximumConcurrentPreparations)
         self.maximumEstimatedPreparationBytes = max(0, maximumEstimatedPreparationBytes)
-        self.neighborPredictionHorizon = max(0, neighborPredictionHorizon)
+        self.neighborPredictionHorizon = normalizedHorizon
+        self.directionalVelocityThreshold = normalizedDirectionalThreshold
+        self.fastVelocityThreshold = fastVelocityThreshold.isFinite
+            ? max(normalizedDirectionalThreshold, fastVelocityThreshold)
+            : normalizedDirectionalThreshold
         self.cancellationDeadline = max(.zero, cancellationDeadline)
     }
 }

@@ -22,6 +22,9 @@ final class FeedCoordinatorStressTests: XCTestCase {
     func testAllStandardTracesKeepCoordinatorWorkWithinHardBounds() async throws {
         let items = makeItems(count: 11)
         var policy = FeedPlaybackPolicy.preset(.shortFormFeed)
+        // Preserve this fixture's historical four-item stress bound while the
+        // production short-form preset exercises the new current ±2 window.
+        policy.prefetch.behindItemCount = 1
         policy.concurrency.maximumConcurrentPreparations = 2
         policy.budget.maximumResidentItems = 4
         policy.budget.maximumEstimatedPreparationBytes = 4 * 512 * 1_024

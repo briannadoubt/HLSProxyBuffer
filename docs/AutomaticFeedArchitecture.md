@@ -47,14 +47,27 @@ accepted plan obeys these invariants:
 
 1. The focused item is first and cannot be silently dropped. If its reservation
    alone exceeds the byte budget, planning returns a typed error.
-2. Desired residency never exceeds the item count or estimated byte budget.
-3. Newly admitted preparations never exceed the concurrency budget.
+2. Desired residency is one atomic, ordered working set centered on focus.
+   The short-form preset defaults to the current item plus two items in each
+   direction. Typed ahead/behind bounds clamp the set at collection edges and
+   exclude even visible or predicted destinations outside the window.
+3. Desired residency never exceeds the item count or estimated byte budget.
+   Newly started preparations never exceed the independent concurrency budget;
+   lowering concurrency does not reveal the target window piecemeal.
 4. A signal older than the active generation schedules no preparation or
    cancellation and cannot alter desired residency.
 5. Work absent from an accepted replacement plan receives a cancellation
    request whose deadline is at most 100 ms after the injected monotonic time.
 6. Stable IDs, rather than array offsets or view identities, own work and cache
    reuse.
+
+Below the typed directional velocity threshold, neighbors are ranked
+symmetrically from nearest to farthest. Directional movement prefers the side
+of travel, and a typed fast-fling threshold exhausts that side before the
+opposite side. Explicit predictions and visibility remain deterministic and
+deduplicated within the same hard window. A direction reversal therefore
+publishes one replacement target and cancellation set; late work from its
+predecessor still cannot commit into the new generation.
 
 `FeedCoordinator` enforces the plan as the UI- and player-independent runtime
 boundary. The public actor owns the current generation, bounded admission,
