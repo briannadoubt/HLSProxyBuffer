@@ -28,6 +28,8 @@ final class FeedPlaybackPolicyTests: XCTestCase {
         let shortForm = FeedPlaybackPolicy.preset(.shortFormFeed)
         XCTAssertEqual(shortForm.looping, .focusedItem)
         XCTAssertEqual(shortForm.prefetch.aheadItemCount, 2)
+        XCTAssertEqual(shortForm.prefetch.behindItemCount, 2)
+        XCTAssertEqual(shortForm.budget.maximumResidentItems, 5)
         XCTAssertEqual(shortForm.concurrency.maximumPlayerCount, 3)
 
         let paged = FeedPlaybackPolicy.preset(.pagedFeed)
@@ -140,6 +142,8 @@ final class FeedPlaybackPolicyTests: XCTestCase {
         XCTAssertEqual(configuration.networkPolicy, network)
         XCTAssertEqual(configuration.segmentRetryPolicy, retry.segment)
         XCTAssertEqual(planning.maximumPrefetchItems, 2)
+        XCTAssertEqual(planning.maximumAheadItems, 2)
+        XCTAssertEqual(planning.maximumBehindItems, 0)
         XCTAssertEqual(planning.maximumConcurrentPreparations, 2)
     }
 
@@ -167,6 +171,7 @@ final class FeedPlaybackPolicyTests: XCTestCase {
     func testInvalidCombinationsReturnStableTypedDiagnostics() {
         var policy = FeedPlaybackPolicy.preset(.continuousWindowedFeed)
         policy.prefetch.aheadItemCount = -1
+        policy.prefetch.fastVelocityThreshold = -1
         policy.prefetch.maximumLeadingSegments = 0
         policy.prefetch.warmBufferSeconds = .infinity
         policy.budget.maximumResidentItems = 0
@@ -180,6 +185,7 @@ final class FeedPlaybackPolicyTests: XCTestCase {
 
         let expected: Set<FeedPlaybackPolicy.ValidationIssue> = [
             .prefetchItemCountsMustBeNonnegative,
+            .velocityThresholdsAreInvalid,
             .leadingSegmentCountMustBePositive,
             .bufferDurationsAreInvalid,
             .residentItemBudgetIsInvalid,
@@ -251,6 +257,42 @@ final class FeedPlaybackPolicyTests: XCTestCase {
         XCTAssertLessThan(adaptedPlan.desiredEntries.count, basePlan.desiredEntries.count)
         XCTAssertEqual(adaptedPlan.desiredEntries.first?.itemID, focusedID)
         XCTAssertEqual(adaptedPlan.desiredEntries.first?.role, .focused)
+    }
+
+    func testShortFormPlanningLimitsDescribeCurrentPlusTwoWindow() throws {
+        let limits = try FeedPlaybackPolicy.shortFormFeed.makePlanningLimits()
+        let items = makeItems(count: 9)
+        let focusedID = items[4].id
+        let plan = try FeedPlanner(limits: limits).makePlan(
+            items: items,
+            signal: FeedViewportSignal(
+                generation: .init(rawValue: 1),
+                focusedItemID: focusedID,
+                visibleItems: [.init(itemID: focusedID, fraction: 1, distanceInViewports: 0)],
+                observedAt: .zero
+            )
+        )
+
+        XCTAssertEqual(limits.maximumAheadItems, 2)
+        XCTAssertEqual(limits.maximumBehindItems, 2)
+        XCTAssertEqual(limits.maximumPrefetchItems, 4)
+        XCTAssertEqual(plan.desiredItemIDs, Set(items[2...6].map(\.id)))
+        XCTAssertEqual(plan.desiredEntries.count, 5)
+        XCTAssertEqual(plan.preparations.count, 3)
+    }
+
+    func testVelocityThresholdValidationIsTypedAndStable() {
+        var policy = FeedPlaybackPolicy.shortFormFeed
+        policy.prefetch.directionalVelocityThreshold = 3
+        policy.prefetch.fastVelocityThreshold = 2
+
+        XCTAssertEqual(policy.validationIssues, [.velocityThresholdsAreInvalid])
+        XCTAssertThrowsError(try policy.validate()) { error in
+            XCTAssertEqual(
+                error as? FeedPlaybackPolicy.ValidationError,
+                .init(issues: [.velocityThresholdsAreInvalid])
+            )
+        }
     }
 
     func testDisablingLowPowerModeIsIdentity() throws {

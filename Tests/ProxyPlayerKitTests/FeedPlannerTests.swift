@@ -68,7 +68,7 @@ final class FeedPlannerTests: XCTestCase {
         ])
     }
 
-    func testPreparationAdmissionHonorsConcurrencyAndByteBudgets() throws {
+    func testAtomicTargetHonorsByteBudgetWhilePreparationsHonorConcurrency() throws {
         let items = makeItems(count: 5, estimatedPreparationBytes: megabyte)
         let planner = FeedPlanner(limits: .init(
             maximumResidentItems: 4,
@@ -92,11 +92,195 @@ final class FeedPlannerTests: XCTestCase {
             previousPlan: firstPlan
         )
 
-        XCTAssertEqual(firstPlan.desiredEntries.count, 1)
+        XCTAssertEqual(firstPlan.desiredEntries.count, 2)
         XCTAssertEqual(firstPlan.preparations.count, 1)
         XCTAssertEqual(secondPlan.desiredEntries.count, 2)
-        XCTAssertEqual(secondPlan.preparations.count, 1)
+        XCTAssertTrue(secondPlan.preparations.isEmpty)
         XCTAssertLessThanOrEqual(secondPlan.estimatedPreparationBytes, 2 * megabyte)
+    }
+
+    func testStationaryWorkingSetContainsCurrentPlusTwoInEachDirection() throws {
+        let items = makeItems(count: 9)
+        let planner = FeedPlanner(limits: .init(
+            maximumResidentItems: 5,
+            maximumPrefetchItems: 4,
+            maximumConcurrentPreparations: 5,
+            maximumEstimatedPreparationBytes: 5 * megabyte,
+            neighborPredictionHorizon: 2,
+            maximumAheadItems: 2,
+            maximumBehindItems: 2
+        ))
+        let signal = FeedViewportSignal(
+            generation: .init(rawValue: 1),
+            focusedItemID: items[4].id,
+            visibleItems: [.init(itemID: items[4].id, fraction: 1, distanceInViewports: 0)],
+            observedAt: .zero
+        )
+
+        let plan = try planner.makePlan(items: items, signal: signal)
+
+        XCTAssertEqual(plan.desiredEntries.map(\.itemID), [
+            items[4].id,
+            items[5].id,
+            items[3].id,
+            items[6].id,
+            items[2].id,
+        ])
+        XCTAssertEqual(plan.desiredItemIDs, Set(items[2...6].map(\.id)))
+    }
+
+    func testWorkingSetClampsAtCollectionEdges() throws {
+        let items = makeItems(count: 5)
+        let planner = FeedPlanner(limits: .init(
+            maximumResidentItems: 5,
+            maximumPrefetchItems: 4,
+            maximumConcurrentPreparations: 5,
+            maximumEstimatedPreparationBytes: 5 * megabyte,
+            neighborPredictionHorizon: 2,
+            maximumAheadItems: 2,
+            maximumBehindItems: 2
+        ))
+
+        let first = try planner.makePlan(
+            items: items,
+            signal: makeStationarySignal(generation: 1, focused: items[0].id)
+        )
+        let last = try planner.makePlan(
+            items: items,
+            signal: makeStationarySignal(generation: 2, focused: items[4].id)
+        )
+
+        XCTAssertEqual(first.desiredItemIDs, Set(items[0...2].map(\.id)))
+        XCTAssertEqual(last.desiredItemIDs, Set(items[2...4].map(\.id)))
+    }
+
+    func testWorkingSetSafelyClampsExtremeDirectLimits() throws {
+        let items = makeItems(count: 3)
+        let planner = FeedPlanner(limits: .init(
+            maximumResidentItems: 3,
+            maximumPrefetchItems: .max,
+            maximumConcurrentPreparations: 3,
+            maximumEstimatedPreparationBytes: 3 * megabyte,
+            neighborPredictionHorizon: 0,
+            maximumAheadItems: .max,
+            maximumBehindItems: .max
+        ))
+
+        let plan = try planner.makePlan(
+            items: items,
+            signal: makeStationarySignal(generation: 1, focused: items[1].id)
+        )
+
+        XCTAssertEqual(plan.desiredItemIDs, Set(items.map(\.id)))
+    }
+
+    func testFastVelocityExhaustsDirectionBeforeOppositeSide() throws {
+        let items = makeItems(count: 9)
+        let planner = FeedPlanner(limits: .init(
+            maximumResidentItems: 5,
+            maximumPrefetchItems: 4,
+            maximumConcurrentPreparations: 5,
+            maximumEstimatedPreparationBytes: 5 * megabyte,
+            neighborPredictionHorizon: 2,
+            maximumAheadItems: 2,
+            maximumBehindItems: 2,
+            directionalVelocityThreshold: 0.5,
+            fastVelocityThreshold: 3
+        ))
+
+        let forward = try planner.makePlan(
+            items: items,
+            signal: makeSignal(
+                generation: 1,
+                focused: items[4].id,
+                velocity: 6,
+                observedAt: .zero
+            )
+        )
+        let backward = try planner.makePlan(
+            items: items,
+            signal: makeSignal(
+                generation: 2,
+                focused: items[4].id,
+                velocity: -6,
+                observedAt: .zero
+            )
+        )
+
+        XCTAssertEqual(forward.desiredEntries.map(\.itemID), [
+            items[4].id, items[5].id, items[6].id, items[3].id, items[2].id,
+        ])
+        XCTAssertEqual(backward.desiredEntries.map(\.itemID), [
+            items[4].id, items[3].id, items[2].id, items[5].id, items[6].id,
+        ])
+    }
+
+    func testPredictionsAreDeduplicatedAndCannotEscapeWorkingSet() throws {
+        let items = makeItems(count: 10)
+        let planner = FeedPlanner(limits: .init(
+            maximumResidentItems: 5,
+            maximumPrefetchItems: 4,
+            maximumConcurrentPreparations: 5,
+            maximumEstimatedPreparationBytes: 5 * megabyte,
+            neighborPredictionHorizon: 2,
+            maximumAheadItems: 2,
+            maximumBehindItems: 2
+        ))
+        let signal = FeedViewportSignal(
+            generation: .init(rawValue: 1),
+            focusedItemID: items[4].id,
+            visibleItems: [.init(itemID: items[4].id, fraction: 1, distanceInViewports: 0)],
+            velocityInViewportsPerSecond: 5,
+            predictedDestinations: [
+                .init(itemID: items[6].id, confidence: 0.9),
+                .init(itemID: items[6].id, confidence: 0.8),
+                .init(itemID: items[9].id, confidence: 1),
+            ],
+            observedAt: .zero
+        )
+
+        let plan = try planner.makePlan(items: items, signal: signal)
+
+        XCTAssertEqual(plan.desiredEntries.filter { $0.itemID == items[6].id }.count, 1)
+        XCTAssertFalse(plan.desiredItemIDs.contains(items[9].id))
+        XCTAssertEqual(plan.desiredItemIDs, Set(items[2...6].map(\.id)))
+    }
+
+    func testAsymmetricBoundsAndReversalReplaceTargetAtomically() throws {
+        let items = makeItems(count: 12)
+        let planner = FeedPlanner(limits: .init(
+            maximumResidentItems: 5,
+            maximumPrefetchItems: 4,
+            maximumConcurrentPreparations: 2,
+            maximumEstimatedPreparationBytes: 5 * megabyte,
+            neighborPredictionHorizon: 3,
+            maximumAheadItems: 3,
+            maximumBehindItems: 1
+        ))
+        let forward = try planner.makePlan(
+            items: items,
+            signal: makeSignal(
+                generation: 1,
+                focused: items[3].id,
+                velocity: 8,
+                observedAt: .seconds(1)
+            )
+        )
+        let reversed = try planner.makePlan(
+            items: items,
+            signal: makeSignal(
+                generation: 2,
+                focused: items[7].id,
+                velocity: -8,
+                observedAt: .seconds(2)
+            ),
+            previousPlan: forward
+        )
+
+        XCTAssertEqual(forward.desiredItemIDs, Set(items[2...6].map(\.id)))
+        XCTAssertEqual(reversed.desiredItemIDs, Set(items[6...10].map(\.id)))
+        XCTAssertEqual(Set(reversed.cancellations.map(\.itemID)), Set(items[2...5].map(\.id)))
+        XCTAssertLessThanOrEqual(reversed.preparations.count, 2)
     }
 
     func testStaleGenerationSchedulesNoWorkAndPreservesCurrentPlan() throws {
@@ -276,6 +460,7 @@ private extension FeedPlannerTests {
     func makeSignal(
         generation: UInt64,
         focused: FeedItemID,
+        velocity: Double = 2,
         observedAt: Duration
     ) -> FeedViewportSignal {
         FeedViewportSignal(
@@ -284,8 +469,20 @@ private extension FeedPlannerTests {
             visibleItems: [
                 .init(itemID: focused, fraction: 1, distanceInViewports: 0)
             ],
-            velocityInViewportsPerSecond: 2,
+            velocityInViewportsPerSecond: velocity,
             observedAt: observedAt
+        )
+    }
+
+    func makeStationarySignal(
+        generation: UInt64,
+        focused: FeedItemID
+    ) -> FeedViewportSignal {
+        makeSignal(
+            generation: generation,
+            focused: focused,
+            velocity: 0,
+            observedAt: .zero
         )
     }
 

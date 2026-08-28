@@ -75,13 +75,10 @@ public struct FeedPlanner: Sendable {
         let previousIDs = Set(previousEntries.map(\.itemID))
         let targetIDs = Set(targetEntries.map(\.itemID))
 
-        let retainedEntries = targetEntries.filter { previousIDs.contains($0.itemID) }
         let preparationSlots = max(0, limits.maximumConcurrentPreparations)
         let preparations = targetEntries
             .filter { !previousIDs.contains($0.itemID) }
             .prefix(preparationSlots)
-        let admittedIDs = Set(retainedEntries.map(\.itemID)).union(preparations.map(\.itemID))
-        let desiredEntries = targetEntries.filter { admittedIDs.contains($0.itemID) }
 
         let cancellationDeadline = signal.observedAt + limits.cancellationDeadline
         let cancellations = previousEntries.compactMap { entry -> FeedPlan.Cancellation? in
@@ -96,7 +93,7 @@ public struct FeedPlanner: Sendable {
         return FeedPlan(
             generation: signal.generation,
             disposition: .accepted,
-            desiredEntries: desiredEntries,
+            desiredEntries: targetEntries,
             preparations: Array(preparations),
             cancellations: cancellations
         )
@@ -112,6 +109,15 @@ private extension FeedPlanner {
     struct Candidate {
         let itemID: FeedItemID
         let role: FeedPlan.Role
+    }
+
+    struct WorkingSet {
+        let anchorIndex: Int
+        let indices: ClosedRange<Int>
+
+        func contains(_ itemID: FeedItemID, itemIndices: [FeedItemID: Int]) -> Bool {
+            itemIndices[itemID].map(indices.contains) ?? false
+        }
     }
 
     func validatedItems(_ items: [FeedPlaybackItem]) throws -> IndexedItems {
@@ -156,13 +162,30 @@ private extension FeedPlanner {
         itemIndices: [FeedItemID: Int],
         signal: FeedViewportSignal
     ) -> [Candidate] {
+        guard let workingSet = workingSet(
+            items: items,
+            itemIndices: itemIndices,
+            signal: signal
+        ) else {
+            return []
+        }
+
         var result: [Candidate] = []
         var seen: Set<FeedItemID> = []
         let priorities = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0.priority) })
+        let movement = movement(for: signal.velocityInViewportsPerSecond)
 
         func append(_ itemID: FeedItemID, role: FeedPlan.Role) {
+            guard workingSet.contains(itemID, itemIndices: itemIndices) else { return }
             guard seen.insert(itemID).inserted else { return }
             result.append(.init(itemID: itemID, role: role))
+        }
+
+        func movementRank(for itemID: FeedItemID) -> Int {
+            guard movement.direction != 0, let index = itemIndices[itemID] else { return 0 }
+            let offset = index - workingSet.anchorIndex
+            guard offset != 0 else { return 0 }
+            return offset.signum() == movement.direction ? 0 : 1
         }
 
         if let focusedItemID = signal.focusedItemID {
@@ -171,6 +194,10 @@ private extension FeedPlanner {
 
         let visible = signal.visibleItems.sorted { lhs, rhs in
             if lhs.fraction != rhs.fraction { return lhs.fraction > rhs.fraction }
+            if movement.isFast,
+               movementRank(for: lhs.itemID) != movementRank(for: rhs.itemID) {
+                return movementRank(for: lhs.itemID) < movementRank(for: rhs.itemID)
+            }
             if abs(lhs.distanceInViewports) != abs(rhs.distanceInViewports) {
                 return abs(lhs.distanceInViewports) < abs(rhs.distanceInViewports)
             }
@@ -182,6 +209,10 @@ private extension FeedPlanner {
         visible.forEach { append($0.itemID, role: .visible) }
 
         let predictions = signal.predictedDestinations.sorted { lhs, rhs in
+            if movement.isFast,
+               movementRank(for: lhs.itemID) != movementRank(for: rhs.itemID) {
+                return movementRank(for: lhs.itemID) < movementRank(for: rhs.itemID)
+            }
             if lhs.confidence != rhs.confidence { return lhs.confidence > rhs.confidence }
             if priorities[lhs.itemID] != priorities[rhs.itemID] {
                 return (priorities[lhs.itemID] ?? 0) > (priorities[rhs.itemID] ?? 0)
@@ -190,28 +221,102 @@ private extension FeedPlanner {
         }
         predictions.forEach { append($0.itemID, role: .predicted) }
 
-        guard limits.neighborPredictionHorizon > 0,
-              !items.isEmpty,
-              let anchorID = signal.focusedItemID ?? visible.first?.itemID,
+        appendNeighbors(
+            items: items,
+            workingSet: workingSet,
+            movement: movement,
+            append: append
+        )
+        return result
+    }
+
+    func workingSet(
+        items: [FeedPlaybackItem],
+        itemIndices: [FeedItemID: Int],
+        signal: FeedViewportSignal
+    ) -> WorkingSet? {
+        guard !items.isEmpty else { return nil }
+        let visibleAnchor = signal.visibleItems.sorted { lhs, rhs in
+            if lhs.fraction != rhs.fraction { return lhs.fraction > rhs.fraction }
+            if abs(lhs.distanceInViewports) != abs(rhs.distanceInViewports) {
+                return abs(lhs.distanceInViewports) < abs(rhs.distanceInViewports)
+            }
+            return (itemIndices[lhs.itemID] ?? .max) < (itemIndices[rhs.itemID] ?? .max)
+        }.first?.itemID
+        let predictedAnchor = signal.predictedDestinations.sorted { lhs, rhs in
+            if lhs.confidence != rhs.confidence { return lhs.confidence > rhs.confidence }
+            return (itemIndices[lhs.itemID] ?? .max) < (itemIndices[rhs.itemID] ?? .max)
+        }.first?.itemID
+        guard let anchorID = signal.focusedItemID ?? visibleAnchor ?? predictedAnchor,
               let anchorIndex = itemIndices[anchorID]
         else {
-            return result
+            return nil
+        }
+        let lastIndex = items.index(before: items.endIndex)
+        let boundedBehind = min(anchorIndex - items.startIndex, limits.maximumBehindItems)
+        let boundedAhead = min(lastIndex - anchorIndex, limits.maximumAheadItems)
+        let lowerBound = anchorIndex - boundedBehind
+        let upperBound = anchorIndex + boundedAhead
+        return WorkingSet(anchorIndex: anchorIndex, indices: lowerBound...upperBound)
+    }
+
+    func movement(for velocity: Double) -> (direction: Int, isFast: Bool) {
+        let speed = abs(velocity)
+        guard speed >= limits.directionalVelocityThreshold, velocity != 0 else {
+            return (0, false)
+        }
+        return (velocity > 0 ? 1 : -1, speed >= limits.fastVelocityThreshold)
+    }
+
+    func appendNeighbors(
+        items: [FeedPlaybackItem],
+        workingSet: WorkingSet,
+        movement: (direction: Int, isFast: Bool),
+        append: (FeedItemID, FeedPlan.Role) -> Void
+    ) {
+        func appendOffset(_ offset: Int) {
+            let index = workingSet.anchorIndex + offset
+            guard items.indices.contains(index) else { return }
+            append(items[index].id, .neighbor)
         }
 
-        let direction = signal.velocityInViewportsPerSecond < 0 ? -1 : 1
-        for distance in 1...limits.neighborPredictionHorizon {
-            let preferredIndex = anchorIndex + (direction * distance)
-            if items.indices.contains(preferredIndex) {
-                append(items[preferredIndex].id, role: .neighbor)
+        let availableAhead = workingSet.indices.upperBound - workingSet.anchorIndex
+        let availableBehind = workingSet.anchorIndex - workingSet.indices.lowerBound
+        let maximumDistance = max(availableAhead, availableBehind)
+        guard maximumDistance > 0 else { return }
+
+        if movement.direction == 0 {
+            for distance in 1...maximumDistance {
+                if distance <= availableAhead { appendOffset(distance) }
+                if distance <= availableBehind { appendOffset(-distance) }
             }
-            if signal.velocityInViewportsPerSecond == 0 {
-                let oppositeIndex = anchorIndex - (direction * distance)
-                if items.indices.contains(oppositeIndex) {
-                    append(items[oppositeIndex].id, role: .neighbor)
+            return
+        }
+
+        let preferredLimit = movement.direction > 0
+            ? availableAhead
+            : availableBehind
+        let oppositeLimit = movement.direction > 0
+            ? availableBehind
+            : availableAhead
+        if movement.isFast {
+            if preferredLimit > 0 {
+                for distance in 1...preferredLimit {
+                    appendOffset(movement.direction * distance)
                 }
             }
+            if oppositeLimit > 0 {
+                for distance in 1...oppositeLimit {
+                    appendOffset(-movement.direction * distance)
+                }
+            }
+            return
         }
-        return result
+
+        for distance in 1...max(preferredLimit, oppositeLimit) {
+            if distance <= preferredLimit { appendOffset(movement.direction * distance) }
+            if distance <= oppositeLimit { appendOffset(-movement.direction * distance) }
+        }
     }
 
     func admitCandidates(
@@ -220,10 +325,11 @@ private extension FeedPlanner {
         signal: FeedViewportSignal
     ) throws -> [FeedPlan.Entry] {
         let focusedAllowance = signal.focusedItemID == nil ? 0 : 1
-        let maximumCount = min(
-            limits.maximumResidentItems,
-            focusedAllowance + limits.maximumPrefetchItems
+        let admittedPrefetchCount = min(
+            max(0, limits.maximumResidentItems - focusedAllowance),
+            limits.maximumPrefetchItems
         )
+        let maximumCount = focusedAllowance + admittedPrefetchCount
         guard maximumCount > 0 else { return [] }
 
         var entries: [FeedPlan.Entry] = []
