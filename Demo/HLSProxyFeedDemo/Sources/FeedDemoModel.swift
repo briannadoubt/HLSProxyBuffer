@@ -42,6 +42,8 @@ final class FeedDemoModel {
     private(set) var qualificationNavigationCount = 0
     private(set) var qualificationWarmupIsMarked = false
     private(set) var qualificationReport: FeedDemoQualificationReport?
+    private(set) var verticalQualificationReport: FeedDemoVerticalQualificationReport?
+    private(set) var qualificationNetworkCondition: FeedDemoQualificationNetworkCondition = .normal
     private(set) var applicationPhase: FeedDemoApplicationPhase = .active
     private(set) var backgroundSnapshot = FeedDemoBackgroundLifecycleSnapshot.empty
 
@@ -67,6 +69,11 @@ final class FeedDemoModel {
     @ObservationIgnored private var qualificationRequestedItemID: FeedItemID?
     @ObservationIgnored private var qualificationWarmupNavigationCount: Int?
     @ObservationIgnored private var qualificationWarmupMemoryBytes: Int?
+    @ObservationIgnored private var qualificationNetworkConditionTransitionCount = 0
+    @ObservationIgnored private var qualificationMemoryPressureActionCount = 0
+    @ObservationIgnored private var qualificationBackgroundTransitionCount = 0
+    @ObservationIgnored private var qualificationForegroundTransitionCount = 0
+    @ObservationIgnored private var qualificationAwaitsForeground = false
 
     init(
         backgroundScheduler: (any FeedDemoBackgroundScheduling)? = nil,
@@ -177,6 +184,53 @@ final class FeedDemoModel {
         )
     }
 
+    func setQualificationNetworkCondition(
+        _ condition: FeedDemoQualificationNetworkCondition
+    ) async {
+        guard let origin else { return }
+        switch condition {
+        case .normal:
+            await origin.setOffline(false)
+            await origin.setNetworkProfile(.unconstrained)
+        case .poor:
+            await origin.setOffline(false)
+            await origin.setNetworkProfile(.poor)
+        case .offline:
+            await origin.setOffline(true)
+        }
+        if qualificationNetworkCondition != condition {
+            qualificationNetworkConditionTransitionCount += 1
+        }
+        qualificationNetworkCondition = condition
+        verticalQualificationReport = nil
+    }
+
+    func handleQualificationMemoryPressure() async {
+        guard let engine else { return }
+        qualificationMemoryPressureActionCount += 1
+        await engine.handleMemoryPressure()
+        engineSnapshot = engine.snapshot
+        refreshMetrics(engine: engine, policy: selectedMode.policy)
+        verticalQualificationReport = nil
+    }
+
+    func finishVerticalQualification() async {
+        let expectedFocus = focusedItemID
+        await settleQualification(expectedItemID: expectedFocus)
+        guard let engine, let origin else { return }
+        verticalQualificationReport = FeedDemoVerticalQualificationReport.make(
+            focusedItemID: expectedFocus,
+            engine: engineSnapshot,
+            telemetry: engine.telemetry.snapshot,
+            origin: await origin.snapshot(),
+            policy: selectedMode.policy,
+            networkConditionTransitionCount: qualificationNetworkConditionTransitionCount,
+            memoryPressureActionCount: qualificationMemoryPressureActionCount,
+            backgroundTransitionCount: qualificationBackgroundTransitionCount,
+            foregroundTransitionCount: qualificationForegroundTransitionCount
+        )
+    }
+
     func setLowPowerModeEnabled(_ isEnabled: Bool) async {
         guard let engine else { return }
         do {
@@ -197,18 +251,28 @@ final class FeedDemoModel {
     }
 
     func handleApplicationPhase(_ phase: FeedDemoApplicationPhase) {
+        let previousPhase = applicationPhase
         applicationPhase = phase
         switch phase {
         case .active:
+            if qualificationAwaitsForeground {
+                qualificationForegroundTransitionCount += 1
+                qualificationAwaitsForeground = false
+            }
             backgroundLifecycle.cancelActive()
             backgroundLifecycle.cancelPending()
             _ = engine?.setPlaybackSuspended(false)
         case .inactive:
             _ = engine?.setPlaybackSuspended(true)
         case .background:
+            if previousPhase != .background {
+                qualificationBackgroundTransitionCount += 1
+                qualificationAwaitsForeground = true
+            }
             _ = engine?.setPlaybackSuspended(true)
             backgroundLifecycle.scheduleAll()
         }
+        verticalQualificationReport = nil
         refreshBackgroundSnapshot()
     }
 
@@ -289,9 +353,16 @@ final class FeedDemoModel {
         qualificationNavigationCount = 0
         qualificationWarmupIsMarked = false
         qualificationReport = nil
+        verticalQualificationReport = nil
+        qualificationNetworkCondition = .normal
         qualificationRequestedItemID = nil
         qualificationWarmupNavigationCount = nil
         qualificationWarmupMemoryBytes = nil
+        qualificationNetworkConditionTransitionCount = 0
+        qualificationMemoryPressureActionCount = 0
+        qualificationBackgroundTransitionCount = 0
+        qualificationForegroundTransitionCount = 0
+        qualificationAwaitsForeground = false
         status = .idle
     }
 
@@ -322,9 +393,16 @@ final class FeedDemoModel {
         qualificationNavigationCount = 0
         qualificationWarmupIsMarked = false
         qualificationReport = nil
+        verticalQualificationReport = nil
+        qualificationNetworkCondition = .normal
         qualificationRequestedItemID = nextEntries.first?.id
         qualificationWarmupNavigationCount = nil
         qualificationWarmupMemoryBytes = nil
+        qualificationNetworkConditionTransitionCount = 0
+        qualificationMemoryPressureActionCount = 0
+        qualificationBackgroundTransitionCount = 0
+        qualificationForegroundTransitionCount = 0
+        qualificationAwaitsForeground = false
         signalBuilder = FeedDemoSignalBuilder(orderedItemIDs: nextEntries.map(\.id))
         latestFrames = [:]
         latestViewport = .zero
@@ -493,13 +571,14 @@ final class FeedDemoModel {
         }
     }
 
-    private func settleQualification() async {
+    private func settleQualification(expectedItemID: FeedItemID? = nil) async {
         await signalTask?.value
         guard let engine else { return }
         engineSnapshot = await engine.waitUntilSettled()
+        let expectedItemID = expectedItemID ?? qualificationRequestedItemID
         let deadline = clock.now.advanced(by: .seconds(5))
         while clock.now < deadline {
-            if let requested = qualificationRequestedItemID,
+            if let requested = expectedItemID,
                engine.snapshot.activeItemID == requested,
                engine.snapshot.playback(for: requested)?.hasStartedPlayback == true {
                 break

@@ -120,6 +120,32 @@ if command -v xcodebuild >/dev/null 2>&1; then
       -derivedDataPath "$FEED_DEMO_DERIVED_DATA" \
       ONLY_ACTIVE_ARCH=YES \
       test
+
+    echo "Exporting the real vertical-feed UI qualification report..."
+    UI_ATTACHMENT_DIR="$CI_DERIVED_DATA_ROOT/feed-ui-attachments"
+    xcrun xcresulttool export attachments \
+      --path "$UI_RESULT_BUNDLE" \
+      --output-path "$UI_ATTACHMENT_DIR"
+    VERTICAL_REPORT_SOURCE=$(grep -l \
+      '"qualificationKind":"vertical_paging_ui"' \
+      "$UI_ATTACHMENT_DIR"/*.json 2>/dev/null | head -n 1 || true)
+    if [ -z "$VERTICAL_REPORT_SOURCE" ]; then
+      echo "Missing vertical_paging_ui attachment in $UI_RESULT_BUNDLE"
+      exit 1
+    fi
+    VERTICAL_REPORT="$QUALIFICATION_ARTIFACT_DIR/hls-feed-vertical-ui-qualification.json"
+    cp "$VERTICAL_REPORT_SOURCE" "$VERTICAL_REPORT"
+    if ! command -v jq >/dev/null 2>&1; then
+      echo "jq is required to validate the vertical-feed UI report"
+      exit 1
+    fi
+    if ! jq -e \
+      '.qualificationKind == "vertical_paging_ui" and .passed == true' \
+      "$VERTICAL_REPORT" >/dev/null; then
+      echo "The real vertical-feed UI qualification did not pass: $VERTICAL_REPORT"
+      exit 1
+    fi
+    echo "Vertical-feed UI qualification report: $VERTICAL_REPORT"
     remove_derived_data "$FEED_DEMO_DERIVED_DATA"
   else
     echo "iOS simulator build skipped (no $IOS_SIM_NAME available)."
