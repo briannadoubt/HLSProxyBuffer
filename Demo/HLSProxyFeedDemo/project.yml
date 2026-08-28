@@ -36,11 +36,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.hlsproxybuffer.feed-demo
         PRODUCT_NAME: HLS Proxy Feed Demo
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: HLS Feed Demo
-        INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking: YES
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Supporting/Info.plist
         TARGETED_DEVICE_FAMILY: "1,2"
 
   HLSProxyFeedDemoAppUITests:

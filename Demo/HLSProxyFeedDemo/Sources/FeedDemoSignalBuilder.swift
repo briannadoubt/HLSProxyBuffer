@@ -60,6 +60,7 @@ enum FeedDemoScrollGeometryProjector {
 struct FeedDemoSignalBuilder {
     private(set) var orderedItemIDs: [FeedItemID]
     private(set) var focusedItemID: FeedItemID?
+    private(set) var predictedDestinationIDs: [FeedItemID] = []
     private(set) var generation = FeedNavigationGeneration(rawValue: 0)
     private var lastAnchor: (itemID: FeedItemID, distance: Double, observedAt: Duration)?
 
@@ -107,16 +108,18 @@ struct FeedDemoSignalBuilder {
         )
         lastAnchor = (nextFocus, focusedDistance, observedAt)
 
+        let destinations = predictions(
+            focusedItemID: nextFocus,
+            velocity: velocity,
+            visible: visible
+        )
+        predictedDestinationIDs = destinations.map(\.itemID)
         return FeedViewportSignal(
             generation: generation,
             focusedItemID: nextFocus,
             visibleItems: visible,
             velocityInViewportsPerSecond: velocity,
-            predictedDestinations: predictions(
-                focusedItemID: nextFocus,
-                velocity: velocity,
-                visible: visible
-            ),
+            predictedDestinations: destinations,
             observedAt: observedAt
         )
     }

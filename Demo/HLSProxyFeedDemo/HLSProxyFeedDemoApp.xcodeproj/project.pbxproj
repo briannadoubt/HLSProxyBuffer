@@ -20,6 +20,7 @@
 		EC1762B793C852234D09D4D0 /* HLSProxyFeedDemoAppUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A01534D45F570E145A974181 /* HLSProxyFeedDemoAppUITests.swift */; };
 		EE9E3F813235363BC13FFEC2 /* FeedDemoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5995C9797B54E0268FDBAE8C /* FeedDemoView.swift */; };
 		F6A8E81993610BE2C1C0077B /* FeedDemoCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF676DC7A09A1B5C505C422B /* FeedDemoCatalog.swift */; };
+		FE3F57BD936F0A2BBF45DAFD /* FeedDemoBackgroundLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AC599B1E8D0D143E04649DF /* FeedDemoBackgroundLifecycle.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -38,10 +39,11 @@
 		303559D318E4BC284CE77C39 /* FeedDemoQualification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoQualification.swift; sourceTree = "<group>"; };
 		533503BD14232605870AC970 /* FeedDemoAnalyticsInspector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoAnalyticsInspector.swift; sourceTree = "<group>"; };
 		5995C9797B54E0268FDBAE8C /* FeedDemoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoView.swift; sourceTree = "<group>"; };
+		5AC599B1E8D0D143E04649DF /* FeedDemoBackgroundLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoBackgroundLifecycle.swift; sourceTree = "<group>"; };
 		5D8961D850963CA1AE629A41 /* FeedDemoSignalBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoSignalBuilder.swift; sourceTree = "<group>"; };
 		A01534D45F570E145A974181 /* HLSProxyFeedDemoAppUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HLSProxyFeedDemoAppUITests.swift; sourceTree = "<group>"; };
-		A6BF346592392AD7E75AB3D4 /* HLSProxyBuffer */ = {isa = PBXFileReference; lastKnownFileType = folder; name = HLSProxyBuffer; path = ../..; sourceTree = SOURCE_ROOT; };
 		B42E870069D71B1C9759E707 /* HLSProxyFeedDemoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HLSProxyFeedDemoApp.swift; sourceTree = "<group>"; };
+		C06D4D4FC9755133A49993BF /* HLSProxyBuffer */ = {isa = PBXFileReference; lastKnownFileType = folder; name = HLSProxyBuffer; path = ../..; sourceTree = SOURCE_ROOT; };
 		C282D7878B2FFDF7BD31492B /* HLSProxyFeedDemoAppUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = HLSProxyFeedDemoAppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		CF676DC7A09A1B5C505C422B /* FeedDemoCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoCatalog.swift; sourceTree = "<group>"; };
 		EBCFA5A19660D90ED78B1C54 /* FeedDemoFixtureOrigin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoFixtureOrigin.swift; sourceTree = "<group>"; };
@@ -65,7 +67,7 @@
 		265030D67E02C503504E5617 /* Packages */ = {
 			isa = PBXGroup;
 			children = (
-				A6BF346592392AD7E75AB3D4 /* HLSProxyBuffer */,
+				C06D4D4FC9755133A49993BF /* HLSProxyBuffer */,
 			);
 			name = Packages;
 			sourceTree = "<group>";
@@ -94,6 +96,7 @@
 			isa = PBXGroup;
 			children = (
 				533503BD14232605870AC970 /* FeedDemoAnalyticsInspector.swift */,
+				5AC599B1E8D0D143E04649DF /* FeedDemoBackgroundLifecycle.swift */,
 				CF676DC7A09A1B5C505C422B /* FeedDemoCatalog.swift */,
 				EBCFA5A19660D90ED78B1C54 /* FeedDemoFixtureOrigin.swift */,
 				ED56CD1BFEBDA23EED9467CF /* FeedDemoModel.swift */,
@@ -214,6 +217,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				00FB70F9D1944984844CD3C0 /* FeedDemoAnalyticsInspector.swift in Sources */,
+				FE3F57BD936F0A2BBF45DAFD /* FeedDemoBackgroundLifecycle.swift in Sources */,
 				F6A8E81993610BE2C1C0077B /* FeedDemoCatalog.swift in Sources */,
 				69978CF3DA6A9351B357D379 /* FeedDemoFixtureOrigin.swift in Sources */,
 				9F7946F13905F8B630B68254 /* FeedDemoModel.swift in Sources */,
@@ -371,11 +375,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "HLS Feed Demo";
-				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking = YES;
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Supporting/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -426,11 +427,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "HLS Feed Demo";
-				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking = YES;
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Supporting/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

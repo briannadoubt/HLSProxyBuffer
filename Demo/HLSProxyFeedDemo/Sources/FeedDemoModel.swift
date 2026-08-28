@@ -42,8 +42,15 @@ final class FeedDemoModel {
     private(set) var qualificationNavigationCount = 0
     private(set) var qualificationWarmupIsMarked = false
     private(set) var qualificationReport: FeedDemoQualificationReport?
+    private(set) var applicationPhase: FeedDemoApplicationPhase = .active
+    private(set) var backgroundSnapshot = FeedDemoBackgroundLifecycleSnapshot.empty
 
     @ObservationIgnored private let clock = ContinuousClock()
+    @ObservationIgnored private let backgroundWarmingPolicy =
+        HLSFeedBackgroundWarmingPolicy.shortFormFeed
+    @ObservationIgnored private let backgroundEnvironment:
+        any FeedDemoBackgroundEnvironmentProviding
+    @ObservationIgnored private let backgroundLifecycle: FeedDemoBackgroundLifecycle
     @ObservationIgnored private var startedAt: ContinuousClock.Instant?
     @ObservationIgnored private var origin: FeedDemoFixtureOrigin?
     @ObservationIgnored private var signalBuilder = FeedDemoSignalBuilder(orderedItemIDs: [])
@@ -61,6 +68,20 @@ final class FeedDemoModel {
     @ObservationIgnored private var qualificationWarmupNavigationCount: Int?
     @ObservationIgnored private var qualificationWarmupMemoryBytes: Int?
 
+    init(
+        backgroundScheduler: (any FeedDemoBackgroundScheduling)? = nil,
+        backgroundEnvironment: (any FeedDemoBackgroundEnvironmentProviding)? = nil,
+        backgroundSchedulePolicy: FeedDemoBackgroundSchedulePolicy = .shortFormFeed
+    ) {
+        let scheduler = backgroundScheduler ?? FeedDemoBackgroundDependencies.makeScheduler()
+        self.backgroundEnvironment = backgroundEnvironment
+            ?? FeedDemoBackgroundDependencies.makeEnvironmentProvider()
+        self.backgroundLifecycle = FeedDemoBackgroundLifecycle(
+            scheduler: scheduler,
+            policy: backgroundSchedulePolicy
+        )
+    }
+
     func start() async {
         guard origin == nil else { return }
         status = .starting
@@ -70,6 +91,7 @@ final class FeedDemoModel {
             origin = fixtureOrigin
             startedAt = clock.now
             try await install(mode: selectedMode, baseURL: baseURL)
+            reconcilePlaybackForApplicationPhase()
             status = .running
         } catch {
             status = .failed(error.localizedDescription)
@@ -166,6 +188,69 @@ final class FeedDemoModel {
         }
     }
 
+    func recordBackgroundRegistration(
+        _ kind: FeedDemoBackgroundTaskKind,
+        accepted: Bool
+    ) {
+        backgroundLifecycle.recordRegistration(kind, accepted: accepted)
+        refreshBackgroundSnapshot()
+    }
+
+    func handleApplicationPhase(_ phase: FeedDemoApplicationPhase) {
+        applicationPhase = phase
+        switch phase {
+        case .active:
+            backgroundLifecycle.cancelActive()
+            backgroundLifecycle.cancelPending()
+            _ = engine?.setPlaybackSuspended(false)
+        case .inactive:
+            _ = engine?.setPlaybackSuspended(true)
+        case .background:
+            _ = engine?.setPlaybackSuspended(true)
+            backgroundLifecycle.scheduleAll()
+        }
+        refreshBackgroundSnapshot()
+    }
+
+    @discardableResult
+    func performBackgroundTask(_ kind: FeedDemoBackgroundTaskKind) async -> Bool {
+        // The system consumes the current request when it launches the app.
+        // Submit the next best-effort opportunity before starting bounded work.
+        backgroundLifecycle.schedule(kind)
+        refreshBackgroundSnapshot()
+
+        if engine == nil {
+            await start()
+        }
+        guard let engine else { return false }
+
+        _ = engine.setPlaybackSuspended(true)
+        let request = HLSFeedBackgroundWarmingRequest(
+            candidates: backgroundWarmingCandidates(),
+            environment: backgroundEnvironment.current,
+            availableExecutionTime: backgroundLifecycle.executionTime(for: kind)
+        )
+        let succeeded = await backgroundLifecycle.run(
+            kind: kind,
+            request: request
+        ) { [weak engine] in
+            guard let engine else { throw CancellationError() }
+            return FeedDemoBackgroundWorkResult(
+                try await engine.warmInBackground(request)
+            )
+        }
+        refreshBackgroundSnapshot()
+        if applicationPhase == .active {
+            _ = engine.setPlaybackSuspended(false)
+        }
+        return succeeded
+    }
+
+    func expireBackgroundTask(_ kind: FeedDemoBackgroundTaskKind) {
+        backgroundLifecycle.expire(kind)
+        refreshBackgroundSnapshot()
+    }
+
     func jumpToLive() async {
         do {
             try await engine?.jumpToLive()
@@ -183,6 +268,9 @@ final class FeedDemoModel {
     }
 
     func stop() async {
+        backgroundLifecycle.cancelActive()
+        backgroundLifecycle.cancelPending()
+        refreshBackgroundSnapshot()
         signalTask?.cancel()
         engineUpdatesTask?.cancel()
         telemetryTask?.cancel()
@@ -223,7 +311,8 @@ final class FeedDemoModel {
         let nextEngine = try HLSFeedEngine(
             items: nextEntries.map(\.item),
             policy: policy,
-            sourceTransportPolicy: .allowLoopbackHTTP
+            sourceTransportPolicy: .allowLoopbackHTTP,
+            backgroundWarmingPolicy: backgroundWarmingPolicy
         )
         entries = nextEntries
         engine = nextEngine
@@ -249,6 +338,7 @@ final class FeedDemoModel {
             latestViewport = viewport
             submitSignal(requestedFocus: first.id)
         }
+        reconcilePlaybackForApplicationPhase()
     }
 
     private func observeEngine(_ observedEngine: HLSFeedEngine, policy: FeedPlaybackPolicy) {
@@ -444,5 +534,42 @@ final class FeedDemoModel {
             handoffReadyCount: snapshot.paths.reduce(UInt64(0)) { $0 &+ $1.handoffReadyCount },
             handoffSuccessCount: snapshot.handoffSuccessCount
         )
+    }
+
+    private func reconcilePlaybackForApplicationPhase() {
+        _ = engine?.setPlaybackSuspended(applicationPhase != .active)
+    }
+
+    private func backgroundWarmingCandidates() -> [HLSFeedBackgroundWarmingCandidate] {
+        let limit = backgroundWarmingPolicy.maximumItemCount
+        guard limit > 0, !entries.isEmpty else { return [] }
+
+        var orderedIDs = signalBuilder.predictedDestinationIDs
+        let focusedIndex = focusedItemID
+            .flatMap { focused in entries.firstIndex { $0.id == focused } }
+            ?? 0
+        for index in entries.indices where index > focusedIndex {
+            orderedIDs.append(entries[index].id)
+        }
+        if orderedIDs.isEmpty {
+            orderedIDs = entries.prefix(limit).map(\.id)
+        }
+
+        var seen: Set<FeedItemID> = []
+        return orderedIDs.compactMap { itemID in
+            guard seen.insert(itemID).inserted,
+                  let entry = entries.first(where: { $0.id == itemID })
+            else {
+                return nil
+            }
+            return HLSFeedBackgroundWarmingCandidate(
+                item: entry.item,
+                cacheState: .unknown
+            )
+        }.prefix(limit).map { $0 }
+    }
+
+    private func refreshBackgroundSnapshot() {
+        backgroundSnapshot = backgroundLifecycle.snapshot
     }
 }

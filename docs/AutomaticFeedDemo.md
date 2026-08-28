@@ -37,6 +37,23 @@ The SwiftUI layer has three responsibilities:
 
 `FeedDemoModel` owns the engine and local fixture origin. `HLSFeedEngine` owns the bounded preparation coordinator and all playback resources. Changing mode or leaving the view cancels signal subscriptions and awaits engine teardown.
 
+The app also demonstrates the complete lifecycle boundary. Its stable
+Observation model receives aggregate `ScenePhase` changes, silences the engine
+while inactive or backgrounded, and resumes only the current focus on return.
+An identifier-based SwiftUI app-refresh handler and an iOS-17-compatible
+`BGProcessingTask` adapter share one typed scheduler interface. Each consumed
+request is resubmitted for a future opportunity, and foreground reconciliation
+cancels pending and active obsolete work.
+
+Background execution is opportunistic: iOS may delay or never launch a
+submitted request. If it does launch one, the demo offers only the engine's
+current direction-aware predictions. The `.shortFormFeed` warming policy limits
+that set to two items, one leading segment each, one concurrent preparation,
+4 MiB of estimated bytes, and 15 seconds. `NWPathMonitor`, Low Data Mode, Low
+Power Mode, cellular policy, cache freshness/validators, and system expiration
+are applied before or during admission. No background path creates a player or
+retains an audible owner.
+
 Focus is deterministic: the highest visible fraction wins, then distance from viewport center, then catalog order. A focus change advances the navigation generation; geometry updates within the same focus retain the generation. Stable accessibility identifiers include:
 
 - `automatic-feed-viewport`
@@ -45,6 +62,7 @@ Focus is deterministic: the highest visible fraction wins, then distance from vi
 - `feed-metrics-overlay`
 - `live-seek-behind` and `live-jump-to-edge`
 - `low-power-toggle`
+- `background-warming-disclosure`
 - `qualification-ready`, `qualification-next`, and `qualification-finish`
 - `qualification-focus`, `qualification-navigation-count`, and
   `qualification-playback-state`
@@ -66,9 +84,15 @@ The fixed-cardinality overlay reads the same bounded telemetry exposed to produc
 
 Disk residency remains available in the model and telemetry snapshot for detailed inspection. Metrics are aggregated by cold/warm, focused/predicted, and VOD/live/stitched path without retaining item IDs or URLs.
 
+Background lifecycle telemetry is separately fixed-cardinality and Codable. It
+counts registered, registration-denied, scheduled, admitted, completed,
+expired, cancelled, system-denied, policy-denied, and failed events, plus only
+bounded high-water candidate/admission counts. Its JSON contains no task
+identifiers, item IDs, URLs, application metadata, or error text.
+
 ## Verification
 
-`HLSProxyFeedDemoTests` validates that every mode produces a nonempty, uniquely identified local catalog and a valid policy; that each can enter the public engine path; that geometry produces stable focus, velocity, and prediction signals; and that the fixture origin honors byte ranges and validators.
+`HLSProxyFeedDemoTests` validates that every mode produces a nonempty, uniquely identified local catalog and a valid policy; that each can enter the public engine path; that geometry produces stable focus, velocity, and prediction signals; and that the fixture origin honors byte ranges and validators. Lifecycle tests inject the scheduler, clock, and network environment to cover registration, refresh/processing submission, system denial, resubmission, foreground cancellation, expiration, policy bounds, audio suspension, and sanitized metrics without depending on simulator background scheduling.
 
 The `HLSProxyFeedQualification` scheme launches the app with
 `--qualification-mode`, warms every short-form item, then drives 100 rapid
