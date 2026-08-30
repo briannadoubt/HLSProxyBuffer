@@ -44,6 +44,7 @@ public struct SegmentHandler: Sendable {
                 do {
                     data = try await loadCoordinator.data(for: key) {
                         let fetched = try await fetch(entry: entry)
+                        try Task.checkCancellation()
                         await cache.put(fetched, for: key)
                         await registerReady(entry)
                         return fetched
@@ -186,41 +187,63 @@ public struct SegmentHandler: Sendable {
     }
 }
 
-private final class SegmentLoadCoordinator: Sendable {
+actor SegmentLoadCoordinator {
     private struct InFlight {
         let id: UUID
-        let task: Task<Data, Error>
+        let task: Task<Void, Never>
+        var waiters: [UUID: CheckedContinuation<Data, Error>]
     }
 
-    private let inFlight = OSAllocatedUnfairLock(initialState: [String: InFlight]())
+    private var inFlight: [String: InFlight] = [:]
+
+    func waiterCount(for key: String) -> Int { inFlight[key]?.waiters.count ?? 0 }
 
     func data(
         for key: String,
         operation: @escaping @Sendable () async throws -> Data
     ) async throws -> Data {
-        let entry = inFlight.withLock { inFlight -> InFlight in
-            if let existing = inFlight[key] {
-                return existing
+        let waiterID = UUID()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                if var entry = inFlight[key] {
+                    entry.waiters[waiterID] = continuation
+                    inFlight[key] = entry
+                } else {
+                    let id = UUID()
+                    let task = Task {
+                        let result: Result<Data, Error>
+                        do { result = .success(try await operation()) }
+                        catch { result = .failure(error) }
+                        finish(key: key, id: id, result: result)
+                    }
+                    inFlight[key] = InFlight(
+                        id: id, task: task, waiters: [waiterID: continuation]
+                    )
+                }
             }
-            let entry = InFlight(id: UUID(), task: Task { try await operation() })
-            inFlight[key] = entry
-            return entry
-        }
-        do {
-            let data = try await entry.task.value
-            remove(key: key, id: entry.id)
-            return data
-        } catch {
-            remove(key: key, id: entry.id)
-            throw error
+        } onCancel: {
+            Task { await self.cancel(key: key, waiterID: waiterID) }
         }
     }
 
-    private func remove(key: String, id: UUID) {
-        inFlight.withLock { inFlight in
-            guard inFlight[key]?.id == id else { return }
+    private func cancel(key: String, waiterID: UUID) {
+        guard var entry = inFlight[key],
+              let continuation = entry.waiters.removeValue(forKey: waiterID)
+        else { return }
+        if entry.waiters.isEmpty {
             inFlight.removeValue(forKey: key)
+            entry.task.cancel()
+        } else {
+            inFlight[key] = entry
         }
+        continuation.resume(throwing: CancellationError())
+    }
+
+    private func finish(key: String, id: UUID, result: Result<Data, Error>) {
+        guard let entry = inFlight[key], entry.id == id else { return }
+        inFlight.removeValue(forKey: key)
+        for continuation in entry.waiters.values { continuation.resume(with: result) }
     }
 }
 
