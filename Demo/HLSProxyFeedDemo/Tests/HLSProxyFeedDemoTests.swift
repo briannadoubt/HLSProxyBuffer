@@ -6,6 +6,38 @@ import HLSCore
 
 @MainActor
 final class HLSProxyFeedDemoTests: XCTestCase {
+    func testReadyHandoffGateDoesNotMixColdRequestsWithReadyOutcomes() {
+        let telemetry = HLSFeedTelemetry()
+        let path = HLSFeedTelemetry.Path(reuse: .warm, intent: .focused, mediaKind: .videoOnDemand)
+        for _ in 0..<100 {
+            telemetry.record(.init(path: path, payload: .handoff(wasReady: true, succeeded: true)))
+        }
+        for _ in 0..<2 {
+            telemetry.record(.init(path: path, payload: .handoff(wasReady: false, succeeded: false)))
+        }
+        func report() -> FeedDemoQualificationReport {
+            .make(
+                navigationCount: 100, measuredNavigationCount: 100, requestedItemID: nil,
+                snapshot: .empty, telemetry: telemetry.snapshot, policy: .shortFormFeed,
+                warmupMemoryBytes: 0
+            )
+        }
+        let coldFailures = report()
+        XCTAssertEqual(coldFailures.readyHandoffSuccessRate, 1)
+        XCTAssertLessThan(coldFailures.handoffSuccessRate ?? 1, 0.99)
+        XCTAssertFalse(coldFailures.failures.contains("successful ready handoffs fell below 99 percent"))
+        for _ in 0..<400 {
+            telemetry.record(.init(path: path, payload: .handoff(wasReady: false, succeeded: true)))
+        }
+        for _ in 0..<2 {
+            telemetry.record(.init(path: path, payload: .handoff(wasReady: true, succeeded: false)))
+        }
+        let warmFailures = report()
+        XCTAssertGreaterThan(warmFailures.handoffSuccessRate ?? 0, 0.99)
+        XCTAssertLessThan(warmFailures.readyHandoffSuccessRate ?? 1, 0.99)
+        XCTAssertTrue(warmFailures.failures.contains("successful ready handoffs fell below 99 percent"))
+    }
+
     func testVerticalQualificationReportIsBoundedSanitizedAndCoversEveryMetric() throws {
         let telemetry = HLSFeedTelemetry(configuration: .init(
             latencyUpperBounds: [0.05, 0.1, 0.25],

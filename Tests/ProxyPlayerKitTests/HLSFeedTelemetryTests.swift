@@ -203,6 +203,26 @@ final class HLSFeedTelemetryTests: XCTestCase {
         await fulfillment(of: [changed], timeout: 1)
     }
 
+    func testReadyHandoffSuccessCountsOnlyTheReadyCohort() throws {
+        let telemetry = HLSFeedTelemetry()
+        let path = HLSFeedTelemetry.Path(reuse: .warm, intent: .focused, mediaKind: .videoOnDemand)
+        for outcome in [(false, false), (false, true), (true, true), (true, false)] {
+            telemetry.record(.init(path: path, payload: .handoff(wasReady: outcome.0, succeeded: outcome.1)))
+        }
+        let metrics = try XCTUnwrap(telemetry.snapshot.metrics(for: path))
+        XCTAssertEqual(metrics.handoffAttemptCount, 4)
+        XCTAssertEqual(metrics.handoffSuccessCount, 2)
+        XCTAssertEqual(metrics.handoffReadyCount, 2)
+        XCTAssertEqual(metrics.handoffReadySuccessCount, 1)
+        let encoded = try JSONEncoder().encode(metrics)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        legacy.removeValue(forKey: "handoffReadySuccessCount")
+        let decoded = try JSONDecoder().decode(
+            HLSFeedTelemetry.PathSnapshot.self, from: JSONSerialization.data(withJSONObject: legacy)
+        )
+        XCTAssertNil(decoded.handoffReadySuccessCount, "Older evidence must not invent a ready success count")
+    }
+
     func testConfigurationCapsEveryCollectionDimension() {
         let telemetry = HLSFeedTelemetry(configuration: .init(
             latencyUpperBounds: Array(1...100).map(TimeInterval.init),

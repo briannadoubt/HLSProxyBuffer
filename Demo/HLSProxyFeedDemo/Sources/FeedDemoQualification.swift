@@ -17,6 +17,9 @@ struct FeedDemoQualificationReport: Codable, Equatable, Sendable {
     let handoffAttemptCount: UInt64
     let handoffSuccessCount: UInt64
     let handoffSuccessRate: Double?
+    let readyHandoffAttemptCount: UInt64
+    let readyHandoffSuccessCount: UInt64
+    let readyHandoffSuccessRate: Double?
     let managedMemoryGrowthBytes: Int
     let managedMemoryMaximumBytes: Int
     let managedDiskMaximumBytes: Int
@@ -63,6 +66,10 @@ struct FeedDemoQualificationReport: Codable, Equatable, Sendable {
         let handoffSuccessRate = handoffAttemptCount == 0
             ? nil
             : Double(handoffSuccessCount) / Double(handoffAttemptCount)
+        let readyHandoffAttemptCount = telemetry.paths.reduce(UInt64(0)) { $0 &+ $1.handoffReadyCount }
+        let readyHandoffSuccessCount = telemetry.paths.reduce(UInt64(0)) { $0 &+ ($1.handoffReadySuccessCount ?? 0) }
+        let readyHandoffSuccessRate = readyHandoffAttemptCount == 0
+            ? nil : Double(readyHandoffSuccessCount) / Double(readyHandoffAttemptCount)
         let focusedPlayback = requestedItemID.flatMap { snapshot.playback(for: $0) }
         let memoryGrowth = max(
             0,
@@ -105,9 +112,12 @@ struct FeedDemoQualificationReport: Codable, Equatable, Sendable {
         if let cancellationMaximum, cancellationMaximum > 0.25 {
             failures.append("obsolete work took longer than 250 ms to drain")
         }
-        if handoffAttemptCount == 0 {
+        if telemetry.paths.contains(where: { $0.handoffReadySuccessCount == nil }) {
+            failures.append("ready-handoff outcome metrics are unavailable")
+        }
+        if readyHandoffAttemptCount == 0 {
             failures.append("no ready handoff attempts were recorded")
-        } else if let handoffSuccessRate, handoffSuccessRate < 0.99 {
+        } else if let readyHandoffSuccessRate, readyHandoffSuccessRate < 0.99 {
             failures.append("successful ready handoffs fell below 99 percent")
         }
         if warmupMemoryBytes == nil {
@@ -132,6 +142,9 @@ struct FeedDemoQualificationReport: Codable, Equatable, Sendable {
             handoffAttemptCount: handoffAttemptCount,
             handoffSuccessCount: handoffSuccessCount,
             handoffSuccessRate: handoffSuccessRate,
+            readyHandoffAttemptCount: readyHandoffAttemptCount,
+            readyHandoffSuccessCount: readyHandoffSuccessCount,
+            readyHandoffSuccessRate: readyHandoffSuccessRate,
             managedMemoryGrowthBytes: memoryGrowth,
             managedMemoryMaximumBytes: telemetry.resources.maximumMemoryResidentBytes,
             managedDiskMaximumBytes: telemetry.resources.maximumDiskResidentBytes,
