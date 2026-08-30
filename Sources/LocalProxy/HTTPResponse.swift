@@ -17,17 +17,34 @@ public struct HTTPResponse: Sendable {
     public let status: Status
     public var headers: [String: String]
     public var body: Data
+    /// Size of the selected representation when its body is intentionally absent
+    /// (HEAD or 304). Normal responses always derive framing from the actual body.
+    public let representationLength: Int?
 
-    public init(status: Status, headers: [String: String] = [:], body: Data = Data()) {
+    public init(
+        status: Status,
+        headers: [String: String] = [:],
+        body: Data = Data(),
+        representationLength: Int? = nil
+    ) {
         self.status = status
         self.headers = headers
         self.body = body
+        self.representationLength = representationLength.map { max(0, $0) }
     }
 
-    public func headerData(connection: String = "keep-alive") -> Data {
+    public func headerData(connection: String = "keep-alive", includeBody: Bool = true) -> Data {
         var response = "HTTP/1.1 \(status.rawValue) \(reasonPhrase(for: status))\r\n"
-        var renderedHeaders = headers
-        renderedHeaders["Content-Length"] = "\(body.count)"
+        var renderedHeaders = headers.filter { $0.key.lowercased() != "content-length" }
+        if status == .notModified {
+            // RFC 9110 §8.6: omit rather than incorrectly advertise an empty representation.
+            if let representationLength {
+                renderedHeaders["Content-Length"] = "\(representationLength)"
+            }
+        } else {
+            let count = includeBody ? body.count : (representationLength ?? body.count)
+            renderedHeaders["Content-Length"] = "\(count)"
+        }
         renderedHeaders["Connection"] = renderedHeaders["Connection"] ?? connection
         for (key, value) in renderedHeaders.sorted(by: { $0.key < $1.key }) {
             response += "\(key): \(value)\r\n"
@@ -37,8 +54,8 @@ public struct HTTPResponse: Sendable {
     }
 
     public func encoded(includeBody: Bool = true) -> Data {
-        var data = headerData(connection: "close")
-        if includeBody {
+        var data = headerData(connection: "close", includeBody: includeBody)
+        if includeBody && status != .notModified {
             data.append(body)
         }
         return data

@@ -256,7 +256,8 @@ final class FeedDemoFixtureOrigin: Sendable {
                     headers: validationHeaders(for: resource)
                 )
             }
-            if let rangeHeader = request.headers["range"] {
+            // Range semantics are defined only for GET (RFC 9110 §14.2).
+            if request.method == .get, let rangeHeader = request.headers["range"] {
                 guard let range = FeedDemoFixtureOrigin.parseRange(
                     rangeHeader,
                     dataCount: resource.data.count
@@ -282,7 +283,8 @@ final class FeedDemoFixtureOrigin: Sendable {
             return HTTPResponse(
                 status: .ok,
                 headers: headers,
-                body: request.method == .head ? Data() : resource.data
+                body: request.method == .head ? Data() : resource.data,
+                representationLength: resource.data.count
             )
         }
 
