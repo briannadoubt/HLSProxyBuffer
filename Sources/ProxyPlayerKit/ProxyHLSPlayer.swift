@@ -978,6 +978,7 @@ public final class ProxyHLSPlayer {
     }
 
     private func fetchManifestText(from url: URL) async throws -> String {
+        let allowsInsecure = configuration.allowInsecureManifests
         let fetcher = HLSManifestFetcher(
             url: url,
             session: manifestSession,
@@ -985,7 +986,15 @@ public final class ProxyHLSPlayer {
             networkPolicy: configuration.networkPolicy,
             logger: logger
         )
-        return try await fetcher.fetchManifest(from: url, allowInsecure: configuration.allowInsecureManifests)
+        let result = try await ManifestCacheLoader.load(
+            from: url, cache: cache, allowsInsecure: allowsInsecure
+        ) { eTag, lastModified in
+            try await fetcher.fetchValidatedManifest(
+                from: url, allowInsecure: allowsInsecure,
+                ifNoneMatch: eTag, ifModifiedSince: lastModified
+            )
+        }
+        return result.text
     }
 
     private func selectVariant(from variants: [VariantPlaylist], policy: HLSRewriteConfiguration.QualityPolicy) -> VariantPlaylist? {
@@ -1899,6 +1908,12 @@ public final class ProxyHLSPlayer {
     }
 
     private func startPlaylistRefresh(at url: URL, generation: UInt64) async {
+        // A finalized timeline cannot change. Re-requesting it after prepared
+        // cache reuse adds network dependence to otherwise offline-ready VOD.
+        guard currentPlaylist?.isEndlist == false else {
+            await playlistRefresher.stop()
+            return
+        }
         await playlistRefresher.start(
             url: url,
             allowInsecure: configuration.allowInsecureManifests,

@@ -1769,6 +1769,18 @@ public final class HLSFeedEngine {
         let activeLoads = slots.reduce(into: 0) { count, slot in
             if slot.loadTask != nil { count += 1 }
         }
+        // Preparation can fail before a player lease exists (for example an
+        // offline cold-cache miss). Surface those failures without retaining
+        // them beyond the coordinator's current bounded working set.
+        var reportedFailures = failuresByItemID
+        if let coordinator = latestCoordinatorSnapshot, let generation = coordinator.generation {
+            for entry in coordinator.entries {
+                guard case .failed(let message) = entry.status else { continue }
+                reportedFailures[entry.itemID] = .init(
+                    itemID: entry.itemID, generation: generation, message: message
+                )
+            }
+        }
         snapshot = HLSFeedEngineSnapshot(
             generation: latestCoordinatorSnapshot?.generation,
             targetFocusedItemID: targetFocusedItemID,
@@ -1776,7 +1788,7 @@ public final class HLSFeedEngine {
             audibleItemID: audibleItemIDs.count == 1 ? audibleItemIDs[0] : nil,
             requestedDestinationItemID: requestedDestinationItemID,
             playbacks: playbacks,
-            failures: failuresByItemID.values.sorted { lhs, rhs in
+            failures: reportedFailures.values.sorted { lhs, rhs in
                 let lhsIndex = itemIndices[lhs.itemID] ?? Int.max
                 let rhsIndex = itemIndices[rhs.itemID] ?? Int.max
                 if lhsIndex == rhsIndex { return lhs.itemID.rawValue < rhs.itemID.rawValue }

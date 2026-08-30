@@ -144,6 +144,79 @@ final class HLSFeedEngineAVIntegrationTests: XCTestCase {
         await player.stopAndWait()
     }
 
+    func testNewNativePlayerStartsOfflineFromValidWarmDiskCache() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        defer { origin.stop() }
+        let item = FeedPlaybackItem(
+            id: "disk-revisit",
+            source: .stream(url: origin.fixturePlaylistURL(named: "short-a"), kind: .videoOnDemand),
+            estimatedPreparationBytes: 1_024 * 1_024
+        )
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hls-native-disk-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        var policy = FeedPlaybackPolicy.shortFormFeed
+        policy.eviction.diskDirectory = directory
+        policy.retry.manifest = .init(maxAttempts: 1, retryDelay: 0)
+        policy.retry.segment = .init(maxAttempts: 1)
+        let online = try HLSFeedEngine(
+            items: [item], policy: policy, sourceTransportPolicy: .allowLoopbackHTTP
+        )
+        try await online.update(signal(generation: 1, focused: item.id))
+        _ = await online.waitUntilSettled()
+        XCTAssertTrue(online.snapshot.failures.isEmpty)
+        let onlinePlayer = try XCTUnwrap(online.platformPlayer(for: item.id))
+        let onlineDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while onlinePlayer.timeControlStatus != .playing, ContinuousClock.now < onlineDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(onlinePlayer.timeControlStatus, .playing)
+        await online.stop()
+        XCTAssertEqual(origin.timelineSnapshot().filter {
+            $0.kind == .requestStarted && $0.path == "/short-a/playlist.m3u8"
+        }.count, 1, "Preparation and playback must share the same valid manifest bytes")
+        origin.stop()
+
+        let relaunched = try HLSFeedEngine(
+            items: [item], policy: policy, sourceTransportPolicy: .allowLoopbackHTTP
+        )
+        try await relaunched.update(signal(generation: 1, focused: item.id))
+        _ = await relaunched.waitUntilSettled()
+        XCTAssertTrue(relaunched.snapshot.failures.isEmpty, "\(relaunched.snapshot.failures)")
+        XCTAssertEqual(relaunched.snapshot.activeItemID, item.id)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while relaunched.snapshot.playback(for: item.id)?.hasStartedPlayback != true,
+              relaunched.snapshot.failures.isEmpty, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(relaunched.snapshot.playback(for: item.id)?.hasStartedPlayback, true)
+        await relaunched.stop()
+    }
+
+    func testOfflineColdCacheDoesNotPretendToStartNativePlayback() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        let url = origin.fixturePlaylistURL(named: "short-a")
+        origin.stop()
+        let item = FeedPlaybackItem(
+            id: "cold-offline", source: .stream(url: url, kind: .videoOnDemand),
+            estimatedPreparationBytes: 1_024 * 1_024
+        )
+        var policy = FeedPlaybackPolicy.shortFormFeed
+        policy.eviction.usesDiskCache = false
+        policy.retry.manifest = .init(maxAttempts: 1, retryDelay: 0)
+        let engine = try HLSFeedEngine(
+            items: [item], policy: policy, sourceTransportPolicy: .allowLoopbackHTTP
+        )
+        try await engine.update(signal(generation: 1, focused: item.id))
+        let snapshot = await engine.waitUntilSettled()
+        XCTAssertFalse(snapshot.failures.isEmpty)
+        XCTAssertNil(snapshot.activeItemID)
+        XCTAssertNil(snapshot.audibleItemID)
+        await engine.stop()
+    }
+
     private func signal(
         generation: UInt64,
         focused: FeedItemID

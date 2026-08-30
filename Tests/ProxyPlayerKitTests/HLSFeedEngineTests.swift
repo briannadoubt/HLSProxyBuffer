@@ -7,6 +7,25 @@ import XCTest
 
 @MainActor
 final class HLSFeedEngineTests: XCTestCase {
+    func testOriginPreparationFailureIsVisibleAndClearsOnSuccessfulRetry() async throws {
+        let items = makeItems(count: 1)
+        let engine = try makeEngine(
+            items: items, policy: makePolicy(maximumPlayerCount: 1, prefetchItemCount: 0),
+            factory: FakeFeedSessionFactory(), preparationFailureGenerations: [1]
+        )
+        try await engine.update(signal(generation: 1, focused: items[0].id))
+        let failed = await engine.waitUntilSettled()
+        XCTAssertEqual(failed.failures.map(\.itemID), [items[0].id])
+        XCTAssertEqual(failed.failures.first?.generation, .init(rawValue: 1))
+        XCTAssertNil(failed.activeItemID)
+
+        try await engine.update(signal(generation: 2, focused: items[0].id))
+        let recovered = await engine.waitUntilSettled()
+        XCTAssertTrue(recovered.failures.isEmpty)
+        XCTAssertEqual(recovered.activeItemID, items[0].id)
+        await engine.stop()
+    }
+
     func testMemoryPressureHookShedsSharedMemoryWithoutDiscardingDiskBytes() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("HLSFeedEnginePressure-\(UUID().uuidString)", isDirectory: true)
@@ -819,9 +838,10 @@ final class HLSFeedEngineTests: XCTestCase {
         telemetry: HLSFeedTelemetry? = nil,
         analytics: PlaybackAnalyticsTimeline? = nil,
         sharedCache: HLSSegmentCache? = nil,
+        preparationFailureGenerations: Set<UInt64> = [],
         playerPreparationRetryPolicy: HLSFeedPlayerPreparationRetryPolicy = .automaticFeed
     ) throws -> HLSFeedEngine {
-        let backend = ImmediateFeedPreparationBackend()
+        let backend = ImmediateFeedPreparationBackend(failingGenerations: preparationFailureGenerations)
         let coordinator = try FeedCoordinator(items: items, policy: policy, backend: backend)
         return try HLSFeedEngine(
             items: items,
@@ -912,8 +932,17 @@ final class HLSFeedEngineTests: XCTestCase {
 }
 
 private actor ImmediateFeedPreparationBackend: FeedPreparing {
+    private let failingGenerations: Set<UInt64>
+
+    init(failingGenerations: Set<UInt64> = []) {
+        self.failingGenerations = failingGenerations
+    }
+
     func prepare(_ request: FeedPreparationRequest) async throws -> FeedPreparedItem {
         try Task.checkCancellation()
+        if failingGenerations.contains(request.generation.rawValue) {
+            throw URLError(.notConnectedToInternet)
+        }
         return FeedPreparedItem(
             itemID: request.item.id,
             generation: request.generation,
