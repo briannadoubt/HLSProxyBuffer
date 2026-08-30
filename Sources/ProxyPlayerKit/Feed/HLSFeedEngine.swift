@@ -142,11 +142,22 @@ extension ProxyHLSPlayer: HLSFeedPlayerSession {
     func prepareForImmediatePlayback(
         retryPolicy: HLSFeedPlayerPreparationRetryPolicy
     ) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        // Loading the manifest can finish before buffered publication creates
+        // AVPlayer. Treat that interval as startup, not a terminal preroll error.
+        while player?.currentItem == nil {
+            if case .failed = state.status { return false }
+            guard !Task.isCancelled, clock.now < deadline else { return false }
+            do {
+                try await clock.sleep(for: .milliseconds(5))
+            } catch {
+                return false
+            }
+        }
         guard let player, let item = player.currentItem else { return false }
         player.pause()
 
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(5))
         while player.status == .unknown || item.status == .unknown {
             guard clock.now < deadline else { return false }
             do {
