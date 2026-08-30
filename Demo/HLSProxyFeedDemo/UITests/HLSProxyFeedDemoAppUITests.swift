@@ -174,6 +174,24 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
     }
 
     @MainActor
+    func testRealMediaCreditsAreAccessibleWithoutLeavingTheFeed() throws {
+        let app = XCUIApplication()
+        app.launch()
+        let creditsButton = app.buttons["media-credits-button"]
+        XCTAssertTrue(creditsButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(creditsButton.isHittable)
+        creditsButton.tap()
+        let credits = app.descendants(matching: .any)["media-credits"]
+        XCTAssertTrue(credits.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Source and reuse information"].firstMatch.exists)
+        let close = app.buttons["media-credits-close"]
+        XCTAssertTrue(close.isHittable)
+        close.tap()
+        XCTAssertTrue(creditsButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.scrollViews["primary-vertical-feed"].exists)
+    }
+
+    @MainActor
     func testAnalyticsInspectorShowsTypedSanitizedPublicPipeline() throws {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
