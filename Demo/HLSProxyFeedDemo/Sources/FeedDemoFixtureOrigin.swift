@@ -375,6 +375,12 @@ final class FeedDemoFixtureOrigin: Sendable {
 
         var result: [String: Resource] = [:]
         for case let fileURL as URL in enumerator {
+            // The real corpus has its own file-backed catalog. Never preload it
+            // into the explicitly synthetic fixture origin.
+            if fileURL.standardizedFileURL == root.appendingPathComponent("real").standardizedFileURL {
+                enumerator.skipDescendants()
+                continue
+            }
             let resolvedFileURL = fileURL.standardizedFileURL.resolvingSymlinksInPath()
             let values = try resolvedFileURL.resourceValues(forKeys: [.isRegularFileKey])
             guard values.isRegularFile == true else { continue }
