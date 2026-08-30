@@ -56,6 +56,22 @@ uncached segments are served on demand under the existing budgets. This follows
 [RFC8216's VOD mutability rules](https://www.rfc-editor.org/rfc/rfc8216.html#section-6.2.1)
 and prevents AVPlayer rejecting a partially published VOD playlist.
 
+Adaptive VOD publishes distinct, immutable rendition playlists and preserves
+their segment routes. Controller decisions set AVFoundation's bitrate preference;
+the native player performs the transition. Initial player construction waits for
+all initial playlist metadata to be published, including on a warm cache hit.
+The controller target is not a claim about which rendition was actually decoded.
+
+Coalesced segment requests now cancel an individual waiter promptly without
+cancelling other readers; the last cancelled waiter stops the origin request.
+Library-owned network sessions are invalidated when their owners are released,
+so successive feed engines do not accumulate idle connections. Caller-injected
+sessions remain caller-owned and usable.
+
+The synthetic qualification's 99% ready-handoff gate counts successful handoffs
+that were ready against attempts that were ready. Cold attempts and failures
+remain separately visible; they cannot inflate the ready-success numerator.
+
 ## Verification
 
 Focused tests cover the full real catalog, all eight native playback modes,

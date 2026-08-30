@@ -1,11 +1,129 @@
 import Foundation
+import AVFoundation
 import HLSCore
 import LocalProxy
-import ProxyPlayerKit
+@testable import ProxyPlayerKit
 import XCTest
 @testable import HLSProxyFeedDemo
 
 final class FeedDemoRealOriginTests: XCTestCase {
+    func testInjectedNetworkSessionSurvivesLibraryOwnerLifetimes() async throws {
+        let origin = try FeedDemoFixtureOrigin(configuration: .init(media: .real))
+        let baseURL = try await origin.start()
+        defer { origin.stop() }
+        let library = try XCTUnwrap(origin.library)
+        let resource = try segment(in: library)
+        let url = baseURL.appendingPathComponent(library.catalog.corpusVersion + "/" + resource.path)
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+
+        var fetcher: HLSSegmentFetcher? = HLSSegmentFetcher(session: session)
+        weak var releasedFetcher = fetcher
+        fetcher = nil
+        XCTAssertNil(releasedFetcher)
+        let afterFetcher = try await session.data(from: url).0
+        XCTAssertFalse(afterFetcher.isEmpty)
+
+        var refresher: PlaylistRefreshController? = PlaylistRefreshController(session: session)
+        weak var releasedRefresher = refresher
+        refresher = nil
+        XCTAssertNil(releasedRefresher)
+        let afterRefresher = try await session.data(from: url).0
+        XCTAssertFalse(afterRefresher.isEmpty)
+
+        var backend: HLSFeedPreparationBackend? = try HLSFeedPreparationBackend(
+            policy: .shortFormFeed, allowsInsecureManifests: true, session: session
+        )
+        weak var releasedBackend = backend
+        backend = nil
+        XCTAssertNil(releasedBackend)
+        let afterBackend = try await session.data(from: url).0
+        XCTAssertFalse(afterBackend.isEmpty)
+    }
+
+    @MainActor
+    func testAdaptivePlaybackPreservesPublishedVODPlaylistsAndRoutes() async throws {
+        if ProcessInfo.processInfo.environment["CI"] != nil,
+           ProcessInfo.processInfo.environment["RUN_PROXY_AV_TESTS"] == nil {
+            throw XCTSkip("Native AVPlayer opt-in on hosted CI")
+        }
+        let origin = try FeedDemoFixtureOrigin(configuration: .init(media: .real))
+        let baseURL = try await origin.start()
+        defer { origin.stop() }
+        let entries = try FeedDemoCatalog.entries(for: .shortForm, baseURL: baseURL, library: origin.library)
+        guard case .stream(let remoteURL, _) = entries[2].item.source else { return XCTFail("Missing stream") }
+        var configuration = try FeedPlaybackPolicy.shortFormFeed.makeProxyPlayerConfiguration()
+        configuration.allowInsecureManifests = true
+        configuration.cachePolicy.enableDiskCache = false
+        let proxy = ProxyHLSPlayer(configuration: configuration)
+        await proxy.load(from: remoteURL)
+        let prepared = await proxy.prepareForImmediatePlayback(retryPolicy: .automaticFeed)
+        XCTAssertTrue(prepared)
+        let masterURL = try XCTUnwrap(proxy.playlistURL())
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let master = try HLSParser().parse(String(decoding: try await session.data(from: masterURL).0, as: UTF8.self), baseURL: masterURL)
+        let variantURL = try XCTUnwrap(master.variants.first?.url)
+        let original = try await session.data(from: variantURL).0
+        let playlist = try XCTUnwrap(HLSParser().parse(String(decoding: original, as: UTF8.self), baseURL: variantURL).mediaPlaylist)
+        proxy.play()
+        let switchDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while proxy.telemetrySnapshot.variantSwitchReasonCounts.isEmpty, ContinuousClock.now < switchDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertFalse(proxy.telemetrySnapshot.variantSwitchReasonCounts.isEmpty, "Exercise an actual adaptive decision")
+        let revisited = try await session.data(from: variantURL).0
+        XCTAssertEqual(original, revisited, "A published VOD URL must stay byte-identical across adaptive decisions")
+        for segment in playlist.segments {
+            let (_, response) = try await session.data(from: segment.url)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200, "Published segment routes must remain available")
+        }
+        await proxy.stopAndWait()
+    }
+
+    @MainActor
+    func testRealClipsContinueAfterLoopRewind() async throws {
+        if ProcessInfo.processInfo.environment["CI"] != nil,
+           ProcessInfo.processInfo.environment["RUN_PROXY_AV_TESTS"] == nil { throw XCTSkip("Native AVPlayer opt-in on hosted CI") }
+        let origin = try FeedDemoFixtureOrigin(configuration: .init(media: .real))
+        let baseURL = try await origin.start()
+        defer { origin.stop() }
+        let entries = try FeedDemoCatalog.entries(for: .shortForm, baseURL: baseURL, library: origin.library)
+        var policy = FeedPlaybackPolicy.shortFormFeed
+        policy.eviction.usesDiskCache = false
+        for entry in entries.prefix(3) {
+            let engine = try HLSFeedEngine(items: [entry.item], policy: policy, sourceTransportPolicy: .allowLoopbackHTTP)
+            try await engine.update(.init(
+                generation: .init(rawValue: 1), focusedItemID: entry.id,
+                visibleItems: [.init(itemID: entry.id, fraction: 1, distanceInViewports: 0)],
+                observedAt: .zero
+            ))
+            _ = await engine.waitUntilSettled()
+            let player = try XCTUnwrap(engine.platformPlayer(for: entry.id))
+            let startDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+            while player.timeControlStatus != .playing, ContinuousClock.now < startDeadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertEqual(player.timeControlStatus, .playing)
+            let didSeek = await player.seek(
+                to: CMTime(seconds: 7.9, preferredTimescale: 600),
+                toleranceBefore: .zero, toleranceAfter: .zero
+            )
+            XCTAssertTrue(didSeek)
+            XCTAssertGreaterThan(player.currentTime().seconds, 7.5, "Seek must reach the final segment before measuring a loop")
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            while ContinuousClock.now < deadline {
+                let time = player.currentTime().seconds
+                if time > 0.2 && time < 7 && player.timeControlStatus == .playing { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertGreaterThan(player.currentTime().seconds, 0.2)
+            XCTAssertLessThan(player.currentTime().seconds, 7)
+            XCTAssertEqual(player.timeControlStatus, .playing)
+            await engine.stop()
+        }
+    }
+
     @MainActor
     func testAllRealModesReachPlatformPlayback() async throws {
         if ProcessInfo.processInfo.environment["CI"] != nil,
@@ -34,7 +152,8 @@ final class FeedDemoRealOriginTests: XCTestCase {
                   engine.snapshot.failures.isEmpty, ContinuousClock.now < deadline {
                 try await Task.sleep(for: .milliseconds(10))
             }
-            XCTAssertTrue(engine.snapshot.failures.isEmpty, "\(mode): \(engine.snapshot.failures)")
+            let originFailures = await origin.snapshot().records.filter { $0.statusCode >= 400 }.suffix(8)
+            XCTAssertTrue(engine.snapshot.failures.isEmpty, "\(mode): \(engine.snapshot.failures); origin: \(originFailures)")
             XCTAssertEqual(engine.snapshot.audibleItemID, item.id, "\(mode)")
             XCTAssertEqual(engine.snapshot.playback(for: item.id)?.hasStartedPlayback, true, "\(mode)")
             await engine.stop()

@@ -156,6 +156,10 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
     private let cache: HLSSegmentCache
     private let limiter: FeedFetchLimiter
 
+    deinit {
+        if managesManifestSession { manifestSession.invalidateAndCancel() }
+    }
+
     public init(
         policy: FeedPlaybackPolicy,
         allowsInsecureManifests: Bool = false,

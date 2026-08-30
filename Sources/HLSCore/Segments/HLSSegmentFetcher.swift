@@ -310,6 +310,10 @@ public actor HLSSegmentFetcher: SegmentSource {
         self.retryJitterSource = retryJitterSource
     }
 
+    deinit {
+        if managesSession { session.invalidateAndCancel() }
+    }
+
     public func updateValidationPolicy(_ policy: ValidationPolicy) {
         validationPolicy = policy
     }

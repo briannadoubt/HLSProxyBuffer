@@ -206,9 +206,12 @@ extension ProxyHLSPlayer: HLSFeedPlayerSession {
     }
 
     func restartPlayback() async {
-        guard let player else { return }
-        player.currentItem?.cancelPendingSeeks()
-        await player.seek(to: .zero)
+        guard let player, let item = player.currentItem else { return }
+        item.cancelPendingSeeks()
+        let completed = await player.seek(to: .zero)
+        guard completed, !Task.isCancelled, self.player === player,
+              player.currentItem === item, !player.isMuted
+        else { return }
         play()
     }
 }

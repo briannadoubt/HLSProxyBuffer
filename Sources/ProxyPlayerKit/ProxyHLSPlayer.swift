@@ -110,6 +110,14 @@ public final class ProxyHLSPlayer {
         let playlistIdentifier: String
     }
 
+    private struct ResolvedVODVariant: Sendable {
+        let variant: VariantPlaylist
+        let playlist: MediaPlaylist
+        let localURL: URL
+        let namespace: String
+        let playlistIdentifier: String
+    }
+
     private enum PlaylistPaths {
         static let variant = "variants/main.m3u8"
     }
@@ -159,6 +167,7 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var currentLiveWindow: HLSLiveWindow?
     @ObservationIgnored private var currentRewriteConfiguration: HLSRewriteConfiguration?
     @ObservationIgnored private var didPreparePlayerForCurrentLoad = false
+    @ObservationIgnored private var didPublishInitialPlaylists = false
     @ObservationIgnored private var isFeedPlaybackMuted = false
     @ObservationIgnored private lazy var server = ProxyServer(router: router)
     @ObservationIgnored private let diagnostics: ProxyPlayerDiagnostics
@@ -174,6 +183,8 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var renditionPlaylists: [String: MediaPlaylist] = [:]
     @ObservationIgnored private var resolvedRenditionReports: [ResolvedRenditionReport] = []
     @ObservationIgnored private var resolvedSupplementalPlaylists: [ResolvedRenditionReport] = []
+    @ObservationIgnored private var resolvedVODVariants: [ResolvedVODVariant] = []
+    @ObservationIgnored private var publishedVODPrimaryPlaylist: MediaPlaylist?
     @ObservationIgnored private var auxiliaryRegistrations: [AuxiliaryRegistration] = []
     @ObservationIgnored private var latestManifestRenditions: [HLSManifest.Rendition] = []
     @ObservationIgnored private var masterProtocolVersion: Int?
@@ -288,6 +299,7 @@ public final class ProxyHLSPlayer {
 
     deinit {
         telemetryObservationTask?.cancel()
+        manifestSession.invalidateAndCancel()
     }
 
     /// Ordered player-state changes with bounded buffering for non-SwiftUI consumers.
@@ -596,6 +608,7 @@ public final class ProxyHLSPlayer {
         generation: UInt64
     ) async throws {
         try ensureActiveSession(generation)
+        didPublishInitialPlaylists = false
         if server.port == nil {
             try server.start()
         }
@@ -696,8 +709,13 @@ public final class ProxyHLSPlayer {
         updateRenditionSelections(for: activeVariant)
         await loadRenditionPlaylists(config: rewriteConfiguration)
         try ensureActiveSession(generation)
+        try await resolveVODVariants(
+            selectedPlaylist: playlist, config: rewriteConfiguration, generation: generation
+        )
         await updateMasterPlaylist()
-        await updatePlaybackState(with: bufferState, generation: generation)
+        try ensureActiveSession(generation)
+        didPublishInitialPlaylists = true
+        await updatePlaybackState(with: await scheduler.bufferState(), generation: generation)
         await startPlaylistRefresh(at: playlistResult.url, generation: generation)
         startRenditionRefresh(generation: generation, config: rewriteConfiguration)
     }
@@ -707,6 +725,7 @@ public final class ProxyHLSPlayer {
         generation: UInt64
     ) async throws {
         try ensureActiveSession(generation)
+        didPublishInitialPlaylists = false
         if server.port == nil {
             try server.start()
         }
@@ -791,6 +810,8 @@ public final class ProxyHLSPlayer {
             category: .player
         )
         await updateMasterPlaylist()
+        try ensureActiveSession(generation)
+        didPublishInitialPlaylists = true
         await updatePlaybackState(with: bufferState, generation: generation)
     }
 
@@ -806,10 +827,14 @@ public final class ProxyHLSPlayer {
     private func preparePlayer(with url: URL) {
         removePlaybackTimeObserver()
         rebuildPlaybackTimeline()
+        let item = AVPlayerItem(url: url)
+        if !resolvedVODVariants.isEmpty {
+            item.preferredPeakBitRate = Double(activeVariant?.attributes.bandwidth ?? 0)
+        }
         if let existing = player {
-            existing.replaceCurrentItem(with: AVPlayerItem(url: url))
+            existing.replaceCurrentItem(with: item)
         } else {
-            player = AVPlayer(url: url)
+            player = AVPlayer(playerItem: item)
         }
         player?.isMuted = isFeedPlaybackMuted
         player?.volume = isFeedPlaybackMuted ? 0 : 1
@@ -1109,6 +1134,12 @@ public final class ProxyHLSPlayer {
     }
 
     private func clearResolvedRenditions() async {
+        for info in resolvedVODVariants {
+            await segmentCatalog.removeEntries(for: info.namespace)
+            await playlistStore.remove(info.playlistIdentifier)
+        }
+        resolvedVODVariants.removeAll()
+        publishedVODPrimaryPlaylist = nil
         for info in orderedRenditionInfos {
             if let namespace = info.namespace {
                 await segmentCatalog.removeEntries(for: namespace)
@@ -1511,6 +1542,63 @@ public final class ProxyHLSPlayer {
         await playlistStore.update(text, for: PlaylistStore.Identifier.master)
     }
 
+    /// Finalized renditions have immutable URLs and segment namespaces.
+    /// AVFoundation performs decoder transitions; ABR changes its bitrate
+    /// preference, never the bytes behind a published VOD URL.
+    private func resolveVODVariants(
+        selectedPlaylist: MediaPlaylist,
+        config: HLSRewriteConfiguration,
+        generation: UInt64
+    ) async throws {
+        guard selectedPlaylist.isEndlist, configuration.abrPolicy.isEnabled,
+              case .automatic = config.qualityPolicy, let selected = activeVariant
+        else { return }
+        let compatible = abrCompatibleVariants(in: variants, with: selected)
+        guard compatible.count > 1 else { return }
+        let ordered = [selected] + compatible.filter { $0 != selected }
+        let immutableConfig = HLSRewriteConfiguration(
+            proxyBaseURL: config.proxyBaseURL,
+            hideUntilBuffered: false,
+            qualityPolicy: config.qualityPolicy,
+            keyURLResolver: config.keyURLResolver
+        )
+        for variant in ordered {
+            try ensureActiveSession(generation)
+            let playlist: MediaPlaylist
+            if variant == selected {
+                playlist = selectedPlaylist
+            } else {
+                do {
+                    // Metadata only, sequential and cancellation-aware. Media
+                    // bodies stay on-demand and use the shared bounded cache.
+                    playlist = try await fetchVariantPlaylist(for: variant)
+                } catch {
+                    try ensureActiveSession(generation)
+                    logger.log("Could not publish an alternate VOD rendition: \(error)", category: .player)
+                    continue
+                }
+            }
+            try ensureActiveSession(generation)
+            guard playlist.isEndlist else { continue }
+            let namespace = "vod-\(Self.digest(for: variant.url.absoluteString))"
+            let identifier = PlaylistStore.Identifier.rendition(namespace)
+            let text = await manifestProcessor.rewrite(
+                mediaPlaylist: playlist, config: immutableConfig,
+                bufferState: BufferState(), namespace: namespace
+            )
+            try ensureActiveSession(generation)
+            await segmentCatalog.update(with: playlist, namespace: namespace)
+            await playlistStore.update(text, for: identifier)
+            resolvedVODVariants.append(.init(
+                variant: variant, playlist: playlist,
+                localURL: config.proxyBaseURL.appendingPathComponent("renditions/\(namespace).m3u8"),
+                namespace: namespace, playlistIdentifier: identifier
+            ))
+        }
+        publishedVODPrimaryPlaylist = selectedPlaylist
+        await adaptiveController.updateVariants(resolvedVODVariants.map(\.variant))
+    }
+
     private func buildMasterPlaylist(variantURL: URL) -> String {
         var lines: [String] = [
             "#EXTM3U",
@@ -1573,8 +1661,15 @@ public final class ProxyHLSPlayer {
             lines.append("#EXT-X-MEDIA:\(attributes.joined(separator: ","))")
         }
 
-        lines.append("#EXT-X-STREAM-INF:\(streamAttributes(for: activeVariant))")
-        lines.append(variantURL.absoluteString)
+        if resolvedVODVariants.isEmpty {
+            lines.append("#EXT-X-STREAM-INF:\(streamAttributes(for: activeVariant))")
+            lines.append(variantURL.absoluteString)
+        } else {
+            for info in resolvedVODVariants {
+                lines.append("#EXT-X-STREAM-INF:\(streamAttributes(for: info.variant))")
+                lines.append(info.localURL.absoluteString)
+            }
+        }
         return lines.joined(separator: "\n")
     }
 
@@ -1759,7 +1854,7 @@ public final class ProxyHLSPlayer {
 
     private func refreshPlaylist(bufferState: BufferState) async {
         guard
-            let playlist = currentPlaylist,
+            let playlist = publishedVODPrimaryPlaylist ?? currentPlaylist,
             let config = currentRewriteConfiguration
         else { return }
 
@@ -1774,6 +1869,7 @@ public final class ProxyHLSPlayer {
     private func handleBufferStateChange(_ bufferState: BufferState, generation: UInt64) async {
         guard generation == sessionGeneration else { return }
         latestBufferState = bufferState
+        guard didPublishInitialPlaylists else { return }
         await updateLiveEdgeTelemetry(playedThrough: bufferState.playedThroughSequence)
         await updatePlaybackState(with: bufferState, generation: generation)
         guard generation == sessionGeneration else { return }
@@ -2064,7 +2160,13 @@ public final class ProxyHLSPlayer {
         defer { abrSwitchInProgress = false }
 
         do {
-            let playlist = try await fetchVariantPlaylist(for: variant)
+            let published = resolvedVODVariants.first { $0.variant == variant }
+            let playlist: MediaPlaylist
+            if let published {
+                playlist = published.playlist
+            } else {
+                playlist = try await fetchVariantPlaylist(for: variant)
+            }
             let referenceState: BufferState
             if let bufferState {
                 referenceState = bufferState
@@ -2075,6 +2177,9 @@ public final class ProxyHLSPlayer {
             }
             let alignedPlaylist = align(playlist: playlist, to: referenceState)
             activeVariant = variant
+            if published != nil {
+                player?.currentItem?.preferredPeakBitRate = Double(variant.attributes.bandwidth ?? 0)
+            }
             updateRenditionSelections(for: variant)
             currentPlaylist = alignedPlaylist
             extendPlaybackTimeline(with: alignedPlaylist)
@@ -2106,6 +2211,7 @@ public final class ProxyHLSPlayer {
     }
 
     private func align(playlist: MediaPlaylist, to bufferState: BufferState?) -> MediaPlaylist {
+        guard !playlist.isEndlist else { return playlist }
         guard let floor = bufferState?.playedThroughSequence else { return playlist }
         let minimumSequence = floor + 1
         let visibleSegments = playlist.segments.drop { $0.sequence < minimumSequence }
