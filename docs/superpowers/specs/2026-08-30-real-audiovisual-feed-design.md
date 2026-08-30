@@ -4,7 +4,7 @@ Date: 2026-08-30
 
 Scope: HLS-48, delivered in order through HLS-49, HLS-50, and HLS-51.
 
-Status: Bundled-media approach approved by Bri; this written spec awaits review.
+Status: Written spec approved by Bri with “proceed”; implementation in progress.
 
 ## Outcome
 

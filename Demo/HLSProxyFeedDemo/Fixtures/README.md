@@ -1,4 +1,26 @@
-# Feed fixture provenance
+# Feed fixture collections
+
+`real/` contains 24 distinct audiovisual excerpts and one continuous cut in two
+HLS renditions. Its catalog records measured stream metadata, provenance, hashes,
+and complete-rendition decode analysis. See [the media notices](real/NOTICES.md)
+for licensing and regeneration. The media retains third-party terms, separate
+from the software license. The synthetic origin deliberately excludes this
+larger collection; real-media integration uses its metadata/file-backed loader.
+
+Maintainers can check byte-identical regeneration without replacing the installed
+corpus (source originals must already be in the external cache):
+
+```sh
+swift Scripts/generate-real-feed-media.swift /absolute/source-cache --verify
+swift test --filter FeedDemoMediaLibraryTests
+```
+
+The importer pins FFmpeg/FFprobe 8.1.1, single-threaded decoding/scaling/encoding,
+and bitexact flags. Both ordinary and verification runs decode every rendition;
+failed output is retained in an explicitly printed temporary staging directory.
+Verification also checks the installed bytes, not only catalog assertions.
+
+## Synthetic fixture provenance
 
 The media in `short-a`, `short-b`, and `long-form` is generated entirely from
 FFmpeg `lavfi` color and sine sources by `Scripts/generate-feed-fixtures.sh`.

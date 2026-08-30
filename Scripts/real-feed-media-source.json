@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "revision": "real-v1",
+  "sources": [
+    {
+      "id": "bunny",
+      "filename": "bbb_sunflower_1080p_30fps_normal.mp4",
+      "title": "Big Buck Bunny, Sunflower version",
+      "author": "Blender Foundation (2008); Janus Bager Kristensen (2013)",
+      "credit": "(c) copyright 2008, Blender Foundation / www.bigbuckbunny.org. Sunflower rendering: Janus Bager Kristensen (2013). Music and sound design: Jan Morgenstern.",
+      "license": "CC-BY-3.0",
+      "licenseURL": "https://creativecommons.org/licenses/by/3.0/",
+      "rightsURL": "https://peach.blender.org/about/",
+      "sourceURL": "https://download.blender.org/demo/movies/BBB/bbb_sunflower_1080p_30fps_normal.mp4.zip",
+      "downloadURL": "https://mirror.nju.edu.cn/blender/blender-demo/movies/BBB/bbb_sunflower_1080p_30fps_normal.mp4.zip",
+      "sha256": "ae51005850b0ff757fe60c3dd7a12d754d3cd2397d87d939b55235e457f97658",
+      "rightsNotes": "The project explicitly permits reuse of parts of the film with the stated attribution. Source MP4 metadata identifies this Sunflower rendering as Creative Commons Attribution 3.0 and names both creators. These excerpts retain synchronized film audio. The separately released isolated score has different terms and is not imported. No logo or endorsement rights are asserted."
+    },
+    {
+      "id": "atlantis",
+      "filename": "atlantis.mp4",
+      "title": "NASA's Final Space Shuttle Launch 10th Anniversary Replay",
+      "author": "NASA",
+      "credit": "NASA — STS-135 launch, July 8, 2011. Prerecorded footage used for educational playback testing; NASA does not endorse this project.",
+      "license": "NASA-media-usage-guidelines",
+      "licenseURL": "https://www.nasa.gov/nasa-brand-center/images-and-media/",
+      "rightsURL": "https://images-assets.nasa.gov/video/NHQ_2021_0708_NASA%27s%20Final%20Space%20Shuttle%20Launch%2010th%20Anniversary%20Replay/metadata.json",
+      "sourceURL": "https://images.nasa.gov/details/NHQ_2021_0708_NASA%27s%20Final%20Space%20Shuttle%20Launch%2010th%20Anniversary%20Replay",
+      "downloadURL": "https://images-assets.nasa.gov/video/NHQ_2021_0708_NASA%27s%20Final%20Space%20Shuttle%20Launch%2010th%20Anniversary%20Replay/NHQ_2021_0708_NASA%27s%20Final%20Space%20Shuttle%20Launch%2010th%20Anniversary%20Replay~large.mp4",
+      "sha256": "2c0f6db1f49e12afe947c96f49dbf78978c602979edce3fc84c8375460138412",
+      "rightsNotes": "NASA HQ asset metadata identifies NASA launch coverage and does not mark third-party copyright. Selected intervals show the shuttle and onboard cameras with original mission commentary/launch sound, not a music montage or identifiable-person promotion. NASA permits factual educational/informational use with acknowledgement and without endorsement. Logos and publicity rights are not licensed. Adopters must independently clear promotional or other uses outside these guidelines."
+    }
+  ],
+  "clips": [
+    {"id":"feed-01","sourceID":"atlantis","startSeconds":1150,"duration":8,"title":"Atlantis lifts off","kind":"liveAction","audioContent":["speech","environment"]},
+    {"id":"feed-02","sourceID":"bunny","startSeconds":32,"duration":8,"title":"Morning in the meadow","kind":"animation","audioContent":["music","effects"]},
+    {"id":"feed-03","sourceID":"bunny","startSeconds":64,"duration":8,"title":"A very large rabbit","kind":"animation","audioContent":["music","effects"]},
+    {"id":"feed-04","sourceID":"atlantis","startSeconds":1158,"duration":8,"title":"Through the clouds","kind":"liveAction","audioContent":["speech","environment"]},
+    {"id":"feed-05","sourceID":"bunny","startSeconds":96,"duration":8,"title":"Forest neighbors","kind":"animation","audioContent":["music","effects"]},
+    {"id":"feed-06","sourceID":"bunny","startSeconds":128,"duration":8,"title":"Small wings","kind":"animation","audioContent":["music","effects"]},
+    {"id":"feed-07","sourceID":"atlantis","startSeconds":1166,"duration":8,"title":"Onboard ascent","kind":"liveAction","audioContent":["speech","environment"]},
+    {"id":"feed-08","sourceID":"bunny","startSeconds":160,"duration":8,"title":"Woodland mischief","kind":"animation","audioContent":["music","effects"]},
+    {"id":"feed-09","sourceID":"bunny","startSeconds":192,"duration":8,"title":"Trouble in the trees","kind":"animation","audioContent":["music","effects"]},
+    {"id":"feed-10","sourceID":"atlantis","startSeconds":1174,"duration":8,"title":"Climbing away","kind":"liveAction","audioContent":["speech","environment"]},
+    {"id":"feed-11","sourceID":"bunny","startSeconds":224,"duration":8,"title":"A change of plan","kind":"animation","audioContent":["music","effects"]},
+    {"id":"feed-12","sourceID":"bunny","startSeconds":256,"duration":8,"title":"Bunny gets to work","kind":"animation","audioContent":["music","effects"]},
+    {"id":"feed-13","sourceID":"atlantis","startSeconds":1182,"duration":8,"title":"Launch trail","kind":"liveAction","audioContent":["speech","environment"]},
+    {"id":"feed-14","sourceID":"bunny","startSeconds":288,"duration":8,"title":"Between the branches","kind":"animation","audioContent":["music","effects"]},
+    {"id":"feed-15","sourceID":"bunny","startSeconds":320,"duration":8,"title":"The chase begins","kind":"animation","audioContent":["music","effects"]},
+    {"id":"feed-16","sourceID":"atlantis","startSeconds":1190,"duration":8,"title":"Earth below","kind":"liveAction","audioContent":["speech","environment"]},
+    {"id":"feed-17","sourceID":"bunny","startSeconds":352,"duration":8,"title":"Flying through the forest","kind":"animation","audioContent":["music","effects"]},
+    {"id":"feed-18","sourceID":"bunny","startSeconds":384,"duration":8,"title":"A close call","kind":"animation","audioContent":["music","effects"]},
+    {"id":"feed-19","sourceID":"atlantis","startSeconds":1198,"duration":8,"title":"Shuttle camera","kind":"liveAction","audioContent":["speech","environment"]},
+    {"id":"feed-20","sourceID":"bunny","startSeconds":416,"duration":8,"title":"Fast turns","kind":"animation","audioContent":["music","effects"]},
+    {"id":"feed-21","sourceID":"bunny","startSeconds":448,"duration":8,"title":"The forest answers","kind":"animation","audioContent":["music","effects"]},
+    {"id":"feed-22","sourceID":"atlantis","startSeconds":1206,"duration":8,"title":"Toward orbit","kind":"liveAction","audioContent":["speech","environment"]},
+    {"id":"feed-23","sourceID":"bunny","startSeconds":480,"duration":8,"title":"One last surprise","kind":"animation","audioContent":["music","effects"]},
+    {"id":"feed-24","sourceID":"bunny","startSeconds":112,"duration":8,"title":"Back to the meadow","kind":"animation","audioContent":["music","effects"]},
+    {"id":"continuous","sourceID":"bunny","startSeconds":40,"duration":32,"title":"A quiet morning — continuous cut","kind":"animation","audioContent":["music","effects"]}
+  ]
+}
