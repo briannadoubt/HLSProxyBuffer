@@ -167,6 +167,7 @@ private struct FeedDemoQualificationView: View {
 
 private struct FeedDemoShell: View {
     @State private var isInspectorPresented = false
+    @State private var isCreditsPresented = false
 
     let model: FeedDemoModel
     let showsQualificationControls: Bool
@@ -204,6 +205,30 @@ private struct FeedDemoShell: View {
             }
         }
         .tint(.mint)
+        .overlay(alignment: .bottomLeading) {
+            if !model.mediaSources.isEmpty {
+                Button {
+                    isCreditsPresented = true
+                } label: {
+                    Label {
+                        Text("Media credits", bundle: #bundle)
+                    } icon: {
+                        Image(systemName: "info.circle")
+                    }
+                    .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+                .tint(.mint)
+                .padding(.leading, 16)
+                .padding(.bottom, 120)
+                .accessibilityIdentifier("media-credits-button")
+            }
+        }
+        .sheet(isPresented: $isCreditsPresented) {
+            FeedDemoMediaCreditsView(sources: model.mediaSources) {
+                isCreditsPresented = false
+            }
+        }
         .sheet(isPresented: $isInspectorPresented) {
             FeedDemoAnalyticsInspectorView(
                 inspector: model.analyticsInspector,
@@ -354,6 +379,12 @@ private struct FeedDemoPrimaryChrome: View {
                 .font(.caption2)
                 .foregroundStyle(.white.opacity(0.68))
                 .accessibilityIdentifier("background-warming-disclosure")
+            if model.usesColdOriginFallback {
+                Text("Preferred demo port is busy; this launch uses a cold cache identity.", bundle: #bundle)
+                    .font(.caption2)
+                    .foregroundStyle(.yellow)
+                    .accessibilityIdentifier("cold-origin-fallback")
+            }
             if model.selectedMode == .liveDVR, model.engine != nil {
                 FeedDemoLiveControls(
                     onSeek: { seconds in
@@ -421,6 +452,13 @@ private struct FeedDemoPrimaryHUD: View {
                     title: LocalizedStringResource("Cancels", bundle: #bundle),
                     value: "\(metrics.acknowledgedCancellationCount)"
                 )
+            }
+            if let attribution = entries.first(where: { $0.id == focusedItemID })?.attribution {
+                Text(verbatim: attribution)
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.75))
+                    .lineLimit(2)
+                    .accessibilityIdentifier("feed-media-attribution")
             }
         }
         .foregroundStyle(.white)

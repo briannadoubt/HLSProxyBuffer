@@ -1,10 +1,63 @@
 #if canImport(Network)
 import XCTest
+import Network
 @testable import LocalProxy
 @testable import HLSCore
 
 @available(macOS 12.0, *)
 final class ProxyServerIntegrationTests: XCTestCase {
+    func testPipelinedRequestArrivingDuringRouteWaitIsServedInOrder() async throws {
+        let firstStarted = expectation(description: "first route admitted")
+        let router = ProxyRouter()
+        router.register(path: "/*") { request in
+            if request.path == "/first" {
+                firstStarted.fulfill()
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            return HTTPResponse(status: .ok, body: Data(request.path.utf8))
+        }
+        let server = ProxyServer(router: router)
+        let url = try await server.startAndWait()
+        defer { server.stop() }
+        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: UInt16(try XCTUnwrap(url.port))))
+        let connection = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
+        connection.start(queue: DispatchQueue(label: "hls.pipeline-test"))
+        defer { connection.cancel() }
+        let timeout = Task {
+            try? await Task.sleep(for: .seconds(3))
+            if !Task.isCancelled { connection.cancel() }
+        }
+        defer { timeout.cancel() }
+        try await send("GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n", on: connection)
+        await fulfillment(of: [firstStarted], timeout: 1)
+        try await send("GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", on: connection)
+        var received = Data()
+        while true {
+            let chunk: (Data?, Bool) = try await withCheckedThrowingContinuation { continuation in
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, complete, error in
+                    if let error { continuation.resume(throwing: error) }
+                    else { continuation.resume(returning: (data, complete)) }
+                }
+            }
+            if let data = chunk.0 { received.append(data) }
+            if chunk.1 { break }
+        }
+        let text = String(decoding: received, as: UTF8.self)
+        XCTAssertEqual(text.components(separatedBy: "HTTP/1.1 200 OK").count - 1, 2)
+        let first = try XCTUnwrap(text.range(of: "/first"))
+        let second = try XCTUnwrap(text.range(of: "/second"))
+        XCTAssertLessThan(first.lowerBound, second.lowerBound)
+    }
+
+    private func send(_ text: String, on connection: NWConnection) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connection.send(content: Data(text.utf8), completion: .contentProcessed { error in
+                if let error { continuation.resume(throwing: error) }
+                else { continuation.resume() }
+            })
+        }
+    }
+
     func testOnDemandFetchServesSegmentAndRefreshesPlaylist() async throws {
         let playlist = MediaPlaylist(
             targetDuration: 4,
