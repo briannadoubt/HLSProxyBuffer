@@ -152,14 +152,18 @@ public final class ProxyServer: Sendable {
         remainder: Data,
         on connection: NWConnection
     ) {
-        let header = response.headerData(connection: keepAlive ? "keep-alive" : "close")
+        let includesBody = request?.method != .head && response.status != .notModified
+        let header = response.headerData(
+            connection: keepAlive ? "keep-alive" : "close",
+            includeBody: includesBody
+        )
         connection.send(content: header, completion: .contentProcessed { [weak self] error in
             guard let self else { return }
             guard error == nil else {
                 connection.cancel()
                 return
             }
-            let shouldSendBody = request?.method != .head && !response.body.isEmpty
+            let shouldSendBody = includesBody && !response.body.isEmpty
             guard shouldSendBody else {
                 finishResponse(keepAlive: keepAlive, remainder: remainder, on: connection)
                 return

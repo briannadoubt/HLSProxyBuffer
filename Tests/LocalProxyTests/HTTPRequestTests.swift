@@ -2,6 +2,37 @@ import XCTest
 @testable import LocalProxy
 
 final class HTTPRequestTests: XCTestCase {
+    func testHeadUsesRepresentationLengthWithoutAllocatingBody() {
+        let response = HTTPResponse(status: .ok, representationLength: 42)
+        XCTAssertTrue(response.body.isEmpty)
+        let head = String(decoding: response.encoded(includeBody: false), as: UTF8.self)
+        XCTAssertTrue(head.contains("Content-Length: 42\r\n"))
+        XCTAssertTrue(head.hasSuffix("\r\n\r\n"))
+        let get = String(decoding: response.encoded(), as: UTF8.self)
+        XCTAssertTrue(get.contains("Content-Length: 0\r\n"), "GET framing must match actual bytes")
+    }
+
+    func testNotModifiedOmitsUnknownLengthAndNeverEncodesBody() {
+        let response = HTTPResponse(status: .notModified, body: Data("ignored".utf8))
+        let encoded = String(decoding: response.encoded(), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("Content-Length:"))
+        XCTAssertTrue(encoded.hasSuffix("\r\n\r\n"))
+        let known = HTTPResponse(status: .notModified, representationLength: 42)
+        XCTAssertTrue(String(decoding: known.headerData(), as: UTF8.self).contains("Content-Length: 42\r\n"))
+    }
+
+    func testResponseRemovesCaseInsensitiveConflictingLengthHeaders() {
+        let response = HTTPResponse(
+            status: .ok,
+            headers: ["content-length": "999", "Content-Length": "888"],
+            body: Data("actual".utf8)
+        )
+        let header = String(decoding: response.headerData(), as: UTF8.self)
+        XCTAssertTrue(header.contains("Content-Length: 6\r\n"))
+        XCTAssertFalse(header.contains("999"))
+        XCTAssertFalse(header.contains("888"))
+    }
+
     func testParserWaitsForFragmentedHeaders() throws {
         let firstFragment = Data("GET /playlist.m3u8 HTTP/1.1\r\nHost: localhost\r\n".utf8)
         XCTAssertNil(try HTTPRequestParser.parseAvailable(data: firstFragment))

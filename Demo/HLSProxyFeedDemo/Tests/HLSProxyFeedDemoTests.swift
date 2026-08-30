@@ -214,6 +214,35 @@ final class HLSProxyFeedDemoTests: XCTestCase {
         XCTAssertNotNil(http.value(forHTTPHeaderField: "ETag"))
     }
 
+    func testFixtureOriginHeadAdvertisesFullLengthWithoutBodyAndIgnoresRange() async throws {
+        let origin = try FeedDemoFixtureOrigin()
+        let baseURL = try await origin.start()
+        defer { origin.stop() }
+        let config = URLSessionConfiguration.ephemeral
+        config.urlCache = nil
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let url = baseURL.appendingPathComponent("short-a/segment-000.m4s")
+        let (getData, getResponse) = try await session.data(from: url)
+        let get = try XCTUnwrap(getResponse as? HTTPURLResponse)
+        XCTAssertGreaterThan(getData.count, 0)
+        for range in [nil, "bytes=0-31"] as [String?] {
+            var request = URLRequest(url: url)
+            request.httpMethod = "HEAD"
+            request.setValue(range, forHTTPHeaderField: "Range")
+            let (data, response) = try await session.data(for: request)
+            let head = try XCTUnwrap(response as? HTTPURLResponse)
+            XCTAssertEqual(head.statusCode, 200)
+            XCTAssertEqual(head.value(forHTTPHeaderField: "Content-Length"), String(getData.count))
+            XCTAssertEqual(head.value(forHTTPHeaderField: "ETag"), get.value(forHTTPHeaderField: "ETag"))
+            XCTAssertNil(head.value(forHTTPHeaderField: "Content-Range"))
+            XCTAssertTrue(data.isEmpty)
+        }
+        let accounting = await origin.snapshot()
+        XCTAssertEqual(accounting.responseByteCount, getData.count)
+        XCTAssertEqual(accounting.records.suffix(2).map(\.responseBytes), [0, 0])
+    }
+
     func testFixtureOriginControlsFaultsOfflinePoorNetworkAndRequestAccounting() async throws {
         let origin = try FeedDemoFixtureOrigin()
         let baseURL = try await origin.start()
