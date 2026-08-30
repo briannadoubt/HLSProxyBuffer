@@ -128,6 +128,33 @@ final class HLSRewriterTests: XCTestCase {
         XCTAssertTrue(output.contains("#EXT-X-MEDIA-SEQUENCE:7"), "Playlist should slide window forward when playhead advances")
     }
 
+    func testExplicitVODRemainsCompleteAndImmutableAcrossBufferStates() throws {
+        let vod = MediaPlaylist(
+            targetDuration: 4, mediaSequence: 1, segments: playlist.segments,
+            isEndlist: true, playlistType: "VOD"
+        )
+        let configuration = HLSRewriteConfiguration(
+            proxyBaseURL: try XCTUnwrap(URL(string: "http://127.0.0.1:8080")),
+            hideUntilBuffered: true
+        )
+        let states = [
+            BufferState(readySequences: [], prefetchDepthSeconds: 0),
+            BufferState(readySequences: [1], prefetchDepthSeconds: 4),
+            BufferState(readySequences: [1, 2], prefetchDepthSeconds: 8),
+            BufferState(readySequences: [], prefetchDepthSeconds: 0, playedThroughSequence: 10),
+        ]
+        let outputs = states.map {
+            HLSRewriter().rewrite(mediaPlaylist: vod, config: configuration, bufferState: $0)
+        }
+        XCTAssertEqual(Set(outputs).count, 1, "VOD cannot change as buffering or playback advances")
+        let output = try XCTUnwrap(outputs.first)
+        XCTAssertTrue(output.contains("#EXT-X-PLAYLIST-TYPE:VOD"))
+        XCTAssertTrue(output.contains("#EXT-X-ENDLIST"))
+        XCTAssertTrue(output.contains("#EXT-X-MEDIA-SEQUENCE:1"))
+        XCTAssertTrue(output.contains("segment-1"))
+        XCTAssertTrue(output.contains("segment-2"))
+    }
+
     func testNamespacedSegmentsProduceUniqueKeys() {
         let rewriter = HLSRewriter()
         let bufferState = BufferState(readySequences: [1], prefetchDepthSeconds: 4)

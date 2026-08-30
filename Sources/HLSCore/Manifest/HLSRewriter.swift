@@ -153,6 +153,11 @@ public struct HLSRewriter: Sendable {
         namespace: String? = nil
     ) -> String {
         var lines: [String] = ["#EXTM3U"]
+        // RFC 8216: an explicit VOD playlist is immutable. Buffer readiness
+        // controls player startup, not which entries exist in its timeline;
+        // uncached entries are served on demand through the bounded proxy.
+        let isImmutableVOD = mediaPlaylist.playlistType == "VOD"
+        let hidesPendingSegments = config.hideUntilBuffered && !isImmutableVOD
         let lowLatencyEnabled = config.lowLatencyOptions != nil
             || mediaPlaylist.serverControl != nil
             || mediaPlaylist.partTargetDuration != nil
@@ -197,7 +202,7 @@ public struct HLSRewriter: Sendable {
 
         let historyWindow = 4
         let lowestVisibleSequence: Int = {
-            if let played = bufferState.playedThroughSequence {
+            if !isImmutableVOD, let played = bufferState.playedThroughSequence {
                 return max(mediaPlaylist.mediaSequence, played - historyWindow + 1)
             }
             return mediaPlaylist.mediaSequence
@@ -228,7 +233,7 @@ public struct HLSRewriter: Sendable {
                 bufferState: bufferState,
                 configuration: config
             ) ?? []
-            if config.hideUntilBuffered && !bufferState.isReady(segment) && visibleParts.isEmpty {
+            if hidesPendingSegments && !bufferState.isReady(segment) && visibleParts.isEmpty {
                 pendingSegments.append(segment)
                 continue
             }
@@ -249,7 +254,7 @@ public struct HLSRewriter: Sendable {
                 lines.append(renderPartLine(for: part, namespace: namespace, configuration: config))
             }
 
-            if config.hideUntilBuffered && !bufferState.isReady(segment) {
+            if hidesPendingSegments && !bufferState.isReady(segment) {
                 pendingSegments.append(segment)
                 continue
             }
@@ -296,7 +301,7 @@ public struct HLSRewriter: Sendable {
             }
         }
 
-        if config.hideUntilBuffered && !pendingSegments.isEmpty {
+        if hidesPendingSegments && !pendingSegments.isEmpty {
             logger.log(
                 "Hiding \(pendingSegments.count) of \(mediaPlaylist.segments.count) segments until buffered.",
                 level: .debug,
