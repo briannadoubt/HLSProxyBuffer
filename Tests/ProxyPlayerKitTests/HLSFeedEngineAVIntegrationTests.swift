@@ -125,6 +125,25 @@ final class HLSFeedEngineAVIntegrationTests: XCTestCase {
         XCTAssertTrue(isEffectivelyMuted(warmedPlayer))
     }
 
+    func testPrimingWaitsForPlayerConstructionAndCancelsPromptly() async throws {
+        let player = ProxyHLSPlayer()
+        var completed = false
+        let preparation = Task { @MainActor in
+            let result = await player.prepareForImmediatePlayback(retryPolicy: .automaticFeed)
+            completed = true
+            return result
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertNil(player.player)
+        XCTAssertFalse(completed, "An absent player during startup is not a terminal failure")
+        let cancelledAt = ContinuousClock.now
+        preparation.cancel()
+        let didPrepare = await preparation.value
+        XCTAssertFalse(didPrepare)
+        XCTAssertLessThan(cancelledAt.duration(to: .now), .milliseconds(250))
+        await player.stopAndWait()
+    }
+
     private func signal(
         generation: UInt64,
         focused: FeedItemID

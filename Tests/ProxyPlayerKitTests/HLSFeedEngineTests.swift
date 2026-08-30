@@ -230,12 +230,23 @@ final class HLSFeedEngineTests: XCTestCase {
     func testNewGenerationCancelsAndRejectsStalePlayerCompletion() async throws {
         let items = makeItems(count: 3)
         let policy = try makePolicy(maximumPlayerCount: 1, prefetchItemCount: 0)
-        let factory = FakeFeedSessionFactory(loadDelay: .milliseconds(100))
+        let factory = FakeFeedSessionFactory()
+        let firstLoadStarted = expectation(description: "generation 1 player load started")
+        let firstLoadCompletion = FeedTestLoadGate()
+        defer { firstLoadCompletion.release() }
+        factory.beforeLoadCompletion = { itemID in
+            guard itemID == items[0].id else { return }
+            firstLoadStarted.fulfill()
+            // Deliberately ignore cancellation until the test releases the old
+            // completion. A scheduler yield cannot guarantee this overlap.
+            await firstLoadCompletion.wait()
+        }
         let engine = try makeEngine(items: items, policy: policy, factory: factory)
 
         try await engine.update(signal(generation: 1, focused: items[0].id))
-        await Task.yield()
+        await fulfillment(of: [firstLoadStarted], timeout: 2)
         try await engine.update(signal(generation: 2, focused: items[1].id))
+        firstLoadCompletion.release()
         let snapshot = await engine.waitUntilSettled()
 
         XCTAssertEqual(snapshot.generation, .init(rawValue: 2))
@@ -929,6 +940,7 @@ private extension FeedPlaybackSource {
 
 @MainActor
 private final class FakeFeedSessionFactory {
+    var beforeLoadCompletion: (@MainActor (FeedItemID) async -> Void)?
     let loadDelay: Duration
     let failingItemIDs: Set<FeedItemID>
     let failsPreparation: Bool
@@ -967,6 +979,7 @@ private final class FakeFeedSessionFactory {
         session.onPlaybackMutation = { [weak self] in
             self?.captureAudiblePlaybackCount()
         }
+        session.beforeLoadCompletion = beforeLoadCompletion
         sessions.append(session)
         captureAudiblePlaybackCount()
         return session
@@ -993,6 +1006,7 @@ private final class FakeFeedSessionFactory {
 
 @MainActor
 private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
+    var beforeLoadCompletion: (@MainActor (FeedItemID) async -> Void)?
     private(set) var state = PlayerState()
     let feedPlatformPlayer: AVPlayer?
     private(set) var configuration: ProxyPlayerConfiguration
@@ -1079,6 +1093,7 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
         loadedStreamKind = remoteURL.lastPathComponent == "live.m3u8" ? .live : .videoOnDemand
         loadedItemID = Self.itemID(from: remoteURL)
         transition(to: PlayerState(status: .buffering))
+        if let loadedItemID { await beforeLoadCompletion?(loadedItemID) }
         if loadDelay > .zero { try? await Task.sleep(for: loadDelay) }
         if let loadedItemID, failingItemIDs.contains(loadedItemID) {
             transition(to: PlayerState(status: .failed("fixture failure")))
@@ -1192,6 +1207,25 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     private static func itemID(from url: URL) -> FeedItemID {
         let name = url.deletingPathExtension().lastPathComponent
         return FeedItemID(rawValue: name)
+    }
+}
+
+/// A single-load test barrier that intentionally does not react to task
+/// cancellation, so the stale-completion path is exercised deterministically.
+@MainActor
+private final class FeedTestLoadGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var isReleased = false
+
+    func wait() async {
+        guard !isReleased else { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release() {
+        isReleased = true
+        continuation?.resume()
+        continuation = nil
     }
 }
 
