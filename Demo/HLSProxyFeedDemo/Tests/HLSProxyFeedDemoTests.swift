@@ -314,7 +314,9 @@ final class HLSProxyFeedDemoTests: XCTestCase {
 
         await origin.resetRequestAccounting()
         let resetSnapshot = await origin.snapshot()
-        XCTAssertEqual(resetSnapshot, .empty)
+        var emptyAccounting = FeedDemoFixtureOrigin.Snapshot.empty
+        emptyAccounting.originBinding = "ephemeral"
+        XCTAssertEqual(resetSnapshot, emptyAccounting)
     }
 
     func testFixtureOriginAccountsForConcurrentFeedItemsIndependently() async throws {
