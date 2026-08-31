@@ -148,6 +148,15 @@ an end-to-end sample. Native callback time is captured before hopping actors.
 An older export decodes the additional stage field as nil. These diagnostics are
 not a fix or a claim that any one stage caused the hosted failure.
 
+Hosted run 33375049548 passed real audiovisual paging (500 ms playing and
+400 ms decoded p95 buckets), but synthetic stress still failed its unchanged
+500 ms gate with 118 warm samples in the 1000 ms p95 bucket. The synthetic
+report now also exports `playbackStartDiagnostics` (schema 1): all twelve fixed
+paths, their original start distributions, and the same four timing stages.
+Older reports decode this optional envelope as nil. Reports are capped at
+64 KiB; no navigation history is retained. The gate still reads the original
+end-to-end distribution, never the diagnostic stage counts or intervals.
+
 HLS-71 gives both UI qualification launch modes a typed `freshQualification`
 cache scope. A worker prepares one reserved `HLSProxyBuffer-UIQualification`
 directory before constructing the engine; repeated runs reset only that directory.

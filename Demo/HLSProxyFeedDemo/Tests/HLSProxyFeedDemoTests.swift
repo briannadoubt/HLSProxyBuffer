@@ -6,6 +6,58 @@ import HLSCore
 
 @MainActor
 final class HLSProxyFeedDemoTests: XCTestCase {
+    func testSyntheticStartupDiagnosticsPreserveSlowWarmSamplesAndGate() throws {
+        let telemetry = HLSFeedTelemetry()
+        for path in HLSFeedTelemetry.Path.all {
+            telemetry.record(.init(path: path, payload: .firstFrame(latency: 0.75)))
+            for _ in 0..<1_000 {
+                telemetry.record(.init(path: path, payload: .playbackStartStages(
+                    beforeActivation: 0.1, activationWork: 0.02,
+                    nativeStart: 0.6, callbackDelivery: 0.03
+                )))
+            }
+        }
+        let report = FeedDemoQualificationReport.make(
+            navigationCount: 100, measuredNavigationCount: 100, requestedItemID: nil,
+            snapshot: .empty, telemetry: telemetry.snapshot, policy: .shortFormFeed,
+            warmupMemoryBytes: 0
+        )
+        XCTAssertFalse(report.passed)
+        XCTAssertTrue(report.failures.contains("predicted-warm visible first-frame p95 exceeded 500 ms"))
+        XCTAssertEqual(report.warmFirstFrameCount, 3)
+        XCTAssertEqual(report.warmFirstFrameP95Milliseconds, 1_000)
+        let diagnostics = try XCTUnwrap(report.playbackStartDiagnostics)
+        XCTAssertEqual(diagnostics.schemaVersion, 1)
+        XCTAssertEqual(diagnostics.paths.count, 12)
+        for path in diagnostics.paths {
+            XCTAssertEqual(path.playbackStartLatency.count, 1)
+            XCTAssertEqual(path.playbackStartLatency.maximum, 0.75)
+            XCTAssertEqual(path.playbackStartLatency.approximateQuantile(0.95), 1)
+            let stages = try XCTUnwrap(path.stages)
+            XCTAssertEqual(stages.beforeActivation.count, 1_000)
+            XCTAssertEqual(stages.nativeStart.maximum, 0.6)
+            XCTAssertEqual(stages.nativeStart.bucketCounts.count, 12)
+        }
+        let data = Data(report.json.utf8)
+        XCTAssertLessThan(data.count, 64 * 1_024)
+        XCTAssertEqual(try JSONDecoder().decode(FeedDemoQualificationReport.self, from: data), report)
+        let diagnosticData = try JSONEncoder().encode(diagnostics)
+        let diagnosticJSON = String(decoding: diagnosticData, as: UTF8.self)
+        for forbidden in ["http://", "https://", "itemID", "authorization", "navigationHistory"] {
+            XCTAssertFalse(diagnosticJSON.contains(forbidden), forbidden)
+        }
+
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        legacy.removeValue(forKey: "playbackStartDiagnostics")
+        let legacyReport = try JSONDecoder().decode(
+            FeedDemoQualificationReport.self, from: JSONSerialization.data(withJSONObject: legacy)
+        )
+        XCTAssertNil(legacyReport.playbackStartDiagnostics)
+        XCTAssertEqual(legacyReport.warmFirstFrameCount, report.warmFirstFrameCount)
+        XCTAssertEqual(legacyReport.warmFirstFrameP95Milliseconds, report.warmFirstFrameP95Milliseconds)
+        XCTAssertEqual(legacyReport.failures, report.failures)
+    }
+
     func testReadyHandoffGateDoesNotMixColdRequestsWithReadyOutcomes() {
         let telemetry = HLSFeedTelemetry()
         let path = HLSFeedTelemetry.Path(reuse: .warm, intent: .focused, mediaKind: .videoOnDemand)
