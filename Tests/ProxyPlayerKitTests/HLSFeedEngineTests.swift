@@ -7,7 +7,7 @@ import XCTest
 
 @MainActor
 final class HLSFeedEngineTests: XCTestCase {
-    func testPlayCommandPrecedesDecodedOutputAttachment() async throws {
+    func testDecodedOutputIsAttachedBeforePreparationAndReusedForPlayback() async throws {
         let items = makeItems(count: 1)
         let nativeItem = AVPlayerItem(asset: AVMutableComposition())
         let factory = FakeFeedSessionFactory(platformPlayerFactory: { AVPlayer(playerItem: nativeItem) })
@@ -18,7 +18,8 @@ final class HLSFeedEngineTests: XCTestCase {
         _ = await engine.waitUntilSettled()
         let session = try XCTUnwrap(factory.session(loadedWith: items[0].id))
         XCTAssertEqual(session.playCount, 1)
-        XCTAssertEqual(session.outputCountAtFirstPlay, 0, "Decoded telemetry setup must not precede the prepared play command")
+        XCTAssertEqual(session.outputCountAtFirstPreparation, 1, "Prime the same output pipeline that playback will use")
+        XCTAssertEqual(session.outputCountAtFirstPlay, 1, "Activation must reuse its prepared output")
         XCTAssertEqual(nativeItem.outputs.count, 1, "The focused output is still attached before activation returns")
         await engine.stop()
         XCTAssertTrue(nativeItem.outputs.isEmpty)
@@ -1158,6 +1159,7 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     private(set) var preparationCancellationCount = 0
     private(set) var playCount = 0
     private(set) var outputCountAtFirstPlay: Int?
+    private(set) var outputCountAtFirstPreparation: Int?
     private(set) var playBeforePreparationCount = 0
     private(set) var pauseCount = 0
     private(set) var stopCount = 0
@@ -1256,6 +1258,9 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     func prepareForImmediatePlayback(
         retryPolicy: HLSFeedPlayerPreparationRetryPolicy
     ) async -> Bool {
+        if outputCountAtFirstPreparation == nil {
+            outputCountAtFirstPreparation = feedPlatformPlayer?.currentItem?.outputs.count ?? 0
+        }
         for attempt in 1...retryPolicy.maximumAttemptCount {
             preparationCount += 1
             if preparationDelay > .zero {

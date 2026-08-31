@@ -41,6 +41,7 @@ final class FeedDemoAudiovisualIntegrationTests: XCTestCase {
             do {
                 var retained: [AVPlayer] = []
                 var retainedItems: [AVPlayerItem] = []
+                var retainedOutputs: [ObjectIdentifier: AVPlayerItemVideoOutput] = [:]
                 for (generation, index) in [0, 1, 0].enumerated() {
                     let before = decodedFrameCount(engine)
                     try await engine.update(signal(generation: generation + 1, item: items[index].id))
@@ -50,9 +51,19 @@ final class FeedDemoAudiovisualIntegrationTests: XCTestCase {
                     retained.append(player)
                     let item = try XCTUnwrap(player.currentItem)
                     if !retainedItems.contains(where: { $0 === item }) { retainedItems.append(item) }
-                    XCTAssertLessThanOrEqual(retainedItems.reduce(0) { count, item in
-                        count + item.outputs.filter { $0 is AVPlayerItemVideoOutput }.count
-                    }, 1, "Only the focused lease may retain a sampling output")
+                    let output = try XCTUnwrap(item.outputs.compactMap { $0 as? AVPlayerItemVideoOutput }.first)
+                    let identity = ObjectIdentifier(item)
+                    if let previous = retainedOutputs[identity] {
+                        XCTAssertTrue(output === previous, "Revisit must reuse the prerolled output pipeline")
+                    }
+                    retainedOutputs[identity] = output
+                    let currentItems = items.compactMap { engine.platformPlayer(for: $0.id)?.currentItem }
+                    XCTAssertTrue(currentItems.allSatisfy {
+                        $0.outputs.filter { $0 is AVPlayerItemVideoOutput }.count <= 1
+                    })
+                    XCTAssertLessThanOrEqual(currentItems.reduce(0) { $0 + $1.outputs.count },
+                                             policy.concurrency.maximumPlayerCount)
+                    XCTAssertEqual(engine.activeVideoSamplerCount, 1, "Only focus may sample its resident output")
                     // HLS AVURLAsset track loading may return an empty array;
                     // the ready AVPlayerItem exposes its selected native tracks.
                     let tracks = item.tracks.compactMap(\.assetTrack)
@@ -80,13 +91,16 @@ final class FeedDemoAudiovisualIntegrationTests: XCTestCase {
                     $0 + ($1.decodedFirstFrameLatency?.count ?? 0)
                 }, 0)
                 _ = engine.setPlaybackSuspended(true)
+                XCTAssertEqual(engine.activeVideoSamplerCount, 0)
                 XCTAssertTrue(retained.allSatisfy { $0.isMuted || $0.volume == 0 })
                 let suspendedFrames = decodedFrameCount(engine)
                 try await Task.sleep(for: .milliseconds(250))
                 XCTAssertEqual(decodedFrameCount(engine), suspendedFrames)
                 _ = engine.setPlaybackSuspended(false)
                 _ = await engine.waitUntilSettled()
+                XCTAssertEqual(engine.activeVideoSamplerCount, 1)
                 await engine.stop()
+                XCTAssertEqual(engine.activeVideoSamplerCount, 0)
                 XCTAssertTrue(retained.allSatisfy { ($0.isMuted || $0.volume == 0) && $0.rate == 0 })
                 XCTAssertTrue(retainedItems.allSatisfy { $0.outputs.isEmpty })
                 let stoppedCount = decodedFrameCount(engine)

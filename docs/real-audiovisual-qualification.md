@@ -23,8 +23,11 @@ results are not reinterpreted as audiovisual evidence.
 These observations do not prove display scan-out, physical sound emission, or
 perceptual lip sync. The output does not suppress AVPlayerLayer rendering.
 There is at most one focused sampler: 16 ms polling until an image is available,
-then 100 ms. Outputs and tasks detach synchronously on focus loss/retirement;
-pixel buffers and per-frame histories are never retained. Telemetry owns twelve
+then 100 ms. Sampling stops synchronously on focus loss/suspension. Each bounded
+resident native player lease retains its prepared output while warm; retirement
+detaches it. There is at most one output per player (three in the short-form
+preset), but only the focused output is sampled. Pixel buffers and per-frame
+histories are never retained. Telemetry owns twelve
 fixed paths, four bounded histograms per path, and bounded newest-event streams.
 Older JSON snapshots decode new fields as `nil`, not invented evidence.
 
@@ -98,15 +101,21 @@ arrays, and malformed JSON. Hosted run 33361191832 exposed this assertion bug:
 the real audiovisual report exceeded the unchanged warm playback-start gate even
 though the nested vertical report passed. That run is not passing qualification.
 
-HLS-70 moves synchronous video-output attachment immediately after the prepared
-`play()` command, still within the same activation call. Local diagnostic probes
-measured about 25–34 ms of attachment work before `play()` on several real-media
-handoffs. The ordering regression verifies that the command precedes attachment
-and that focus still owns an output before activation returns. Neither the
-`.playing` definition nor the decoded-image focus timestamp changes, and the
-player's wait/preroll behavior is unchanged. This removes a measured pre-command
-cost; those local timings alone do not establish the cause of the hosted failure
-or an end-to-end p95 improvement.
+HLS-70 prepares each lease's video output before the player's native preroll.
+Warm handoff starts sampling the already-prepared output without attaching or
+removing outputs during activation. Native tests check output identity across
+revisit, the existing player-pool bound, exactly one active sampler, suspension,
+and complete retirement. Unit checks distinguish prepared, sampling, paused, and
+retired observer lifetimes. Neither the `.playing` definition nor the decoded-image
+focus timestamp changes, and the player's wait/preroll behavior is unchanged.
+
+This supersedes an intermediate ordering-only correction. Local probes measured
+about 25–34 ms of attachment work before `play()` on several real handoffs; moving
+it after `play()` passed both UI iterations but moved decoded-image p95 from
+100 ms to 400 ms. That tradeoff was not accepted as an overall improvement.
+Preparation now includes the output configuration, rather than moving it from
+one handoff measurement into the other. These local probes alone do not uniquely
+explain the original hosted failure; full hosted qualification remains required.
 
 HLS-71 gives both UI qualification launch modes a typed `freshQualification`
 cache scope. A worker prepares one reserved `HLSProxyBuffer-UIQualification`

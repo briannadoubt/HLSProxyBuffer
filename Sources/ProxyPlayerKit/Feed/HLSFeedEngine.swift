@@ -119,6 +119,10 @@ protocol HLSFeedPlayerSession: AnyObject {
     func prepareForImmediatePlayback(
         retryPolicy: HLSFeedPlayerPreparationRetryPolicy
     ) async -> Bool
+    func prepareForImmediatePlayback(
+        retryPolicy: HLSFeedPlayerPreparationRetryPolicy,
+        willPreroll: @MainActor (AVPlayerItem) -> Void
+    ) async -> Bool
     func play()
     func pause()
     func setMuted(_ isMuted: Bool)
@@ -131,6 +135,14 @@ protocol HLSFeedPlayerSession: AnyObject {
 }
 
 extension HLSFeedPlayerSession {
+    func prepareForImmediatePlayback(
+        retryPolicy: HLSFeedPlayerPreparationRetryPolicy,
+        willPreroll: @MainActor (AVPlayerItem) -> Void
+    ) async -> Bool {
+        if let item = feedPlatformPlayer?.currentItem { willPreroll(item) }
+        return await prepareForImmediatePlayback(retryPolicy: retryPolicy)
+    }
+
     func telemetryUpdates() async -> AsyncStream<HLSStreamingTelemetry.Snapshot> {
         AsyncStream { continuation in continuation.finish() }
     }
@@ -145,6 +157,13 @@ extension ProxyHLSPlayer: HLSFeedPlayerSession {
 
     func prepareForImmediatePlayback(
         retryPolicy: HLSFeedPlayerPreparationRetryPolicy
+    ) async -> Bool {
+        await prepareForImmediatePlayback(retryPolicy: retryPolicy, willPreroll: { _ in })
+    }
+
+    func prepareForImmediatePlayback(
+        retryPolicy: HLSFeedPlayerPreparationRetryPolicy,
+        willPreroll: @MainActor (AVPlayerItem) -> Void
     ) async -> Bool {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(5))
@@ -173,6 +192,9 @@ extension ProxyHLSPlayer: HLSFeedPlayerSession {
         guard player.status == .readyToPlay, item.status == .readyToPlay else {
             return false
         }
+
+        guard !Task.isCancelled else { return false }
+        willPreroll(item)
 
         for attempt in 1...retryPolicy.maximumAttemptCount {
             guard !Task.isCancelled,
@@ -354,6 +376,10 @@ public final class HLSFeedEngine {
     @ObservationIgnored private let playerPreparationRetryPolicy:
         HLSFeedPlayerPreparationRetryPolicy
     @ObservationIgnored private var slots: [Slot] = []
+    /// Internal qualification distinguishes resident outputs from active work.
+    var activeVideoSamplerCount: Int {
+        slots.filter { $0.videoOutputObserver?.isSampling == true }.count
+    }
     @ObservationIgnored private var slotIDByItemID: [FeedItemID: UUID] = [:]
     @ObservationIgnored private var desiredItemIDs: Set<FeedItemID> = []
     @ObservationIgnored private var failuresByItemID: [FeedItemID: HLSFeedEngineSnapshot.Failure] = [:]
@@ -1050,7 +1076,12 @@ public final class HLSFeedEngine {
                 slot.session.setMuted(true)
                 let isPreparedForImmediatePlayback = await slot.session
                     .prepareForImmediatePlayback(
-                        retryPolicy: self.playerPreparationRetryPolicy
+                        retryPolicy: self.playerPreparationRetryPolicy,
+                        willPreroll: { [weak self, weak slot] item in
+                            guard let self, let slot, self.owns(slot, token: token),
+                                  !slot.isReleasing, !self.isStopped, !Task.isCancelled else { return }
+                            self.prepareDecodedVideo(in: slot, item: item)
+                        }
                     )
                 guard self.owns(slot, token: token), !Task.isCancelled else {
                     self.recordStaleCompletion()
@@ -1315,16 +1346,11 @@ public final class HLSFeedEngine {
         destination.session.setMuted(false)
         let hasPlatformPlayer = destination.session.feedPlatformPlayer != nil
         if hasPlatformPlayer {
+            observeDecodedVideo(in: destination, lease: destinationLease)
             observeActivatedPlayback(in: destination, token: destinationLease.token)
         }
         destination.session.play()
-        if hasPlatformPlayer {
-            // Output attachment synchronously configures AVFoundation. Issue
-            // the prepared play command first; telemetry must not gate it.
-            // Keep the original focus timestamp and install before returning,
-            // so decoded-image latency still includes all attachment work.
-            observeDecodedVideo(in: destination, lease: destinationLease)
-        } else {
+        if !hasPlatformPlayer {
             confirmActivatedPlayback(in: destination, token: destinationLease.token)
         }
     }
@@ -1332,8 +1358,7 @@ public final class HLSFeedEngine {
     private func deactivateActivePlayback() {
         let previouslyActiveItemID = activeItemID
         for slot in slots {
-            slot.videoOutputObserver?.stop()
-            slot.videoOutputObserver = nil
+            slot.videoOutputObserver?.pause()
             slot.session.setMuted(true)
             guard var lease = slot.lease else { continue }
             lease.isAudible = false
@@ -1380,13 +1405,19 @@ public final class HLSFeedEngine {
         }
     }
 
+    private func prepareDecodedVideo(in slot: Slot, item: AVPlayerItem) {
+        guard slot.videoOutputObserver?.isAttached(to: item) != true else { return }
+        slot.videoOutputObserver?.stop()
+        slot.videoOutputObserver = HLSFeedVideoOutputObserver(item: item)
+    }
+
     private func observeDecodedVideo(in slot: Slot, lease: Lease) {
-        guard let item = slot.session.feedPlatformPlayer?.currentItem else { return }
+        guard let item = slot.session.feedPlatformPlayer?.currentItem,
+              let observer = slot.videoOutputObserver, observer.isAttached(to: item) else { return }
         let focus = pendingFocus.flatMap { $0.itemID == lease.itemID ? $0 : nil }
         let path = focus?.path ?? lease.telemetryPath
-        slot.videoOutputObserver?.stop()
-        slot.videoOutputObserver = HLSFeedVideoOutputObserver(
-            item: item, requestedAt: focus?.requestedAt, clock: telemetryClock
+        observer.start(
+            requestedAt: focus?.requestedAt, clock: telemetryClock
         ) { [weak self, weak slot, weak item] payload in
             guard let self, let slot, let item,
                   self.owns(slot, token: lease.token), !slot.isReleasing,

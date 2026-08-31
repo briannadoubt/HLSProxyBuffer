@@ -276,6 +276,12 @@ private final class InsecureFeedPlayerSession: HLSFeedPlayerSession {
     ) async -> Bool {
         await player.prepareForImmediatePlayback(retryPolicy: retryPolicy)
     }
+    func prepareForImmediatePlayback(
+        retryPolicy: HLSFeedPlayerPreparationRetryPolicy,
+        willPreroll: @MainActor (AVPlayerItem) -> Void
+    ) async -> Bool {
+        await player.prepareForImmediatePlayback(retryPolicy: retryPolicy, willPreroll: willPreroll)
+    }
     func play() { player.play() }
     func pause() { player.pause() }
     func setMuted(_ isMuted: Bool) { player.setFeedPlaybackMuted(isMuted) }
