@@ -108,6 +108,18 @@ player's wait/preroll behavior is unchanged. This removes a measured pre-command
 cost; those local timings alone do not establish the cause of the hosted failure
 or an end-to-end p95 improvement.
 
+HLS-71 gives both UI qualification launch modes a typed `freshQualification`
+cache scope. A worker prepares one reserved `HLSProxyBuffer-UIQualification`
+directory before constructing the engine; repeated runs reset only that directory.
+The engine still receives its normal typed disk-cache policy and canonical URLs,
+and revisits/offline reuse within the run use real cached bytes. This establishes
+an empty-cache starting condition for adverse-network work even if previous demo
+launches warmed every clip. Normal launches retain the ordinary persistent cache
+without clearing it. Native integration separately verifies warm-disk cold launch
+and offline reuse across engine instances. File-system regressions check that the
+qualification reset preserves ordinary cache bytes and does not accumulate new
+namespaces or create anything for the persistent scope.
+
 ## Listening and device boundaries
 
 Native PCM decode proves the packaged recorded soundtrack is decodable and

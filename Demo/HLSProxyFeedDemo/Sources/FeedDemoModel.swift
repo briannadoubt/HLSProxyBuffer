@@ -56,6 +56,8 @@ final class FeedDemoModel {
 
     @ObservationIgnored private let clock = ContinuousClock()
     @ObservationIgnored private let mediaConfiguration: FeedDemoFixtureOrigin.Configuration
+    @ObservationIgnored private let cacheScope: FeedDemoCacheScope
+    @ObservationIgnored private var cacheDirectory: URL?
     @ObservationIgnored private let audioSession: any FeedDemoAudioSessionManaging
     @ObservationIgnored private var startupGeneration = UUID()
     @ObservationIgnored private var installationGeneration = UUID()
@@ -88,12 +90,14 @@ final class FeedDemoModel {
 
     init(
         mediaConfiguration: FeedDemoFixtureOrigin.Configuration = .realMedia,
+        cacheScope: FeedDemoCacheScope = .persistent,
         audioSession: (any FeedDemoAudioSessionManaging)? = nil,
         backgroundScheduler: (any FeedDemoBackgroundScheduling)? = nil,
         backgroundEnvironment: (any FeedDemoBackgroundEnvironmentProviding)? = nil,
         backgroundSchedulePolicy: FeedDemoBackgroundSchedulePolicy = .shortFormFeed
     ) {
         self.mediaConfiguration = mediaConfiguration
+        self.cacheScope = cacheScope
         self.audioSession = audioSession ?? FeedDemoAudioSession()
         let scheduler = backgroundScheduler ?? FeedDemoBackgroundDependencies.makeScheduler()
         self.backgroundEnvironment = backgroundEnvironment
@@ -111,17 +115,20 @@ final class FeedDemoModel {
         startupGeneration = generation
         do {
             let configuration = mediaConfiguration
+            let scope = cacheScope
             let loader = Task.detached(priority: .userInitiated) {
                 try Task.checkCancellation()
-                return try FeedDemoFixtureOrigin(configuration: configuration)
+                let directory = try scope.prepareDirectory()
+                return (try FeedDemoFixtureOrigin(configuration: configuration), directory)
             }
-            let fixtureOrigin = try await withTaskCancellationHandler {
+            let (fixtureOrigin, preparedCacheDirectory) = try await withTaskCancellationHandler {
                 try await loader.value
             } onCancel: { loader.cancel() }
             try Task.checkCancellation()
             let baseURL = try await fixtureOrigin.start()
             guard generation == startupGeneration else { fixtureOrigin.stop(); return }
             origin = fixtureOrigin
+            cacheDirectory = preparedCacheDirectory
             mediaSources = fixtureOrigin.library?.catalog.sources ?? []
             usesColdOriginFallback = fixtureOrigin.usesFallbackPort
             startedAt = clock.now
@@ -438,7 +445,8 @@ final class FeedDemoModel {
 
         guard generation == installationGeneration, origin?.baseURL == baseURL else { return false }
         let nextEntries = try FeedDemoCatalog.entries(for: mode, baseURL: baseURL, library: origin?.library)
-        let policy = mode.policy
+        var policy = mode.policy
+        policy.eviction.diskDirectory = cacheDirectory
         let nextEngine = try HLSFeedEngine(
             items: nextEntries.map(\.item),
             policy: policy,
