@@ -94,6 +94,8 @@ final class HLSProxyFeedDemoTests: XCTestCase {
                 phase: .focused,
                 state: PlayerState(status: .ready),
                 hasStartedPlayback: true,
+                hasDecodedVideoFrame: false,
+                hasAdvancingVideoFrames: false,
                 isAudible: true
             )],
             failures: [],
@@ -146,6 +148,18 @@ final class HLSProxyFeedDemoTests: XCTestCase {
         XCTAssertEqual(report.cacheHitBytes, 4_096)
         XCTAssertEqual(report.originByteCount, 8_192)
         XCTAssertEqual(report.fixtureResponseByteCount, 12_288)
+
+        let audiovisual = FeedDemoAudiovisualReport.make(
+            vertical: report, engine: engine, telemetry: telemetry.snapshot,
+            origin: origin, configuration: .realMedia
+        )
+        XCTAssertFalse(audiovisual.passed, "Playing state alone cannot pass audiovisual qualification")
+        XCTAssertTrue(audiovisual.failureCodes.contains("final_decoded_frames_not_advancing"))
+        XCTAssertTrue(audiovisual.failureCodes.contains("missing_native_audio_ownership"))
+        XCTAssertLessThan(audiovisual.json.utf8.count, 64 * 1_024)
+        for forbidden in ["https://", "authorization", "fixture-focus"] {
+            XCTAssertFalse(audiovisual.json.contains(forbidden))
+        }
 
         let json = report.json
         XCTAssertTrue(json.contains("\"passed\":true"))
@@ -691,20 +705,24 @@ final class HLSProxyFeedDemoTests: XCTestCase {
 
     func testDemoBackgroundTransitionSilencesPlaybackResubmitsAndHonorsWarmCap() async {
         let scheduler = RecordingBackgroundScheduler()
+        let audioSession = RecordingAudioSession()
         let environment = FeedDemoStaticBackgroundEnvironment(current: .init(
             networkInterface: .wifi
         ))
         let model = FeedDemoModel(
             mediaConfiguration: .synthetic,
+            audioSession: audioSession,
             backgroundScheduler: scheduler,
             backgroundEnvironment: environment
         )
         await model.start()
         XCTAssertEqual(model.status, .running)
+        XCTAssertEqual(audioSession.requests, [true])
 
         model.handleApplicationPhase(.background)
         XCTAssertTrue(model.engine?.snapshot.isPlaybackSuspended == true)
         XCTAssertNil(model.engine?.snapshot.audibleItemID)
+        XCTAssertEqual(audioSession.requests.last, false)
         XCTAssertEqual(scheduler.requests.map(\.kind), [.refresh, .processing])
 
         _ = await model.performBackgroundTask(.refresh)
@@ -721,7 +739,37 @@ final class HLSProxyFeedDemoTests: XCTestCase {
 
         model.handleApplicationPhase(.active)
         XCTAssertTrue(model.engine?.snapshot.isPlaybackSuspended == false)
+        XCTAssertEqual(audioSession.requests.last, true)
         XCTAssertEqual(scheduler.cancelledKinds, [.refresh, .processing])
+        await model.stop()
+        XCTAssertEqual(audioSession.requests.last, false)
+    }
+
+    func testAudioSessionActivationFailureKeepsEngineSuspended() async {
+        let audioSession = RecordingAudioSession()
+        let model = FeedDemoModel(mediaConfiguration: .synthetic, audioSession: audioSession)
+        await model.start()
+        XCTAssertEqual(model.status, .running)
+        model.handleApplicationPhase(.inactive)
+        audioSession.rejectActivation = true
+        model.handleApplicationPhase(.active)
+        guard case .failed = model.status else {
+            await model.stop()
+            return XCTFail("Audio activation failure must be visible")
+        }
+        XCTAssertTrue(model.engine?.snapshot.isPlaybackSuspended == true)
+        XCTAssertNil(model.engine?.snapshot.audibleItemID)
+        await model.stop()
+    }
+
+    func testBackgroundColdStartDoesNotActivateAudio() async {
+        let audioSession = RecordingAudioSession()
+        let model = FeedDemoModel(mediaConfiguration: .synthetic, audioSession: audioSession)
+        model.handleApplicationPhase(.background)
+        await model.start()
+        XCTAssertEqual(model.status, .running)
+        XCTAssertFalse(audioSession.requests.contains(true))
+        XCTAssertTrue(model.engine?.snapshot.isPlaybackSuspended == true)
         await model.stop()
     }
 
@@ -761,6 +809,18 @@ final class HLSProxyFeedDemoTests: XCTestCase {
             try? await clock.sleep(for: .milliseconds(25))
         }
         return false
+    }
+}
+
+@MainActor
+private final class RecordingAudioSession: FeedDemoAudioSessionManaging {
+    struct ActivationRejected: Error {}
+    var rejectActivation = false
+    private(set) var requests: [Bool] = []
+
+    func setPlaybackActive(_ active: Bool) throws {
+        requests.append(active)
+        if active, rejectActivation { throw ActivationRejected() }
     }
 }
 

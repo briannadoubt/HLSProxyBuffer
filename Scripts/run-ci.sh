@@ -5,6 +5,8 @@ QUALIFICATION_ARTIFACT_DIR="${HLS_CI_ARTIFACT_DIR:-$PWD/ci-artifacts}"
 mkdir -p "$QUALIFICATION_ARTIFACT_DIR"
 export HLS_CI_ARTIFACT_DIR="$QUALIFICATION_ARTIFACT_DIR"
 
+bash Scripts/test-audiovisual-report.sh
+
 CI_DERIVED_DATA_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/hlsproxy-ci-derived.XXXXXX")
 
 remove_derived_data() {
@@ -63,6 +65,10 @@ echo "Running the remaining SwiftPM tests on host..."
 swift test \
   --skip 'PlaybackAnalyticsQualificationTests' \
   --skip 'PlaybackAnalyticsPerformanceTests'
+
+# These bounded real-media AVFoundation scenarios are explicitly qualified on
+# the host outside sanitizer runs, before any simulator performance workload.
+RUN_PROXY_AV_TESTS=1 swift test --filter FeedDemoAudiovisualIntegrationTests
 
 FEED_QUALIFICATION_REPORT="$QUALIFICATION_ARTIFACT_DIR/hls-feed-qualification.json"
 if [ ! -s "$FEED_QUALIFICATION_REPORT" ]; then
@@ -146,6 +152,20 @@ if command -v xcodebuild >/dev/null 2>&1; then
       exit 1
     fi
     echo "Vertical-feed UI qualification report: $VERTICAL_REPORT"
+    AUDIOVISUAL_SOURCE=$(grep -l '"qualificationKind":"real_audiovisual_feed_ui"' \
+      "$UI_ATTACHMENT_DIR"/*.json 2>/dev/null | head -n 1 || true)
+    if [ -z "$AUDIOVISUAL_SOURCE" ]; then
+      echo "Missing real audiovisual UI attachment in $UI_RESULT_BUNDLE"
+      exit 1
+    fi
+    cp "$AUDIOVISUAL_SOURCE" "$QUALIFICATION_ARTIFACT_DIR/hls-real-audiovisual-ui.json"
+    jq -n -e \
+      --slurpfile ui "$AUDIOVISUAL_SOURCE" \
+      --slurpfile decode "$QUALIFICATION_ARTIFACT_DIR/hls-real-native-decode.json" \
+      --slurpfile renditions "$QUALIFICATION_ARTIFACT_DIR/hls-real-native-renditions.json" \
+      --slurpfile cache "$QUALIFICATION_ARTIFACT_DIR/hls-real-native-cache.json" \
+      -f Scripts/compose-audiovisual-report.jq \
+      > "$QUALIFICATION_ARTIFACT_DIR/hls-real-audiovisual-feed.json"
     remove_derived_data "$FEED_DEMO_DERIVED_DATA"
   else
     echo "iOS simulator build skipped (no $IOS_SIM_NAME available)."

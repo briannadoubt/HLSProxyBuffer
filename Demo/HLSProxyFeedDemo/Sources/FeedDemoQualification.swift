@@ -365,7 +365,7 @@ struct FeedDemoVerticalQualificationReport: Codable, Equatable, Sendable {
         )
     }
 
-    private static func summary(
+    static func summary(
         _ distributions: [HLSFeedTelemetry.Distribution]
     ) -> Distribution {
         let bounds = distributions.first?.upperBounds ?? []

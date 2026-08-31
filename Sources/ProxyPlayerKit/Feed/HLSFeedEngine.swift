@@ -20,6 +20,10 @@ public struct HLSFeedPlayback: Sendable, Equatable {
     /// True after the focused platform player has entered its `.playing`
     /// time-control state for this lease.
     public let hasStartedPlayback: Bool
+    /// An image was copied from the focused item's native video output.
+    /// Neither flag claims display scan-out or perceptual image quality.
+    public let hasDecodedVideoFrame: Bool
+    public let hasAdvancingVideoFrames: Bool
     /// True only for the current, unsuspended focus owner. Warm and loading
     /// leases are always muted even while AVFoundation primes their pipeline.
     public let isAudible: Bool
@@ -256,6 +260,8 @@ public final class HLSFeedEngine {
         var state: PlayerState
         var didCompleteInitialLoad: Bool
         var hasStartedPlayback: Bool
+        var hasDecodedVideoFrame: Bool
+        var hasAdvancingVideoFrames: Bool
         var isAudible: Bool
         var telemetryPath: HLSFeedTelemetry.Path
         let analyticsAttempt: PlaybackAnalyticsTimeline.Attempt
@@ -284,6 +290,7 @@ public final class HLSFeedEngine {
         var playbackEndObserver: NSObjectProtocol?
         var playbackStartObservation: NSKeyValueObservation?
         var playbackFailureObservation: NSKeyValueObservation?
+        var videoOutputObserver: HLSFeedVideoOutputObserver?
         var isReleasing = false
 
         init(session: any HLSFeedPlayerSession) {
@@ -303,6 +310,8 @@ public final class HLSFeedEngine {
             playbackStartObservation = nil
             playbackFailureObservation?.invalidate()
             playbackFailureObservation = nil
+            videoOutputObserver?.stop()
+            videoOutputObserver = nil
             return task
         }
 
@@ -963,6 +972,8 @@ public final class HLSFeedEngine {
             state: slot.session.state,
             didCompleteInitialLoad: false,
             hasStartedPlayback: false,
+            hasDecodedVideoFrame: false,
+            hasAdvancingVideoFrames: false,
             isAudible: false,
             telemetryPath: telemetryPath,
             analyticsAttempt: analyticsAttempt,
@@ -1296,12 +1307,15 @@ public final class HLSFeedEngine {
         )
         destinationLease.phase = .focused
         destinationLease.hasStartedPlayback = false
+        destinationLease.hasDecodedVideoFrame = false
+        destinationLease.hasAdvancingVideoFrames = false
         destinationLease.isAudible = true
         destination.lease = destinationLease
         activeItemID = destinationLease.itemID
         destination.session.setMuted(false)
         let hasPlatformPlayer = destination.session.feedPlatformPlayer != nil
         if hasPlatformPlayer {
+            observeDecodedVideo(in: destination, lease: destinationLease)
             observeActivatedPlayback(in: destination, token: destinationLease.token)
         }
         destination.session.play()
@@ -1313,6 +1327,8 @@ public final class HLSFeedEngine {
     private func deactivateActivePlayback() {
         let previouslyActiveItemID = activeItemID
         for slot in slots {
+            slot.videoOutputObserver?.stop()
+            slot.videoOutputObserver = nil
             slot.session.setMuted(true)
             guard var lease = slot.lease else { continue }
             lease.isAudible = false
@@ -1321,6 +1337,8 @@ public final class HLSFeedEngine {
                 finishStallIfNeeded(in: &lease)
                 if lease.phase == .focused { lease.phase = .warm }
                 lease.hasStartedPlayback = false
+                lease.hasDecodedVideoFrame = false
+                lease.hasAdvancingVideoFrames = false
             }
             slot.lease = lease
         }
@@ -1353,6 +1371,37 @@ public final class HLSFeedEngine {
             Task { @MainActor [weak self, weak slot] in
                 guard let self, let slot else { return }
                 self.failActivatedPlayback(in: slot, token: token, message: message)
+            }
+        }
+    }
+
+    private func observeDecodedVideo(in slot: Slot, lease: Lease) {
+        guard let item = slot.session.feedPlatformPlayer?.currentItem else { return }
+        let focus = pendingFocus.flatMap { $0.itemID == lease.itemID ? $0 : nil }
+        let path = focus?.path ?? lease.telemetryPath
+        slot.videoOutputObserver?.stop()
+        slot.videoOutputObserver = HLSFeedVideoOutputObserver(
+            item: item, requestedAt: focus?.requestedAt, clock: telemetryClock
+        ) { [weak self, weak slot, weak item] payload in
+            guard let self, let slot, let item,
+                  self.owns(slot, token: lease.token), !slot.isReleasing,
+                  !self.isStopped, !self.isPlaybackSuspended,
+                  slot.lease?.isAudible == true, slot.lease?.phase == .focused,
+                  slot.session.feedPlatformPlayer?.currentItem === item,
+                  self.activeItemID == lease.itemID, self.targetFocusedItemID == lease.itemID,
+                  slot.lease?.generation == self.latestCoordinatorSnapshot?.generation
+            else { return }
+            self.recordNativeAudioOwnership()
+            self.recordTelemetry(.init(path: path, payload: payload), attempt: lease.analyticsAttempt)
+            if case .decodedVideo(_, let frames, let advancing) = payload, var current = slot.lease {
+                let wasDecoded = current.hasDecodedVideoFrame
+                let wasAdvancing = current.hasAdvancingVideoFrames
+                current.hasDecodedVideoFrame = wasDecoded || frames > 0
+                current.hasAdvancingVideoFrames = wasAdvancing || advancing > 0
+                slot.lease = current
+                if current.hasDecodedVideoFrame != wasDecoded || current.hasAdvancingVideoFrames != wasAdvancing {
+                    self.rebuildSnapshot()
+                }
             }
         }
     }
@@ -1792,6 +1841,8 @@ public final class HLSFeedEngine {
                 phase: lease.phase,
                 state: lease.state,
                 hasStartedPlayback: lease.hasStartedPlayback,
+                hasDecodedVideoFrame: lease.hasDecodedVideoFrame,
+                hasAdvancingVideoFrames: lease.hasAdvancingVideoFrames,
                 isAudible: lease.isAudible
             )
         }
@@ -1837,7 +1888,23 @@ public final class HLSFeedEngine {
             isPlaybackSuspended: isPlaybackSuspended
         )
         recordResourceSample()
+        recordNativeAudioOwnership()
         for continuation in continuations.values { continuation.yield(snapshot) }
+    }
+
+    private func recordNativeAudioOwnership() {
+        let nativeSlots = slots.filter { $0.session.feedPlatformPlayer?.currentItem != nil }
+        let eligible = nativeSlots.filter {
+            guard let player = $0.session.feedPlatformPlayer else { return false }
+            return !player.isMuted && player.volume > 0
+        }
+        let aligned = eligible.allSatisfy {
+            !isStopped && !isPlaybackSuspended && $0.lease?.isAudible == true
+                && $0.lease?.itemID == activeItemID && $0.lease?.itemID == targetFocusedItemID
+        }
+        telemetry.record(.init(payload: .nativeAudioOwnership(
+            observedPlayers: nativeSlots.count, eligiblePlayers: eligible.count, ownershipAligned: aligned
+        )))
     }
 
     private static func telemetryPath(

@@ -91,6 +91,16 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
         attachment.lifetime = .keepAlways
         add(attachment)
 
+        let audiovisualElement = app.staticTexts["audiovisual-qualification-report"]
+        XCTAssertTrue(waitForValueMatching(NSPredicate(format: "value != %@", "pending"), in: audiovisualElement, timeout: 5))
+        let audiovisual = value(of: audiovisualElement)
+        let audiovisualAttachment = XCTAttachment(data: Data(audiovisual.utf8), uniformTypeIdentifier: "public.json")
+        audiovisualAttachment.name = "hls-real-audiovisual-ui.json"
+        audiovisualAttachment.lifetime = .keepAlways
+        add(audiovisualAttachment)
+        XCTAssertTrue(audiovisual.contains("\"qualificationKind\":\"real_audiovisual_feed_ui\""), audiovisual)
+        XCTAssertTrue(audiovisual.contains("\"passed\":true"), audiovisual)
+
         XCTAssertTrue(report.contains("\"qualificationKind\":\"vertical_paging_ui\""), report)
         XCTAssertTrue(report.contains("\"passed\":true"), report)
         XCTAssertTrue(report.contains("\"finalOwnershipAligned\":true"), report)
@@ -326,6 +336,7 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
             ))
         }
         XCTAssertTrue(waitForValue("Playing", in: playback, timeout: timeout))
+        XCTAssertTrue(waitForValue("advancing", in: app.staticTexts["vertical-decoded-video"], timeout: timeout))
 
         for _ in 0..<3 {
             let focusedValue = value(of: focused)

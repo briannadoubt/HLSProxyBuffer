@@ -42,7 +42,12 @@ final class FeedDemoModel {
     private(set) var qualificationNavigationCount = 0
     private(set) var qualificationWarmupIsMarked = false
     private(set) var qualificationReport: FeedDemoQualificationReport?
-    private(set) var verticalQualificationReport: FeedDemoVerticalQualificationReport?
+    private(set) var verticalQualificationReport: FeedDemoVerticalQualificationReport? {
+        didSet {
+            if case nil = verticalQualificationReport { audiovisualQualificationReport = nil }
+        }
+    }
+    private(set) var audiovisualQualificationReport: FeedDemoAudiovisualReport?
     private(set) var qualificationNetworkCondition: FeedDemoQualificationNetworkCondition = .normal
     private(set) var applicationPhase: FeedDemoApplicationPhase = .active
     private(set) var backgroundSnapshot = FeedDemoBackgroundLifecycleSnapshot.empty
@@ -51,6 +56,7 @@ final class FeedDemoModel {
 
     @ObservationIgnored private let clock = ContinuousClock()
     @ObservationIgnored private let mediaConfiguration: FeedDemoFixtureOrigin.Configuration
+    @ObservationIgnored private let audioSession: any FeedDemoAudioSessionManaging
     @ObservationIgnored private var startupGeneration = UUID()
     @ObservationIgnored private var installationGeneration = UUID()
     @ObservationIgnored private let backgroundWarmingPolicy =
@@ -82,11 +88,13 @@ final class FeedDemoModel {
 
     init(
         mediaConfiguration: FeedDemoFixtureOrigin.Configuration = .realMedia,
+        audioSession: (any FeedDemoAudioSessionManaging)? = nil,
         backgroundScheduler: (any FeedDemoBackgroundScheduling)? = nil,
         backgroundEnvironment: (any FeedDemoBackgroundEnvironmentProviding)? = nil,
         backgroundSchedulePolicy: FeedDemoBackgroundSchedulePolicy = .shortFormFeed
     ) {
         self.mediaConfiguration = mediaConfiguration
+        self.audioSession = audioSession ?? FeedDemoAudioSession()
         let scheduler = backgroundScheduler ?? FeedDemoBackgroundDependencies.makeScheduler()
         self.backgroundEnvironment = backgroundEnvironment
             ?? FeedDemoBackgroundDependencies.makeEnvironmentProvider()
@@ -119,7 +127,6 @@ final class FeedDemoModel {
             startedAt = clock.now
             guard try await install(mode: selectedMode, baseURL: baseURL),
                   generation == startupGeneration else { return }
-            reconcilePlaybackForApplicationPhase()
             status = .running
         } catch {
             guard generation == startupGeneration else { return }
@@ -239,19 +246,26 @@ final class FeedDemoModel {
     }
 
     func finishVerticalQualification() async {
+        audiovisualQualificationReport = nil
         let expectedFocus = focusedItemID
         await settleQualification(expectedItemID: expectedFocus)
         guard let engine, let origin else { return }
-        verticalQualificationReport = FeedDemoVerticalQualificationReport.make(
+        let originSnapshot = await origin.snapshot()
+        let vertical = FeedDemoVerticalQualificationReport.make(
             focusedItemID: expectedFocus,
             engine: engineSnapshot,
             telemetry: engine.telemetry.snapshot,
-            origin: await origin.snapshot(),
+            origin: originSnapshot,
             policy: selectedMode.policy,
             networkConditionTransitionCount: qualificationNetworkConditionTransitionCount,
             memoryPressureActionCount: qualificationMemoryPressureActionCount,
             backgroundTransitionCount: qualificationBackgroundTransitionCount,
             foregroundTransitionCount: qualificationForegroundTransitionCount
+        )
+        verticalQualificationReport = vertical
+        audiovisualQualificationReport = FeedDemoAudiovisualReport.make(
+            vertical: vertical, engine: engineSnapshot, telemetry: engine.telemetry.snapshot,
+            origin: originSnapshot, configuration: mediaConfiguration
         )
     }
 
@@ -285,16 +299,19 @@ final class FeedDemoModel {
             }
             backgroundLifecycle.cancelActive()
             backgroundLifecycle.cancelPending()
-            _ = engine?.setPlaybackSuspended(false)
         case .inactive:
-            _ = engine?.setPlaybackSuspended(true)
+            break
         case .background:
             if previousPhase != .background {
                 qualificationBackgroundTransitionCount += 1
                 qualificationAwaitsForeground = true
             }
-            _ = engine?.setPlaybackSuspended(true)
             backgroundLifecycle.scheduleAll()
+        }
+        do {
+            try reconcilePlaybackForApplicationPhase()
+        } catch {
+            status = .failed(error.localizedDescription)
         }
         verticalQualificationReport = nil
         refreshBackgroundSnapshot()
@@ -313,6 +330,12 @@ final class FeedDemoModel {
         guard let engine else { return false }
 
         _ = engine.setPlaybackSuspended(true)
+        do {
+            try audioSession.setPlaybackActive(false)
+        } catch {
+            status = .failed(error.localizedDescription)
+            return false
+        }
         let request = HLSFeedBackgroundWarmingRequest(
             candidates: backgroundWarmingCandidates(),
             environment: backgroundEnvironment.current,
@@ -329,7 +352,12 @@ final class FeedDemoModel {
         }
         refreshBackgroundSnapshot()
         if applicationPhase == .active {
-            _ = engine.setPlaybackSuspended(false)
+            do {
+                try reconcilePlaybackForApplicationPhase()
+            } catch {
+                status = .failed(error.localizedDescription)
+                return false
+            }
         }
         return succeeded
     }
@@ -371,6 +399,7 @@ final class FeedDemoModel {
         engineUpdatesTask = nil
         telemetryTask = nil
         await stopCurrentEngineAndAnalytics()
+        try? audioSession.setPlaybackActive(false)
         for task in observationTasks { await task.value }
         self.engine = nil
         origin?.stop()
@@ -447,7 +476,7 @@ final class FeedDemoModel {
             latestViewport = viewport
             submitSignal(requestedFocus: first.id)
         }
-        reconcilePlaybackForApplicationPhase()
+        try reconcilePlaybackForApplicationPhase()
         return true
     }
 
@@ -647,8 +676,18 @@ final class FeedDemoModel {
         )
     }
 
-    private func reconcilePlaybackForApplicationPhase() {
-        _ = engine?.setPlaybackSuspended(applicationPhase != .active)
+    private func reconcilePlaybackForApplicationPhase() throws {
+        guard let engine else { return }
+        let active = applicationPhase == .active
+        // No background audio is enabled: warming never owns the audio session.
+        if !active { _ = engine.setPlaybackSuspended(true) }
+        do {
+            try audioSession.setPlaybackActive(active)
+        } catch {
+            _ = engine.setPlaybackSuspended(true)
+            throw error
+        }
+        if active { _ = engine.setPlaybackSuspended(false) }
     }
 
     private func backgroundWarmingCandidates() -> [HLSFeedBackgroundWarmingCandidate] {
