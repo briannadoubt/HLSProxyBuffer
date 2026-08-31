@@ -169,6 +169,8 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var didPreparePlayerForCurrentLoad = false
     @ObservationIgnored private var didPublishInitialPlaylists = false
     @ObservationIgnored private var isFeedPlaybackMuted = false
+    @ObservationIgnored private var isFeedAudioManaged = false
+    @ObservationIgnored private var feedAudioGuard: HLSFeedAudioEligibilityGuard?
     @ObservationIgnored private lazy var server = ProxyServer(router: router)
     @ObservationIgnored private let diagnostics: ProxyPlayerDiagnostics
     @ObservationIgnored private let telemetry: HLSStreamingTelemetry
@@ -449,8 +451,9 @@ public final class ProxyHLSPlayer {
     /// normal AVPlayer audio controls; the feed engine owns its mute contract.
     func setFeedPlaybackMuted(_ isMuted: Bool) {
         isFeedPlaybackMuted = isMuted
-        player?.isMuted = isMuted
-        player?.volume = isMuted ? 0 : 1
+        isFeedAudioManaged = true
+        if feedAudioGuard == nil, let player { feedAudioGuard = HLSFeedAudioEligibilityGuard(player: player) }
+        feedAudioGuard?.setMuted(isMuted)
     }
 
     /// Selects the forward-playback rate used by the current item and future replacements.
@@ -529,6 +532,8 @@ public final class ProxyHLSPlayer {
         player?.pause()
         player?.currentItem?.cancelPendingSeeks()
         removePlaybackTimeObserver()
+        feedAudioGuard?.stop()
+        feedAudioGuard = nil
         player = nil
         mediaSelectionTask?.cancel()
         mediaSelectionTask = nil
@@ -853,8 +858,13 @@ public final class ProxyHLSPlayer {
         } else {
             player = AVPlayer(playerItem: item)
         }
-        player?.isMuted = isFeedPlaybackMuted
-        player?.volume = isFeedPlaybackMuted ? 0 : 1
+        if isFeedAudioManaged {
+            if feedAudioGuard == nil, let player { feedAudioGuard = HLSFeedAudioEligibilityGuard(player: player) }
+            feedAudioGuard?.setMuted(isFeedPlaybackMuted)
+        } else {
+            player?.isMuted = false
+            player?.volume = 1
+        }
         player?.defaultRate = playbackRate
         installPlaybackTimeObserver()
         publishLivePlayback(playbackTime: player?.currentTime().seconds)

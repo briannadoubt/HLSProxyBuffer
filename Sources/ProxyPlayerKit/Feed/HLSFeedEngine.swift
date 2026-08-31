@@ -20,6 +20,10 @@ public struct HLSFeedPlayback: Sendable, Equatable {
     /// True after the focused platform player has entered its `.playing`
     /// time-control state for this lease.
     public let hasStartedPlayback: Bool
+    /// An image was copied from the focused item's native video output.
+    /// Neither flag claims display scan-out or perceptual image quality.
+    public let hasDecodedVideoFrame: Bool
+    public let hasAdvancingVideoFrames: Bool
     /// True only for the current, unsuspended focus owner. Warm and loading
     /// leases are always muted even while AVFoundation primes their pipeline.
     public let isAudible: Bool
@@ -115,6 +119,10 @@ protocol HLSFeedPlayerSession: AnyObject {
     func prepareForImmediatePlayback(
         retryPolicy: HLSFeedPlayerPreparationRetryPolicy
     ) async -> Bool
+    func prepareForImmediatePlayback(
+        retryPolicy: HLSFeedPlayerPreparationRetryPolicy,
+        willPreroll: @MainActor (AVPlayerItem) -> Void
+    ) async -> Bool
     func play()
     func pause()
     func setMuted(_ isMuted: Bool)
@@ -127,6 +135,14 @@ protocol HLSFeedPlayerSession: AnyObject {
 }
 
 extension HLSFeedPlayerSession {
+    func prepareForImmediatePlayback(
+        retryPolicy: HLSFeedPlayerPreparationRetryPolicy,
+        willPreroll: @MainActor (AVPlayerItem) -> Void
+    ) async -> Bool {
+        if let item = feedPlatformPlayer?.currentItem { willPreroll(item) }
+        return await prepareForImmediatePlayback(retryPolicy: retryPolicy)
+    }
+
     func telemetryUpdates() async -> AsyncStream<HLSStreamingTelemetry.Snapshot> {
         AsyncStream { continuation in continuation.finish() }
     }
@@ -141,6 +157,13 @@ extension ProxyHLSPlayer: HLSFeedPlayerSession {
 
     func prepareForImmediatePlayback(
         retryPolicy: HLSFeedPlayerPreparationRetryPolicy
+    ) async -> Bool {
+        await prepareForImmediatePlayback(retryPolicy: retryPolicy, willPreroll: { _ in })
+    }
+
+    func prepareForImmediatePlayback(
+        retryPolicy: HLSFeedPlayerPreparationRetryPolicy,
+        willPreroll: @MainActor (AVPlayerItem) -> Void
     ) async -> Bool {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(5))
@@ -169,6 +192,9 @@ extension ProxyHLSPlayer: HLSFeedPlayerSession {
         guard player.status == .readyToPlay, item.status == .readyToPlay else {
             return false
         }
+
+        guard !Task.isCancelled else { return false }
+        willPreroll(item)
 
         for attempt in 1...retryPolicy.maximumAttemptCount {
             guard !Task.isCancelled,
@@ -256,6 +282,8 @@ public final class HLSFeedEngine {
         var state: PlayerState
         var didCompleteInitialLoad: Bool
         var hasStartedPlayback: Bool
+        var hasDecodedVideoFrame: Bool
+        var hasAdvancingVideoFrames: Bool
         var isAudible: Bool
         var telemetryPath: HLSFeedTelemetry.Path
         let analyticsAttempt: PlaybackAnalyticsTimeline.Attempt
@@ -266,6 +294,7 @@ public final class HLSFeedEngine {
         let itemID: FeedItemID
         let generation: FeedNavigationGeneration
         let requestedAt: Duration
+        var startTiming: HLSFeedPlaybackStartTiming
         let wasReadyAtRequest: Bool
         let path: HLSFeedTelemetry.Path
     }
@@ -284,6 +313,7 @@ public final class HLSFeedEngine {
         var playbackEndObserver: NSObjectProtocol?
         var playbackStartObservation: NSKeyValueObservation?
         var playbackFailureObservation: NSKeyValueObservation?
+        var videoOutputObserver: HLSFeedVideoOutputObserver?
         var isReleasing = false
 
         init(session: any HLSFeedPlayerSession) {
@@ -303,6 +333,8 @@ public final class HLSFeedEngine {
             playbackStartObservation = nil
             playbackFailureObservation?.invalidate()
             playbackFailureObservation = nil
+            videoOutputObserver?.stop()
+            videoOutputObserver = nil
             return task
         }
 
@@ -345,6 +377,10 @@ public final class HLSFeedEngine {
     @ObservationIgnored private let playerPreparationRetryPolicy:
         HLSFeedPlayerPreparationRetryPolicy
     @ObservationIgnored private var slots: [Slot] = []
+    /// Internal qualification distinguishes resident outputs from active work.
+    var activeVideoSamplerCount: Int {
+        slots.filter { $0.videoOutputObserver?.isSampling == true }.count
+    }
     @ObservationIgnored private var slotIDByItemID: [FeedItemID: UUID] = [:]
     @ObservationIgnored private var desiredItemIDs: Set<FeedItemID> = []
     @ObservationIgnored private var failuresByItemID: [FeedItemID: HLSFeedEngineSnapshot.Failure] = [:]
@@ -963,6 +999,8 @@ public final class HLSFeedEngine {
             state: slot.session.state,
             didCompleteInitialLoad: false,
             hasStartedPlayback: false,
+            hasDecodedVideoFrame: false,
+            hasAdvancingVideoFrames: false,
             isAudible: false,
             telemetryPath: telemetryPath,
             analyticsAttempt: analyticsAttempt,
@@ -1039,7 +1077,12 @@ public final class HLSFeedEngine {
                 slot.session.setMuted(true)
                 let isPreparedForImmediatePlayback = await slot.session
                     .prepareForImmediatePlayback(
-                        retryPolicy: self.playerPreparationRetryPolicy
+                        retryPolicy: self.playerPreparationRetryPolicy,
+                        willPreroll: { [weak self, weak slot] item in
+                            guard let self, let slot, self.owns(slot, token: token),
+                                  !slot.isReleasing, !self.isStopped, !Task.isCancelled else { return }
+                            self.prepareDecodedVideo(in: slot, item: item)
+                        }
                     )
                 guard self.owns(slot, token: token), !Task.isCancelled else {
                     self.recordStaleCompletion()
@@ -1122,11 +1165,7 @@ public final class HLSFeedEngine {
         } else {
             installPlaybackEndObserver(for: slot, token: token)
         }
-        if !isPlaybackSuspended,
-           lease.itemID == targetFocusedItemID,
-           lease.phase == .warm {
-            activate(slot)
-        }
+        activateNewlyPrimedLease(in: slot)
         rebuildSnapshot()
     }
 
@@ -1252,12 +1291,26 @@ public final class HLSFeedEngine {
                 await self.release(slot, token: token)
             }
         }
-        if !isPlaybackSuspended,
-           lease.itemID == targetFocusedItemID,
-           lease.phase == .warm {
-            activate(slot)
-        }
+        activateNewlyPrimedLease(in: slot)
         rebuildSnapshot()
+    }
+
+    private func activateNewlyPrimedLease(in slot: Slot) {
+        guard !isStopped, !isPlaybackSuspended,
+              let lease = slot.lease, lease.phase == .warm,
+              lease.itemID == targetFocusedItemID,
+              let current = latestCoordinatorSnapshot,
+              let generation = current.generation,
+              let entry = current.entries.first(where: { $0.itemID == lease.itemID }),
+              let item = itemsByID[lease.itemID]
+        else { return }
+        // A focus change may have arrived while native preparation was still
+        // running. Reconcile its completed lease with the accepted working set
+        // now; waiting for expanded segment preparation to publish again would
+        // keep an already-playable player behind a stale-generation barrier.
+        guard reuseLease(for: item, generation: generation, role: entry.role,
+                         requiresPrimedPlayer: true) else { return }
+        activate(slot)
     }
 
     private func activate(_ destination: Slot) {
@@ -1272,6 +1325,10 @@ public final class HLSFeedEngine {
            destinationLease.phase == .focused,
            destinationLease.isAudible {
             return
+        }
+        if pendingFocus?.itemID == destinationLease.itemID,
+           pendingFocus?.generation == destinationLease.generation {
+            pendingFocus?.startTiming.activationBeganAt = telemetryClock.now()
         }
         deactivateActivePlayback()
         guard var destinationLease = destination.lease,
@@ -1296,13 +1353,20 @@ public final class HLSFeedEngine {
         )
         destinationLease.phase = .focused
         destinationLease.hasStartedPlayback = false
+        destinationLease.hasDecodedVideoFrame = false
+        destinationLease.hasAdvancingVideoFrames = false
         destinationLease.isAudible = true
         destination.lease = destinationLease
         activeItemID = destinationLease.itemID
         destination.session.setMuted(false)
         let hasPlatformPlayer = destination.session.feedPlatformPlayer != nil
         if hasPlatformPlayer {
+            observeDecodedVideo(in: destination, lease: destinationLease)
             observeActivatedPlayback(in: destination, token: destinationLease.token)
+        }
+        if pendingFocus?.itemID == destinationLease.itemID,
+           pendingFocus?.generation == destinationLease.generation {
+            pendingFocus?.startTiming.playInvokedAt = telemetryClock.now()
         }
         destination.session.play()
         if !hasPlatformPlayer {
@@ -1313,6 +1377,7 @@ public final class HLSFeedEngine {
     private func deactivateActivePlayback() {
         let previouslyActiveItemID = activeItemID
         for slot in slots {
+            slot.videoOutputObserver?.pause()
             slot.session.setMuted(true)
             guard var lease = slot.lease else { continue }
             lease.isAudible = false
@@ -1321,6 +1386,8 @@ public final class HLSFeedEngine {
                 finishStallIfNeeded(in: &lease)
                 if lease.phase == .focused { lease.phase = .warm }
                 lease.hasStartedPlayback = false
+                lease.hasDecodedVideoFrame = false
+                lease.hasAdvancingVideoFrames = false
             }
             slot.lease = lease
         }
@@ -1330,15 +1397,17 @@ public final class HLSFeedEngine {
 
     private func observeActivatedPlayback(in slot: Slot, token: UUID) {
         guard let player = slot.session.feedPlatformPlayer else { return }
+        let clock = telemetryClock
         slot.playbackStartObservation?.invalidate()
         slot.playbackStartObservation = player.observe(
             \.timeControlStatus,
             options: [.initial, .new]
         ) { [weak self, weak slot] player, _ in
             guard player.timeControlStatus == .playing else { return }
+            let nativePlayingAt = clock.now()
             Task { @MainActor [weak self, weak slot] in
                 guard let self, let slot else { return }
-                self.confirmActivatedPlayback(in: slot, token: token)
+                self.confirmActivatedPlayback(in: slot, token: token, nativePlayingAt: nativePlayingAt)
             }
         }
 
@@ -1357,7 +1426,44 @@ public final class HLSFeedEngine {
         }
     }
 
-    private func confirmActivatedPlayback(in slot: Slot, token: UUID) {
+    private func prepareDecodedVideo(in slot: Slot, item: AVPlayerItem) {
+        guard slot.videoOutputObserver?.isAttached(to: item) != true else { return }
+        slot.videoOutputObserver?.stop()
+        slot.videoOutputObserver = HLSFeedVideoOutputObserver(item: item)
+    }
+
+    private func observeDecodedVideo(in slot: Slot, lease: Lease) {
+        guard let item = slot.session.feedPlatformPlayer?.currentItem,
+              let observer = slot.videoOutputObserver, observer.isAttached(to: item) else { return }
+        let focus = pendingFocus.flatMap { $0.itemID == lease.itemID ? $0 : nil }
+        let path = focus?.path ?? lease.telemetryPath
+        observer.start(
+            requestedAt: focus?.requestedAt, clock: telemetryClock
+        ) { [weak self, weak slot, weak item] payload in
+            guard let self, let slot, let item,
+                  self.owns(slot, token: lease.token), !slot.isReleasing,
+                  !self.isStopped, !self.isPlaybackSuspended,
+                  slot.lease?.isAudible == true, slot.lease?.phase == .focused,
+                  slot.session.feedPlatformPlayer?.currentItem === item,
+                  self.activeItemID == lease.itemID, self.targetFocusedItemID == lease.itemID,
+                  slot.lease?.generation == self.latestCoordinatorSnapshot?.generation
+            else { return }
+            self.recordNativeAudioOwnership()
+            self.recordTelemetry(.init(path: path, payload: payload), attempt: lease.analyticsAttempt)
+            if case .decodedVideo(_, let frames, let advancing) = payload, var current = slot.lease {
+                let wasDecoded = current.hasDecodedVideoFrame
+                let wasAdvancing = current.hasAdvancingVideoFrames
+                current.hasDecodedVideoFrame = wasDecoded || frames > 0
+                current.hasAdvancingVideoFrames = wasAdvancing || advancing > 0
+                slot.lease = current
+                if current.hasDecodedVideoFrame != wasDecoded || current.hasAdvancingVideoFrames != wasAdvancing {
+                    self.rebuildSnapshot()
+                }
+            }
+        }
+    }
+
+    private func confirmActivatedPlayback(in slot: Slot, token: UUID, nativePlayingAt: Duration? = nil) {
         guard owns(slot, token: token),
               var lease = slot.lease,
               !isPlaybackSuspended,
@@ -1374,7 +1480,7 @@ public final class HLSFeedEngine {
         slot.playbackStartObservation = nil
         if pendingFocus?.itemID == lease.itemID,
            pendingFocus?.generation == lease.generation {
-            completePendingFocus(succeeded: true)
+            completePendingFocus(succeeded: true, nativePlayingAt: nativePlayingAt)
         }
         rebuildSnapshot()
     }
@@ -1617,22 +1723,26 @@ public final class HLSFeedEngine {
             intent: .focused,
             mediaKind: .videoOnDemand
         )
+        let requestedAt = telemetryClock.now()
         return PendingFocus(
             itemID: itemID,
             generation: generation,
-            requestedAt: telemetryClock.now(),
+            requestedAt: requestedAt,
+            startTiming: HLSFeedPlaybackStartTiming(requestedAt: requestedAt),
             wasReadyAtRequest: wasReady,
             path: path
         )
     }
 
-    private func completePendingFocus(succeeded: Bool) {
+    private func completePendingFocus(succeeded: Bool, nativePlayingAt: Duration? = nil) {
         guard let pendingFocus else { return }
         self.pendingFocus = nil
-        recordPendingFocus(pendingFocus, succeeded: succeeded)
+        recordPendingFocus(pendingFocus, succeeded: succeeded, nativePlayingAt: nativePlayingAt)
     }
 
-    private func recordPendingFocus(_ pendingFocus: PendingFocus, succeeded: Bool) {
+    private func recordPendingFocus(
+        _ pendingFocus: PendingFocus, succeeded: Bool, nativePlayingAt: Duration? = nil
+    ) {
         let attempt = slot(for: pendingFocus.itemID)?.lease?.analyticsAttempt
         recordTelemetry(.init(
             path: pendingFocus.path,
@@ -1642,12 +1752,21 @@ public final class HLSFeedEngine {
             )
         ), attempt: attempt)
         if succeeded {
+            let confirmedAt = telemetryClock.now()
             recordTelemetry(.init(
                 path: pendingFocus.path,
                 payload: .firstFrame(latency: Self.seconds(
-                    telemetryClock.now() - pendingFocus.requestedAt
+                    confirmedAt - pendingFocus.requestedAt
                 ))
             ), attempt: attempt)
+            // Diagnostic aggregation follows the original end-to-end sample;
+            // it cannot move that measurement later or replace a slow sample.
+            if let nativePlayingAt,
+               let stages = pendingFocus.startTiming.sample(
+                nativePlayingAt: nativePlayingAt, confirmedAt: confirmedAt
+               ) {
+                recordTelemetry(.init(path: pendingFocus.path, payload: stages), attempt: attempt)
+            }
         }
     }
 
@@ -1792,6 +1911,8 @@ public final class HLSFeedEngine {
                 phase: lease.phase,
                 state: lease.state,
                 hasStartedPlayback: lease.hasStartedPlayback,
+                hasDecodedVideoFrame: lease.hasDecodedVideoFrame,
+                hasAdvancingVideoFrames: lease.hasAdvancingVideoFrames,
                 isAudible: lease.isAudible
             )
         }
@@ -1837,7 +1958,23 @@ public final class HLSFeedEngine {
             isPlaybackSuspended: isPlaybackSuspended
         )
         recordResourceSample()
+        recordNativeAudioOwnership()
         for continuation in continuations.values { continuation.yield(snapshot) }
+    }
+
+    private func recordNativeAudioOwnership() {
+        let nativeSlots = slots.filter { $0.session.feedPlatformPlayer?.currentItem != nil }
+        let eligible = nativeSlots.filter {
+            guard let player = $0.session.feedPlatformPlayer else { return false }
+            return !player.isMuted && player.volume > 0
+        }
+        let aligned = eligible.allSatisfy {
+            !isStopped && !isPlaybackSuspended && $0.lease?.isAudible == true
+                && $0.lease?.itemID == activeItemID && $0.lease?.itemID == targetFocusedItemID
+        }
+        telemetry.record(.init(payload: .nativeAudioOwnership(
+            observedPlayers: nativeSlots.count, eligiblePlayers: eligible.count, ownershipAligned: aligned
+        )))
     }
 
     private static func telemetryPath(

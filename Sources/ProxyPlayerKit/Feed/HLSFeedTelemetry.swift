@@ -6,7 +6,7 @@ import os
 ///
 /// Aggregation cardinality is independent of item and event count. Metrics are
 /// partitioned into the twelve possible combinations of cache reuse, feed
-/// intent, and media kind. Each path owns three bounded histograms. Event
+/// intent, and media kind. Each path owns eight bounded histograms. Event
 /// subscribers and their newest-event buffers are capped by ``Configuration``.
 @Observable
 @MainActor
@@ -131,6 +131,17 @@ public final class HLSFeedTelemetry {
         /// `.playing` time-control state. Preparation or `play()` invocation
         /// alone does not satisfy this measurement.
         public let firstFrameLatency: Distribution
+        /// Focus request to an actual image copied from AVPlayerItemVideoOutput.
+        /// This is not proof of display scan-out. Nil in older exported snapshots.
+        public let decodedFirstFrameLatency: Distribution?
+        /// A diagnostic decomposition of successful playback starts. This does
+        /// not replace either end-to-end latency measurement or exclude samples.
+        /// Nil in older exports that did not collect stage timing.
+        public let playbackStartStages: PlaybackStartStages?
+        /// Sampled output images and strictly advancing image presentation times.
+        /// Sampling is bounded; these are not the stream's total frame counts.
+        public let decodedFrameCount: UInt64?
+        public let advancingDecodedFrameCount: UInt64?
         public let stallDuration: Distribution
         public let cancellationLatency: Distribution
         public let cacheHitCount: UInt64
@@ -152,6 +163,17 @@ public final class HLSFeedTelemetry {
             let total = cacheHitCount + cacheMissCount
             return total > 0 ? Double(cacheHitCount) / Double(total) : nil
         }
+    }
+
+    public struct PlaybackStartStages: Equatable, Codable, Sendable {
+        /// Focus submission until the engine can activate the destination.
+        public let beforeActivation: Distribution
+        /// Synchronous handoff work before invoking the native play operation.
+        public let activationWork: Distribution
+        /// Play invocation until native time-control observation reports playing.
+        public let nativeStart: Distribution
+        /// Native observation until the main actor confirms current ownership.
+        public let callbackDelivery: Distribution
     }
 
     public struct ResourceSnapshot: Equatable, Codable, Sendable {
@@ -212,6 +234,9 @@ public final class HLSFeedTelemetry {
         public let resources: ResourceSnapshot
         public let paths: [PathSnapshot]
         public let storageBound: StorageBound
+        /// Sampled native mute/volume ownership, not proof of sound emission.
+        /// Nil when reading exports from before native audio instrumentation.
+        public let nativeAudio: NativeAudioSnapshot?
 
         public func metrics(for path: Path) -> PathSnapshot? {
             paths.first { $0.path == path }
@@ -239,9 +264,22 @@ public final class HLSFeedTelemetry {
         }
     }
 
+    public struct NativeAudioSnapshot: Equatable, Codable, Sendable {
+        public let sampleCount: UInt64
+        public let maximumObservedPlayers: Int
+        public let maximumEligiblePlayers: Int
+        public let ownershipViolationCount: UInt64
+    }
+
     public struct Event: Equatable, Sendable {
         public enum Payload: Equatable, Sendable {
+            case playbackStartStages(
+                beforeActivation: TimeInterval, activationWork: TimeInterval,
+                nativeStart: TimeInterval, callbackDelivery: TimeInterval
+            )
             case firstFrame(latency: TimeInterval)
+            case decodedVideo(firstFrameLatency: TimeInterval?, frames: Int, advancingFrames: Int)
+            case nativeAudioOwnership(observedPlayers: Int, eligiblePlayers: Int, ownershipAligned: Bool)
             case stall(duration: TimeInterval)
             case cache(hits: Int, misses: Int, originBytesAvoided: Int)
             case network(originRequests: Int, originBytesFetched: Int)
@@ -309,6 +347,13 @@ public final class HLSFeedTelemetry {
     private struct MutablePath {
         let path: Path
         var firstFrameLatency: MutableDistribution
+        var decodedFirstFrameLatency: MutableDistribution
+        var beforeActivation: MutableDistribution
+        var activationWork: MutableDistribution
+        var nativeStart: MutableDistribution
+        var callbackDelivery: MutableDistribution
+        var decodedFrameCount: UInt64 = 0
+        var advancingDecodedFrameCount: UInt64 = 0
         var stallDuration: MutableDistribution
         var cancellationLatency: MutableDistribution
         var cacheHitCount: UInt64 = 0
@@ -325,6 +370,11 @@ public final class HLSFeedTelemetry {
         init(path: Path, bounds: [TimeInterval]) {
             self.path = path
             self.firstFrameLatency = MutableDistribution(upperBounds: bounds)
+            self.decodedFirstFrameLatency = MutableDistribution(upperBounds: bounds)
+            self.beforeActivation = MutableDistribution(upperBounds: bounds)
+            self.activationWork = MutableDistribution(upperBounds: bounds)
+            self.nativeStart = MutableDistribution(upperBounds: bounds)
+            self.callbackDelivery = MutableDistribution(upperBounds: bounds)
             self.stallDuration = MutableDistribution(upperBounds: bounds)
             self.cancellationLatency = MutableDistribution(upperBounds: bounds)
         }
@@ -333,6 +383,13 @@ public final class HLSFeedTelemetry {
             PathSnapshot(
                 path: path,
                 firstFrameLatency: firstFrameLatency.value,
+                decodedFirstFrameLatency: decodedFirstFrameLatency.value,
+                playbackStartStages: PlaybackStartStages(
+                    beforeActivation: beforeActivation.value, activationWork: activationWork.value,
+                    nativeStart: nativeStart.value, callbackDelivery: callbackDelivery.value
+                ),
+                decodedFrameCount: decodedFrameCount,
+                advancingDecodedFrameCount: advancingDecodedFrameCount,
                 stallDuration: stallDuration.value,
                 cancellationLatency: cancellationLatency.value,
                 cacheHitCount: cacheHitCount,
@@ -361,6 +418,9 @@ public final class HLSFeedTelemetry {
     @ObservationIgnored private var eventCount: UInt64 = 0
     @ObservationIgnored private var droppedEventCount: UInt64 = 0
     @ObservationIgnored private var rejectedSubscriberCount: UInt64 = 0
+    @ObservationIgnored private var nativeAudio = NativeAudioSnapshot(
+        sampleCount: 0, maximumObservedPlayers: 0, maximumEligiblePlayers: 0, ownershipViolationCount: 0
+    )
     @ObservationIgnored private var continuations: [UUID: AsyncStream<Event>.Continuation] = [:]
 
     public init(configuration: Configuration = .init()) {
@@ -377,16 +437,42 @@ public final class HLSFeedTelemetry {
             paths: Path.all.map {
                 MutablePath(path: $0, bounds: configuration.latencyUpperBounds).value
             },
-            storageBound: Self.storageBound(for: configuration)
+            storageBound: Self.storageBound(for: configuration),
+            nativeAudio: nativeAudio
         )
     }
 
     /// Records one typed event and immediately updates the Observation snapshot.
     public func record(_ event: Event) {
         switch event.payload {
+        case .playbackStartStages(let before, let activation, let native, let delivery):
+            mutatePath(for: event) { path in
+                path.beforeActivation.record(before)
+                path.activationWork.record(activation)
+                path.nativeStart.record(native)
+                path.callbackDelivery.record(delivery)
+            }
+        case .nativeAudioOwnership(let observed, let eligible, let aligned):
+            nativeAudio = NativeAudioSnapshot(
+                sampleCount: Self.saturatingAdd(nativeAudio.sampleCount, observed > 0 ? 1 : 0),
+                maximumObservedPlayers: max(nativeAudio.maximumObservedPlayers, observed),
+                maximumEligiblePlayers: max(nativeAudio.maximumEligiblePlayers, eligible),
+                ownershipViolationCount: Self.saturatingAdd(
+                    nativeAudio.ownershipViolationCount, aligned && eligible <= 1 ? 0 : 1
+                )
+            )
         case .firstFrame(let latency):
             mutatePath(for: event) { $0.firstFrameLatency.record(latency) }
             signposter.emitEvent("First Frame")
+        case .decodedVideo(let latency, let frames, let advancingFrames):
+            mutatePath(for: event) { path in
+                if let latency { path.decodedFirstFrameLatency.record(latency) }
+                path.decodedFrameCount = Self.saturatingAdd(path.decodedFrameCount, UInt64(max(0, frames)))
+                path.advancingDecodedFrameCount = Self.saturatingAdd(
+                    path.advancingDecodedFrameCount, UInt64(max(0, min(frames, advancingFrames)))
+                )
+            }
+            if latency != nil { signposter.emitEvent("Decoded First Frame") }
         case .stall(let duration):
             mutatePath(for: event) { $0.stallDuration.record(duration) }
             signposter.emitEvent("Playback Stall")
@@ -560,14 +646,15 @@ public final class HLSFeedTelemetry {
             activeSubscriberCount: continuations.count,
             resources: resources,
             paths: Path.all.compactMap { mutablePaths[$0]?.value },
-            storageBound: Self.storageBound(for: configuration)
+            storageBound: Self.storageBound(for: configuration),
+            nativeAudio: nativeAudio
         )
     }
 
     private static func storageBound(for configuration: Configuration) -> StorageBound {
         StorageBound(
             pathCount: Path.all.count,
-            histogramCount: Path.all.count * 3,
+            histogramCount: Path.all.count * 8,
             bucketsPerHistogram: configuration.latencyUpperBounds.count + 1,
             cancellationOutcomesPerPath: CancellationOutcome.allCases.count,
             maximumSubscriberCount: configuration.maximumSubscriberCount,

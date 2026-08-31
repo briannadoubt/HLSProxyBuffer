@@ -2,6 +2,18 @@ import Foundation
 import ProxyPlayerKit
 
 struct FeedDemoQualificationReport: Codable, Equatable, Sendable {
+    /// Fixed-cardinality diagnostic evidence, separate from the unchanged gate.
+    struct PlaybackStartDiagnostics: Codable, Equatable, Sendable {
+        struct Path: Codable, Equatable, Sendable {
+            let path: HLSFeedTelemetry.Path
+            let playbackStartLatency: HLSFeedTelemetry.Distribution
+            let stages: HLSFeedTelemetry.PlaybackStartStages?
+        }
+
+        let schemaVersion: Int
+        let paths: [Path]
+    }
+
     let passed: Bool
     let failures: [String]
     let navigationCount: Int
@@ -29,11 +41,13 @@ struct FeedDemoQualificationReport: Codable, Equatable, Sendable {
     let finalAllocatedPlayerCount: Int
     let finalActiveLoadCount: Int
     let staleCompletionCount: Int
+    /// Nil when decoding reports exported before startup-stage diagnostics.
+    let playbackStartDiagnostics: PlaybackStartDiagnostics?
 
     var json: String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        guard let data = try? encoder.encode(self) else { return "{}" }
+        guard let data = try? encoder.encode(self), data.count <= 64 * 1_024 else { return "{}" }
         return String(decoding: data, as: UTF8.self)
     }
 
@@ -153,7 +167,14 @@ struct FeedDemoQualificationReport: Codable, Equatable, Sendable {
             maximumPlayerPoolLimit: policy.concurrency.maximumPlayerCount,
             finalAllocatedPlayerCount: snapshot.allocatedPlayerCount,
             finalActiveLoadCount: snapshot.activeLoadCount,
-            staleCompletionCount: snapshot.staleCompletionCount
+            staleCompletionCount: snapshot.staleCompletionCount,
+            playbackStartDiagnostics: PlaybackStartDiagnostics(
+                schemaVersion: 1,
+                paths: telemetry.paths.map {
+                    .init(path: $0.path, playbackStartLatency: $0.firstFrameLatency,
+                          stages: $0.playbackStartStages)
+                }
+            )
         )
     }
 }
@@ -365,7 +386,7 @@ struct FeedDemoVerticalQualificationReport: Codable, Equatable, Sendable {
         )
     }
 
-    private static func summary(
+    static func summary(
         _ distributions: [HLSFeedTelemetry.Distribution]
     ) -> Distribution {
         let bounds = distributions.first?.upperBounds ?? []

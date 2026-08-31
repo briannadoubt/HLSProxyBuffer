@@ -282,6 +282,17 @@ private struct FeedDemoVerticalQualificationControls: View {
         }
         .padding(8)
         .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(alignment: .bottomTrailing) {
+            // Diagnostics must not expand the control panel into the pager's
+            // gesture surface or intercept touches.
+            FeedDemoAudiovisualAccessibility(
+                isAdvancing: model.engineSnapshot.activeItemID.flatMap {
+                    model.engineSnapshot.playback(for: $0)
+                }?.hasAdvancingVideoFrames == true,
+                report: model.audiovisualQualificationReport?.json ?? "pending"
+            )
+            .allowsHitTesting(false)
+        }
     }
 
     private func qualificationButton(
@@ -305,6 +316,26 @@ private struct FeedDemoVerticalQualificationControls: View {
             .opacity(0.01)
             .accessibilityIdentifier(identifier)
             .accessibilityValue(value)
+    }
+}
+
+private struct FeedDemoAudiovisualAccessibility: View {
+    let isAdvancing: Bool
+    let report: String
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text(verbatim: isAdvancing ? "advancing" : "waiting")
+                .accessibilityIdentifier("vertical-decoded-video")
+                .accessibilityValue(isAdvancing ? "advancing" : "waiting")
+            Text(verbatim: report)
+                .accessibilityIdentifier("audiovisual-qualification-report")
+                .accessibilityValue(report)
+        }
+        .font(.system(size: 1))
+        .lineLimit(1)
+        .frame(width: 1, height: 1)
+        .opacity(0.01)
     }
 }
 

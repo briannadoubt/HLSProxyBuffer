@@ -5,6 +5,13 @@ QUALIFICATION_ARTIFACT_DIR="${HLS_CI_ARTIFACT_DIR:-$PWD/ci-artifacts}"
 mkdir -p "$QUALIFICATION_ARTIFACT_DIR"
 export HLS_CI_ARTIFACT_DIR="$QUALIFICATION_ARTIFACT_DIR"
 
+if ! command -v jq >/dev/null 2>&1; then
+  echo "jq is required to validate feed qualification reports"
+  exit 1
+fi
+bash Scripts/test-audiovisual-report.sh
+bash Scripts/test-report-selection.sh
+
 CI_DERIVED_DATA_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/hlsproxy-ci-derived.XXXXXX")
 
 remove_derived_data() {
@@ -63,6 +70,10 @@ echo "Running the remaining SwiftPM tests on host..."
 swift test \
   --skip 'PlaybackAnalyticsQualificationTests' \
   --skip 'PlaybackAnalyticsPerformanceTests'
+
+# These bounded real-media AVFoundation scenarios are explicitly qualified on
+# the host outside sanitizer runs, before any simulator performance workload.
+RUN_PROXY_AV_TESTS=1 swift test --filter FeedDemoAudiovisualIntegrationTests
 
 FEED_QUALIFICATION_REPORT="$QUALIFICATION_ARTIFACT_DIR/hls-feed-qualification.json"
 if [ ! -s "$FEED_QUALIFICATION_REPORT" ]; then
@@ -126,19 +137,10 @@ if command -v xcodebuild >/dev/null 2>&1; then
     xcrun xcresulttool export attachments \
       --path "$UI_RESULT_BUNDLE" \
       --output-path "$UI_ATTACHMENT_DIR"
-    VERTICAL_REPORT_SOURCE=$(grep -l \
-      '"qualificationKind":"vertical_paging_ui"' \
-      "$UI_ATTACHMENT_DIR"/*.json 2>/dev/null | head -n 1 || true)
-    if [ -z "$VERTICAL_REPORT_SOURCE" ]; then
-      echo "Missing vertical_paging_ui attachment in $UI_RESULT_BUNDLE"
-      exit 1
-    fi
+    VERTICAL_REPORT_SOURCE=$(bash Scripts/select-qualification-report.sh \
+      vertical_paging_ui "$UI_ATTACHMENT_DIR"/*.json)
     VERTICAL_REPORT="$QUALIFICATION_ARTIFACT_DIR/hls-feed-vertical-ui-qualification.json"
     cp "$VERTICAL_REPORT_SOURCE" "$VERTICAL_REPORT"
-    if ! command -v jq >/dev/null 2>&1; then
-      echo "jq is required to validate the vertical-feed UI report"
-      exit 1
-    fi
     if ! jq -e \
       '.qualificationKind == "vertical_paging_ui" and .passed == true' \
       "$VERTICAL_REPORT" >/dev/null; then
@@ -146,6 +148,16 @@ if command -v xcodebuild >/dev/null 2>&1; then
       exit 1
     fi
     echo "Vertical-feed UI qualification report: $VERTICAL_REPORT"
+    AUDIOVISUAL_SOURCE=$(bash Scripts/select-qualification-report.sh \
+      real_audiovisual_feed_ui "$UI_ATTACHMENT_DIR"/*.json)
+    cp "$AUDIOVISUAL_SOURCE" "$QUALIFICATION_ARTIFACT_DIR/hls-real-audiovisual-ui.json"
+    jq -n -e \
+      --slurpfile ui "$AUDIOVISUAL_SOURCE" \
+      --slurpfile decode "$QUALIFICATION_ARTIFACT_DIR/hls-real-native-decode.json" \
+      --slurpfile renditions "$QUALIFICATION_ARTIFACT_DIR/hls-real-native-renditions.json" \
+      --slurpfile cache "$QUALIFICATION_ARTIFACT_DIR/hls-real-native-cache.json" \
+      -f Scripts/compose-audiovisual-report.jq \
+      > "$QUALIFICATION_ARTIFACT_DIR/hls-real-audiovisual-feed.json"
     remove_derived_data "$FEED_DEMO_DERIVED_DATA"
   else
     echo "iOS simulator build skipped (no $IOS_SIM_NAME available)."
@@ -161,10 +173,12 @@ if command -v xcodebuild >/dev/null 2>&1; then
     else
       echo "Running Release tvOS Simulator qualification on $TVOS_SIM_NAME..."
       TVOS_DERIVED_DATA="$CI_DERIVED_DATA_ROOT/tvos-package"
+      TVOS_RESULT_BUNDLE="$QUALIFICATION_ARTIFACT_DIR/HLSProxyTVOSQualification-$(date +%s).xcresult"
       xcodebuild \
         -scheme HLSProxyBuffer-Package \
         -configuration Release \
         -destination "platform=tvOS Simulator,id=$TVOS_SIM_UDID" \
+        -resultBundlePath "$TVOS_RESULT_BUNDLE" \
         -derivedDataPath "$TVOS_DERIVED_DATA" \
         ONLY_ACTIVE_ARCH=YES \
         ENABLE_TESTABILITY=YES \

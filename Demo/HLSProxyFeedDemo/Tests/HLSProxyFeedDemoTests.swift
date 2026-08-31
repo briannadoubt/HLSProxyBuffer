@@ -6,6 +6,58 @@ import HLSCore
 
 @MainActor
 final class HLSProxyFeedDemoTests: XCTestCase {
+    func testSyntheticStartupDiagnosticsPreserveSlowWarmSamplesAndGate() throws {
+        let telemetry = HLSFeedTelemetry()
+        for path in HLSFeedTelemetry.Path.all {
+            telemetry.record(.init(path: path, payload: .firstFrame(latency: 0.75)))
+            for _ in 0..<1_000 {
+                telemetry.record(.init(path: path, payload: .playbackStartStages(
+                    beforeActivation: 0.1, activationWork: 0.02,
+                    nativeStart: 0.6, callbackDelivery: 0.03
+                )))
+            }
+        }
+        let report = FeedDemoQualificationReport.make(
+            navigationCount: 100, measuredNavigationCount: 100, requestedItemID: nil,
+            snapshot: .empty, telemetry: telemetry.snapshot, policy: .shortFormFeed,
+            warmupMemoryBytes: 0
+        )
+        XCTAssertFalse(report.passed)
+        XCTAssertTrue(report.failures.contains("predicted-warm visible first-frame p95 exceeded 500 ms"))
+        XCTAssertEqual(report.warmFirstFrameCount, 3)
+        XCTAssertEqual(report.warmFirstFrameP95Milliseconds, 1_000)
+        let diagnostics = try XCTUnwrap(report.playbackStartDiagnostics)
+        XCTAssertEqual(diagnostics.schemaVersion, 1)
+        XCTAssertEqual(diagnostics.paths.count, 12)
+        for path in diagnostics.paths {
+            XCTAssertEqual(path.playbackStartLatency.count, 1)
+            XCTAssertEqual(path.playbackStartLatency.maximum, 0.75)
+            XCTAssertEqual(path.playbackStartLatency.approximateQuantile(0.95), 1)
+            let stages = try XCTUnwrap(path.stages)
+            XCTAssertEqual(stages.beforeActivation.count, 1_000)
+            XCTAssertEqual(stages.nativeStart.maximum, 0.6)
+            XCTAssertEqual(stages.nativeStart.bucketCounts.count, 12)
+        }
+        let data = Data(report.json.utf8)
+        XCTAssertLessThan(data.count, 64 * 1_024)
+        XCTAssertEqual(try JSONDecoder().decode(FeedDemoQualificationReport.self, from: data), report)
+        let diagnosticData = try JSONEncoder().encode(diagnostics)
+        let diagnosticJSON = String(decoding: diagnosticData, as: UTF8.self)
+        for forbidden in ["http://", "https://", "itemID", "authorization", "navigationHistory"] {
+            XCTAssertFalse(diagnosticJSON.contains(forbidden), forbidden)
+        }
+
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        legacy.removeValue(forKey: "playbackStartDiagnostics")
+        let legacyReport = try JSONDecoder().decode(
+            FeedDemoQualificationReport.self, from: JSONSerialization.data(withJSONObject: legacy)
+        )
+        XCTAssertNil(legacyReport.playbackStartDiagnostics)
+        XCTAssertEqual(legacyReport.warmFirstFrameCount, report.warmFirstFrameCount)
+        XCTAssertEqual(legacyReport.warmFirstFrameP95Milliseconds, report.warmFirstFrameP95Milliseconds)
+        XCTAssertEqual(legacyReport.failures, report.failures)
+    }
+
     func testReadyHandoffGateDoesNotMixColdRequestsWithReadyOutcomes() {
         let telemetry = HLSFeedTelemetry()
         let path = HLSFeedTelemetry.Path(reuse: .warm, intent: .focused, mediaKind: .videoOnDemand)
@@ -94,6 +146,8 @@ final class HLSProxyFeedDemoTests: XCTestCase {
                 phase: .focused,
                 state: PlayerState(status: .ready),
                 hasStartedPlayback: true,
+                hasDecodedVideoFrame: false,
+                hasAdvancingVideoFrames: false,
                 isAudible: true
             )],
             failures: [],
@@ -146,6 +200,18 @@ final class HLSProxyFeedDemoTests: XCTestCase {
         XCTAssertEqual(report.cacheHitBytes, 4_096)
         XCTAssertEqual(report.originByteCount, 8_192)
         XCTAssertEqual(report.fixtureResponseByteCount, 12_288)
+
+        let audiovisual = FeedDemoAudiovisualReport.make(
+            vertical: report, engine: engine, telemetry: telemetry.snapshot,
+            origin: origin, configuration: .realMedia
+        )
+        XCTAssertFalse(audiovisual.passed, "Playing state alone cannot pass audiovisual qualification")
+        XCTAssertTrue(audiovisual.failureCodes.contains("final_decoded_frames_not_advancing"))
+        XCTAssertTrue(audiovisual.failureCodes.contains("missing_native_audio_ownership"))
+        XCTAssertLessThan(audiovisual.json.utf8.count, 64 * 1_024)
+        for forbidden in ["https://", "authorization", "fixture-focus"] {
+            XCTAssertFalse(audiovisual.json.contains(forbidden))
+        }
 
         let json = report.json
         XCTAssertTrue(json.contains("\"passed\":true"))
@@ -691,20 +757,24 @@ final class HLSProxyFeedDemoTests: XCTestCase {
 
     func testDemoBackgroundTransitionSilencesPlaybackResubmitsAndHonorsWarmCap() async {
         let scheduler = RecordingBackgroundScheduler()
+        let audioSession = RecordingAudioSession()
         let environment = FeedDemoStaticBackgroundEnvironment(current: .init(
             networkInterface: .wifi
         ))
         let model = FeedDemoModel(
             mediaConfiguration: .synthetic,
+            audioSession: audioSession,
             backgroundScheduler: scheduler,
             backgroundEnvironment: environment
         )
         await model.start()
         XCTAssertEqual(model.status, .running)
+        XCTAssertEqual(audioSession.requests, [true])
 
         model.handleApplicationPhase(.background)
         XCTAssertTrue(model.engine?.snapshot.isPlaybackSuspended == true)
         XCTAssertNil(model.engine?.snapshot.audibleItemID)
+        XCTAssertEqual(audioSession.requests.last, false)
         XCTAssertEqual(scheduler.requests.map(\.kind), [.refresh, .processing])
 
         _ = await model.performBackgroundTask(.refresh)
@@ -721,7 +791,37 @@ final class HLSProxyFeedDemoTests: XCTestCase {
 
         model.handleApplicationPhase(.active)
         XCTAssertTrue(model.engine?.snapshot.isPlaybackSuspended == false)
+        XCTAssertEqual(audioSession.requests.last, true)
         XCTAssertEqual(scheduler.cancelledKinds, [.refresh, .processing])
+        await model.stop()
+        XCTAssertEqual(audioSession.requests.last, false)
+    }
+
+    func testAudioSessionActivationFailureKeepsEngineSuspended() async {
+        let audioSession = RecordingAudioSession()
+        let model = FeedDemoModel(mediaConfiguration: .synthetic, audioSession: audioSession)
+        await model.start()
+        XCTAssertEqual(model.status, .running)
+        model.handleApplicationPhase(.inactive)
+        audioSession.rejectActivation = true
+        model.handleApplicationPhase(.active)
+        guard case .failed = model.status else {
+            await model.stop()
+            return XCTFail("Audio activation failure must be visible")
+        }
+        XCTAssertTrue(model.engine?.snapshot.isPlaybackSuspended == true)
+        XCTAssertNil(model.engine?.snapshot.audibleItemID)
+        await model.stop()
+    }
+
+    func testBackgroundColdStartDoesNotActivateAudio() async {
+        let audioSession = RecordingAudioSession()
+        let model = FeedDemoModel(mediaConfiguration: .synthetic, audioSession: audioSession)
+        model.handleApplicationPhase(.background)
+        await model.start()
+        XCTAssertEqual(model.status, .running)
+        XCTAssertFalse(audioSession.requests.contains(true))
+        XCTAssertTrue(model.engine?.snapshot.isPlaybackSuspended == true)
         await model.stop()
     }
 
@@ -761,6 +861,18 @@ final class HLSProxyFeedDemoTests: XCTestCase {
             try? await clock.sleep(for: .milliseconds(25))
         }
         return false
+    }
+}
+
+@MainActor
+private final class RecordingAudioSession: FeedDemoAudioSessionManaging {
+    struct ActivationRejected: Error {}
+    var rejectActivation = false
+    private(set) var requests: [Bool] = []
+
+    func setPlaybackActive(_ active: Bool) throws {
+        requests.append(active)
+        if active, rejectActivation { throw ActivationRejected() }
     }
 }
 

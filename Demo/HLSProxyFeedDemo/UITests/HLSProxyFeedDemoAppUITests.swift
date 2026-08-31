@@ -8,6 +8,40 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
         continueAfterFailure = false
     }
 
+    func testReportGateRejectsNestedSuccessAndInvalidEnvelopes() {
+        let kind = "real_audiovisual_feed_ui"
+        XCTAssertTrue(reportPassed(
+            #"{"schemaVersion":1,"qualificationKind":"real_audiovisual_feed_ui","passed":true}"#,
+            kind: kind
+        ))
+        let invalidReports = [
+            #"{"schemaVersion":1,"qualificationKind":"real_audiovisual_feed_ui","passed":false,"vertical":{"passed":true}}"#,
+            #"{"schemaVersion":1,"qualificationKind":"real_audiovisual_feed_ui","vertical":{"passed":true}}"#,
+            #"{"schemaVersion":1,"qualificationKind":"real_audiovisual_feed_ui","passed":"true"}"#,
+            #"{"schemaVersion":1,"qualificationKind":"real_audiovisual_feed_ui","passed":1}"#,
+            #"{"schemaVersion":2,"qualificationKind":"real_audiovisual_feed_ui","passed":true}"#,
+            #"{"qualificationKind":"real_audiovisual_feed_ui","passed":true}"#,
+            #"{"schemaVersion":1,"qualificationKind":"wrong","passed":true}"#,
+            #"[{"schemaVersion":1,"qualificationKind":"real_audiovisual_feed_ui","passed":true}]"#,
+            #"{"schemaVersion":1,"qualificationKind":"real_audiovisual_feed_ui","passed":true"#,
+        ]
+        for report in invalidReports {
+            XCTAssertFalse(reportPassed(report, kind: kind), report)
+        }
+    }
+
+    private func reportPassed(_ report: String, kind: String) -> Bool {
+        struct Envelope: Decodable {
+            let schemaVersion: Int
+            let qualificationKind: String
+            let passed: Bool
+        }
+        guard let envelope = try? JSONDecoder().decode(Envelope.self, from: Data(report.utf8)) else {
+            return false
+        }
+        return envelope.schemaVersion == 1 && envelope.qualificationKind == kind && envelope.passed
+    }
+
     @MainActor
     func testPrimaryFeedQualifiesRealVerticalPagingAndAdverseConditions() throws {
         XCUIDevice.shared.orientation = .portrait
@@ -91,8 +125,16 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
         attachment.lifetime = .keepAlways
         add(attachment)
 
-        XCTAssertTrue(report.contains("\"qualificationKind\":\"vertical_paging_ui\""), report)
-        XCTAssertTrue(report.contains("\"passed\":true"), report)
+        let audiovisualElement = app.staticTexts["audiovisual-qualification-report"]
+        XCTAssertTrue(waitForValueMatching(NSPredicate(format: "value != %@", "pending"), in: audiovisualElement, timeout: 5))
+        let audiovisual = value(of: audiovisualElement)
+        let audiovisualAttachment = XCTAttachment(data: Data(audiovisual.utf8), uniformTypeIdentifier: "public.json")
+        audiovisualAttachment.name = "hls-real-audiovisual-ui.json"
+        audiovisualAttachment.lifetime = .keepAlways
+        add(audiovisualAttachment)
+        XCTAssertTrue(reportPassed(audiovisual, kind: "real_audiovisual_feed_ui"), audiovisual)
+
+        XCTAssertTrue(reportPassed(report, kind: "vertical_paging_ui"), report)
         XCTAssertTrue(report.contains("\"finalOwnershipAligned\":true"), report)
         XCTAssertTrue(report.contains("\"networkConditionTransitionCount\":3"), report)
     }
@@ -326,6 +368,7 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
             ))
         }
         XCTAssertTrue(waitForValue("Playing", in: playback, timeout: timeout))
+        XCTAssertTrue(waitForValue("advancing", in: app.staticTexts["vertical-decoded-video"], timeout: timeout))
 
         for _ in 0..<3 {
             let focusedValue = value(of: focused)

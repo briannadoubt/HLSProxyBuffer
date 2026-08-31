@@ -304,6 +304,24 @@ public final class PlaybackAnalyticsTimeline {
             states[attempt.token] = state
         }
         switch event.payload {
+        case .playbackStartStages:
+            // Fixed-cardinality feed telemetry owns the detailed decomposition.
+            // Keep analytics' existing end-to-end measurement unchanged.
+            return
+        case .nativeAudioOwnership:
+            // Aggregate-only audit; repeating mute samples need not flood the
+            // ordered analytics timeline with identical resource events.
+            break
+        case .decodedVideo(let latency, let frames, let advancingFrames):
+            var values: [(String, Double, PlaybackAnalytics.MeasurementUnit)] = [
+                ("decoded_frame_count", Double(max(0, frames)), .count),
+                ("advancing_decoded_frame_count", Double(max(0, min(frames, advancingFrames))), .count),
+            ]
+            if let latency { values.append(("decoded_first_frame_latency", latency, .seconds)) }
+            emit(
+                source: .feedEngine, lifecycle: .resourceCompleted,
+                measurements: Self.measurements(values), attempt: attempt
+            )
         case .firstFrame(let latency):
             emit(
                 source: .feedEngine,

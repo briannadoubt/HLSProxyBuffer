@@ -2,10 +2,52 @@
 import AVFoundation
 import Foundation
 import XCTest
+import os
 @testable import ProxyPlayerKit
 
 @MainActor
 final class AVPlaybackMetricCollectorTests: XCTestCase {
+    func testSynchronousCollectorReleaseFinishesWithoutAnIsolatedDeinitThunk() {
+        var collector: AVPlaybackMetricCollector? = AVPlaybackMetricCollector(
+            correlation: Self.correlation
+        )
+        weak var released = collector
+        collector = nil
+        XCTAssertNil(released)
+    }
+
+    func testSynchronousLegacySourceReleaseRemovesItsObservers() {
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        let player = AVPlayer(playerItem: item)
+        var source: LegacyAVPlaybackMetricSource? = LegacyAVPlaybackMetricSource(item: item, player: player)
+        weak var released = source
+        source?.start { _ in }
+        XCTAssertEqual(source?.resources.observerCount, 9)
+        source = nil
+        XCTAssertNil(released)
+    }
+
+    func testOffMainCollectorReleaseStopsSourceAndFinishesStream() async throws {
+        let factory = FakeAVPlaybackMetricSourceFactory(path: .legacyFallback)
+        let ownership = OSAllocatedUnfairLock(initialState: Optional(makeCollector(factory: factory)))
+        weak var released = ownership.withLock { $0 }
+        let events = try XCTUnwrap(ownership.withLock { $0 }?.events)
+        let player = AVPlayer(playerItem: AVPlayerItem(asset: AVMutableComposition()))
+        ownership.withLock { $0 }?.attach(to: player)
+        try await waitUntil { factory.sources.count == 1 }
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                ownership.withLock { $0 = nil }
+                continuation.resume()
+            }
+        }
+        try await waitUntil { factory.sources[0].stopCount == 1 }
+        XCTAssertNil(released)
+        var iterator = events.makeAsyncIterator()
+        let terminal = await iterator.next()
+        XCTAssertNil(terminal)
+    }
+
     func testCollectorMapsSamplesIntoCorrelatedSanitizedEvents() async throws {
         let factory = FakeAVPlaybackMetricSourceFactory(path: .nativeAVMetrics)
         let collector = makeCollector(factory: factory)

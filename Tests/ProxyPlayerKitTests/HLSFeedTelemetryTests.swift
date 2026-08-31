@@ -5,6 +5,36 @@ import XCTest
 
 @MainActor
 final class HLSFeedTelemetryTests: XCTestCase {
+    func testDecodedVideoIsSeparateBoundedAndBackwardCompatible() throws {
+        let telemetry = HLSFeedTelemetry()
+        let path = HLSFeedTelemetry.Path(reuse: .warm, intent: .focused, mediaKind: .videoOnDemand)
+        telemetry.record(.init(path: path, payload: .firstFrame(latency: 0.1)))
+        XCTAssertEqual(telemetry.snapshot.metrics(for: path)?.decodedFrameCount, 0)
+        for index in 0..<10_000 {
+            telemetry.record(.init(path: path, payload: .decodedVideo(
+                firstFrameLatency: index == 0 ? 0.2 : nil, frames: 1, advancingFrames: index == 0 ? 0 : 1
+            )))
+        }
+        let metrics = try XCTUnwrap(telemetry.snapshot.metrics(for: path))
+        XCTAssertEqual(metrics.firstFrameLatency.count, 1)
+        XCTAssertEqual(metrics.decodedFirstFrameLatency?.count, 1)
+        XCTAssertEqual(metrics.decodedFirstFrameLatency?.maximum, 0.2)
+        XCTAssertEqual(metrics.decodedFrameCount, 10_000)
+        XCTAssertEqual(metrics.advancingDecodedFrameCount, 9_999)
+        let data = try JSONEncoder().encode(metrics)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        for key in ["decodedFirstFrameLatency", "decodedFrameCount", "advancingDecodedFrameCount", "playbackStartStages"] {
+            legacy.removeValue(forKey: key)
+        }
+        let decoded = try JSONDecoder().decode(
+            HLSFeedTelemetry.PathSnapshot.self, from: JSONSerialization.data(withJSONObject: legacy)
+        )
+        XCTAssertNil(decoded.decodedFirstFrameLatency)
+        XCTAssertNil(decoded.decodedFrameCount, "Legacy playing-state evidence must not invent decoded frames")
+        XCTAssertNil(decoded.playbackStartStages)
+        XCTAssertEqual(telemetry.snapshot.storageBound.histogramCount, 96)
+    }
+
     func testOneHundredThousandEventsKeepFixedStorageAndCorrectAggregates() throws {
         let telemetry = HLSFeedTelemetry(configuration: .init(
             latencyUpperBounds: [0.1, 1],
@@ -49,9 +79,9 @@ final class HLSFeedTelemetryTests: XCTestCase {
         XCTAssertEqual(snapshot.eventCount, 100_001)
         XCTAssertEqual(snapshot.paths.count, 12)
         XCTAssertEqual(snapshot.storageBound.pathCount, 12)
-        XCTAssertEqual(snapshot.storageBound.histogramCount, 36)
+        XCTAssertEqual(snapshot.storageBound.histogramCount, 96)
         XCTAssertEqual(snapshot.storageBound.bucketsPerHistogram, 3)
-        XCTAssertEqual(snapshot.storageBound.maximumHistogramBucketCount, 108)
+        XCTAssertEqual(snapshot.storageBound.maximumHistogramBucketCount, 288)
         XCTAssertEqual(snapshot.storageBound.maximumCancellationOutcomeCount, 36)
         XCTAssertEqual(snapshot.storageBound.maximumBufferedEventCount, 2)
         XCTAssertEqual(metrics.firstFrameLatency.bucketCounts, [20_000, 20_000, 0])
