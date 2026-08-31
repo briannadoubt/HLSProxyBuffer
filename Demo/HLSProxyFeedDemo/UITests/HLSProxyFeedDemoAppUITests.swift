@@ -86,15 +86,15 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
             timeout: 15
         ))
         let report = value(of: reportElement)
-        XCTAssertTrue(report.contains("\"qualificationKind\":\"vertical_paging_ui\""), report)
-        XCTAssertTrue(report.contains("\"passed\":true"), report)
-        XCTAssertTrue(report.contains("\"finalOwnershipAligned\":true"), report)
-        XCTAssertTrue(report.contains("\"networkConditionTransitionCount\":3"), report)
-
         let attachment = XCTAttachment(data: Data(report.utf8), uniformTypeIdentifier: "public.json")
         attachment.name = "hls-feed-vertical-ui-qualification.json"
         attachment.lifetime = .keepAlways
         add(attachment)
+
+        XCTAssertTrue(report.contains("\"qualificationKind\":\"vertical_paging_ui\""), report)
+        XCTAssertTrue(report.contains("\"passed\":true"), report)
+        XCTAssertTrue(report.contains("\"finalOwnershipAligned\":true"), report)
+        XCTAssertTrue(report.contains("\"networkConditionTransitionCount\":3"), report)
     }
 
     @MainActor
@@ -149,6 +149,12 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
             timeout: 15
         ))
         let report = reportElement.value as? String ?? reportElement.label
+        // Keep machine-readable failure evidence even when continueAfterFailure
+        // stops the test at the first performance/ownership assertion.
+        let attachment = XCTAttachment(data: Data(report.utf8), uniformTypeIdentifier: "public.json")
+        attachment.name = "hls-feed-ui-qualification.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
         XCTAssertTrue(waitForValue(
             "PASS",
             in: app.staticTexts["qualification-result"],
@@ -167,10 +173,6 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
             report
         )
         XCTAssertTrue(report.contains("\"passed\":true"), report)
-        let attachment = XCTAttachment(data: Data(report.utf8), uniformTypeIdentifier: "public.json")
-        attachment.name = "hls-feed-ui-qualification.json"
-        attachment.lifetime = .keepAlways
-        add(attachment)
     }
 
     @MainActor
@@ -201,13 +203,29 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
         XCTAssertTrue(inspectorButton.waitForExistence(timeout: 10))
         inspectorButton.tap()
 
-        let inspector = app.descendants(matching: .any)["analytics-inspector"]
+        let inspector = app.scrollViews.matching(identifier: "analytics-inspector").firstMatch
         XCTAssertTrue(inspector.waitForExistence(timeout: 5))
-        let mode = app.descendants(matching: .any)["analytics-mode"]
-        XCTAssertTrue(waitForValue("shortForm", in: mode, timeout: 5))
-        let eventCount = app.descendants(matching: .any)["analytics-event-count"]
+        // These IDs are unique within the inspector. Stop at the matching tile
+        // instead of walking the entire live timeline/export accessibility tree.
+        let mode = inspector.descendants(matching: .any)
+            .matching(identifier: "analytics-mode").firstMatch
+        // Mode is fixed for this presentation, not an asynchronous playback
+        // signal. A predicate waiter can interrupt the remote snapshot before
+        // it returns a value; assert the resolved snapshot directly instead.
+        let modeSnapshot = try mode.snapshot()
+        let modeEvidence = XCTAttachment(string:
+            "identifier=\(modeSnapshot.identifier)\n"
+                + "label=\(modeSnapshot.label)\n"
+                + "value=\(modeSnapshot.value as? String ?? "<missing>")"
+        )
+        modeEvidence.name = "analytics-mode-snapshot"
+        modeEvidence.lifetime = .keepAlways
+        add(modeEvidence)
+        XCTAssertEqual(modeSnapshot.value as? String, "shortForm")
+        let eventCount = inspector.descendants(matching: .any)
+            .matching(identifier: "analytics-event-count").firstMatch
         XCTAssertTrue(waitForValueMatching(
-            NSPredicate(format: "value != %@", "0"),
+            NSPredicate(format: "value MATCHES %@", "[1-9][0-9]*"),
             in: eventCount,
             timeout: 10
         ))
@@ -215,7 +233,8 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
         for layer in ["avFoundation", "proxyOrigin", "engine", "exporter"] {
             XCTAssertTrue(
                 scrollToExistence(
-                    app.descendants(matching: .any)["analytics-layer-\(layer)"],
+                    inspector.descendants(matching: .any)
+                        .matching(identifier: "analytics-layer-\(layer)").firstMatch,
                     in: app
                 ),
                 layer
@@ -223,18 +242,21 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
         }
         XCTAssertTrue(
             scrollToExistence(
-                app.descendants(matching: .any)["analytics-summary-status"],
+                inspector.descendants(matching: .any)
+                    .matching(identifier: "analytics-summary-status").firstMatch,
                 in: app
             )
         )
         XCTAssertTrue(
             scrollToExistence(
-                app.descendants(matching: .any)["analytics-delivery-health"],
+                inspector.descendants(matching: .any)
+                    .matching(identifier: "analytics-delivery-health").firstMatch,
                 in: app
             )
         )
 
-        let previewElement = app.descendants(matching: .any)["analytics-export-preview"]
+        let previewElement = inspector.descendants(matching: .any)
+            .matching(identifier: "analytics-export-preview").firstMatch
         XCTAssertTrue(scrollToExistence(previewElement, in: app))
         XCTAssertTrue(waitForValueMatching(
             NSPredicate(format: "value != %@", "pending"),

@@ -60,6 +60,15 @@ proxy/origin, feed-engine, and exporter layers, plus a canonical sanitized JSON
 Lines preview. Stable `analytics-*` accessibility identifiers make the same
 surface available to UI qualification.
 
+The UI test scopes its known-unique tile queries to the inspector and uses
+`firstMatch` to avoid scanning the whole live timeline and export subtree.
+The presentation's fixed mode is checked from a resolved accessibility
+snapshot, with its identifier, label, and value attached to the test result.
+This distinguishes a missing/wrong value from a remote accessibility-query
+failure: a short nested predicate waiter can cancel the query before any
+value is returned. Changing event counts still use asynchronous predicates;
+the mode assertion and playback performance gates are not weakened.
+
 The demo attaches exactly one sink to the engine's public typed streams. The
 engine still owns every `AVPlayer`, proxy listener, cache, and buffer:
 

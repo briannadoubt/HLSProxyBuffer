@@ -150,7 +150,6 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
     private let allowsInsecureManifests: Bool
     private var manifestSession: URLSession
     private let managesManifestSession: Bool
-    private let parser = HLSParser()
     private let segmentSource: any SegmentSource
     private let managedSegmentFetcher: HLSSegmentFetcher?
     private let cache: HLSSegmentCache
@@ -487,67 +486,29 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
         cacheHitByteCount: Int,
         originFetchByteCount: Int
     ) {
-        guard allowsInsecureManifests || url.scheme?.lowercased() == "https" else {
-            throw HLSManifestFetcher.FetchError.insecureScheme
-        }
-        let key = "manifest-\(url.absoluteString)"
-        let cached = await cache.entry(for: key, allowingExpired: true)
-        if let cached, !cached.isExpired,
-           let text = String(data: cached.data, encoding: .utf8) {
-            return (try parser.parse(text, baseURL: url), 1, 0, cached.data.count, 0)
-        }
-
         let currentPolicy = policy
         let session = manifestSession
         let allowInsecure = allowsInsecureManifests
-        let response = try await limiter.withPermit(origin: Origin(url: url)) {
-            let fetcher = HLSManifestFetcher(
-                url: url,
-                session: session,
-                retryPolicy: currentPolicy.retry.manifest,
-                networkPolicy: currentPolicy.network
-            )
-            return try await fetcher.fetchValidatedManifest(
-                from: url,
-                allowInsecure: allowInsecure,
-                ifNoneMatch: cached?.validation?.eTag,
-                ifModifiedSince: cached?.validation?.lastModified
-            )
-        }
-        try Task.checkCancellation()
-        switch response {
-        case .notModified(let validation):
-            guard let cached,
-                  let text = String(data: cached.data, encoding: .utf8)
-            else {
-                throw HLSManifestFetcher.FetchError.invalidResponse(nil)
-            }
-            if validation.allowsStorage {
-                await cache.put(
-                    cached.data,
-                    for: key,
-                    validation: Self.cacheValidation(
-                        validation,
-                        fallingBackTo: cached.validation
-                    )
+        let result = try await ManifestCacheLoader.load(
+            from: url, cache: cache, allowsInsecure: allowInsecure
+        ) { [limiter] eTag, lastModified in
+            try await limiter.withPermit(origin: Origin(url: url)) {
+                let fetcher = HLSManifestFetcher(
+                    url: url,
+                    session: session,
+                    retryPolicy: currentPolicy.retry.manifest,
+                    networkPolicy: currentPolicy.network
                 )
-            } else {
-                await cache.remove(key)
-            }
-            return (try parser.parse(text, baseURL: url), 1, 1, cached.data.count, 0)
-        case .modified(let text, let validation):
-            let data = Data(text.utf8)
-            if validation.allowsStorage {
-                await cache.put(
-                    data,
-                    for: key,
-                    validation: Self.cacheValidation(validation)
+                return try await fetcher.fetchValidatedManifest(
+                    from: url, allowInsecure: allowInsecure,
+                    ifNoneMatch: eTag, ifModifiedSince: lastModified
                 )
-            } else {
-                await cache.remove(key)
             }
-            return (try parser.parse(text, baseURL: url), 0, 1, 0, data.count)
         }
+        return (
+            result.manifest, result.cacheHitCount, result.originFetchCount,
+            result.cacheHitByteCount, result.originFetchByteCount
+        )
     }
 
     private func fetch(_ resource: Resource) async throws -> ResourceOutcome {
@@ -666,17 +627,6 @@ public actor HLSFeedPreparationBackend: FeedPreparing {
         return root
             .appendingPathComponent("HLSProxyBuffer", isDirectory: true)
             .appendingPathComponent("FeedPreparation", isDirectory: true)
-    }
-
-    private static func cacheValidation(
-        _ validation: HLSManifestFetcher.Validation,
-        fallingBackTo fallback: HLSSegmentCache.ValidationMetadata? = nil
-    ) -> HLSSegmentCache.ValidationMetadata {
-        HLSSegmentCache.ValidationMetadata(
-            eTag: validation.eTag ?? fallback?.eTag,
-            lastModified: validation.lastModified ?? fallback?.lastModified,
-            freshUntil: validation.maximumAge.map { Date().addingTimeInterval($0) }
-        )
     }
 
     private static func cacheValidation(

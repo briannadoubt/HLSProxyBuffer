@@ -7,6 +7,105 @@ import XCTest
 
 @MainActor
 final class HLSFeedEngineTests: XCTestCase {
+    func testWarmHandoffDoesNotWaitForExpandedFocusedPreparation() async throws {
+        let items = makeItems(count: 2)
+        let expansion = FeedTestLoadGate()
+        defer { expansion.release() }
+        let factory = FakeFeedSessionFactory()
+        var policy = try makePolicy(maximumPlayerCount: 2)
+        policy.prefetch.behindItemCount = 1
+        policy.budget.maximumResidentItems = 3
+        let engine = try makeEngine(
+            items: items, policy: policy, factory: factory,
+            beforePreparation: { request in
+                if request.generation.rawValue == 2, request.item.id == items[1].id {
+                    await expansion.wait()
+                }
+            }
+        )
+        try await engine.update(signal(generation: 1, focused: items[0].id))
+        _ = await engine.waitUntilSettled()
+        let warmSession = try XCTUnwrap(factory.session(loadedWith: items[1].id))
+        XCTAssertEqual(engine.snapshot.playback(for: items[1].id)?.phase, .warm)
+
+        // The neighbor owns a successfully primed player, but its one-segment
+        // preparation result cannot satisfy the focused two-segment target.
+        // Hold that expansion indefinitely: playback must not depend on it.
+        try await engine.update(signal(generation: 2, focused: items[1].id))
+        XCTAssertEqual(engine.snapshot.activeItemID, items[1].id)
+        XCTAssertEqual(engine.snapshot.playback(for: items[1].id)?.hasStartedPlayback, true)
+        XCTAssertEqual(factory.audiblePlayingItemIDs, [items[1].id])
+        XCTAssertEqual(warmSession.loadCount, 1)
+        XCTAssertEqual(warmSession.preparationCount, 1)
+
+        // Reversal must invalidate the pending expansion without letting its
+        // eventual completion reclaim focus or restart obsolete playback.
+        try await engine.update(signal(generation: 3, focused: items[0].id))
+        expansion.release()
+        _ = await engine.waitUntilSettled()
+        XCTAssertEqual(engine.snapshot.activeItemID, items[0].id)
+        XCTAssertEqual(factory.audiblePlayingItemIDs, [items[0].id])
+        XCTAssertLessThanOrEqual(factory.maximumAudiblePlayingCount, 1)
+        await engine.stop()
+    }
+
+    func testLeaseRetirementResilencesRetainedNativePlayerAfterSessionTeardown() async throws {
+        for failsDuringPlayback in [false, true] {
+            let items = makeItems(count: 2)
+            let factory = FakeFeedSessionFactory(usesUnstartedPlatformPlayer: true)
+            let engine = try makeEngine(
+                items: items,
+                policy: makePolicy(maximumPlayerCount: 2),
+                factory: factory
+            )
+            try await engine.update(signal(generation: 1, focused: items[0].id))
+            _ = await engine.waitUntilSettled()
+            let session = try XCTUnwrap(factory.session(loadedWith: items[0].id))
+            let retiredPlayer = try XCTUnwrap(session.feedPlatformPlayer)
+            // Model a native teardown callback resetting audio properties after
+            // the engine's initial mute, without relying on its timing.
+            session.afterStop = {
+                retiredPlayer.isMuted = false
+                retiredPlayer.volume = 1
+            }
+            if failsDuringPlayback {
+                session.failCurrentPlayback(message: "retire failed player")
+                let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+                while session.stopCount == 0, ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(5))
+                }
+            } else {
+                try await engine.update(signal(generation: 2, focused: items[1].id))
+            }
+            _ = await engine.waitUntilSettled()
+            XCTAssertGreaterThan(session.stopCount, 0)
+            XCTAssertTrue(retiredPlayer.isMuted)
+            XCTAssertEqual(retiredPlayer.volume, 0)
+            XCTAssertEqual(retiredPlayer.rate, 0)
+            session.afterStop = nil
+            await engine.stop()
+        }
+    }
+
+    func testOriginPreparationFailureIsVisibleAndClearsOnSuccessfulRetry() async throws {
+        let items = makeItems(count: 1)
+        let engine = try makeEngine(
+            items: items, policy: makePolicy(maximumPlayerCount: 1, prefetchItemCount: 0),
+            factory: FakeFeedSessionFactory(), preparationFailureGenerations: [1]
+        )
+        try await engine.update(signal(generation: 1, focused: items[0].id))
+        let failed = await engine.waitUntilSettled()
+        XCTAssertEqual(failed.failures.map(\.itemID), [items[0].id])
+        XCTAssertEqual(failed.failures.first?.generation, .init(rawValue: 1))
+        XCTAssertNil(failed.activeItemID)
+
+        try await engine.update(signal(generation: 2, focused: items[0].id))
+        let recovered = await engine.waitUntilSettled()
+        XCTAssertTrue(recovered.failures.isEmpty)
+        XCTAssertEqual(recovered.activeItemID, items[0].id)
+        await engine.stop()
+    }
+
     func testMemoryPressureHookShedsSharedMemoryWithoutDiscardingDiskBytes() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("HLSFeedEnginePressure-\(UUID().uuidString)", isDirectory: true)
@@ -819,9 +918,14 @@ final class HLSFeedEngineTests: XCTestCase {
         telemetry: HLSFeedTelemetry? = nil,
         analytics: PlaybackAnalyticsTimeline? = nil,
         sharedCache: HLSSegmentCache? = nil,
+        preparationFailureGenerations: Set<UInt64> = [],
+        beforePreparation: (@Sendable (FeedPreparationRequest) async -> Void)? = nil,
         playerPreparationRetryPolicy: HLSFeedPlayerPreparationRetryPolicy = .automaticFeed
     ) throws -> HLSFeedEngine {
-        let backend = ImmediateFeedPreparationBackend()
+        let backend = ImmediateFeedPreparationBackend(
+            failingGenerations: preparationFailureGenerations,
+            beforePreparation: beforePreparation
+        )
         let coordinator = try FeedCoordinator(items: items, policy: policy, backend: backend)
         return try HLSFeedEngine(
             items: items,
@@ -912,8 +1016,23 @@ final class HLSFeedEngineTests: XCTestCase {
 }
 
 private actor ImmediateFeedPreparationBackend: FeedPreparing {
+    private let failingGenerations: Set<UInt64>
+    private let beforePreparation: (@Sendable (FeedPreparationRequest) async -> Void)?
+
+    init(
+        failingGenerations: Set<UInt64> = [],
+        beforePreparation: (@Sendable (FeedPreparationRequest) async -> Void)? = nil
+    ) {
+        self.failingGenerations = failingGenerations
+        self.beforePreparation = beforePreparation
+    }
+
     func prepare(_ request: FeedPreparationRequest) async throws -> FeedPreparedItem {
+        await beforePreparation?(request)
         try Task.checkCancellation()
+        if failingGenerations.contains(request.generation.rawValue) {
+            throw URLError(.notConnectedToInternet)
+        }
         return FeedPreparedItem(
             itemID: request.item.id,
             generation: request.generation,
@@ -1007,6 +1126,7 @@ private final class FakeFeedSessionFactory {
 @MainActor
 private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     var beforeLoadCompletion: (@MainActor (FeedItemID) async -> Void)?
+    var afterStop: (@MainActor () -> Void)?
     private(set) var state = PlayerState()
     let feedPlatformPlayer: AVPlayer?
     private(set) var configuration: ProxyPlayerConfiguration
@@ -1175,6 +1295,7 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
         for continuation in streamingContinuations.values { continuation.finish() }
         streamingContinuations.removeAll()
         activeStateObserverCount = 0
+        afterStop?()
     }
 
     func restartPlayback() async {

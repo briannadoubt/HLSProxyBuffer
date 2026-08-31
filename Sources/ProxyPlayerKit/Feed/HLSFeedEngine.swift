@@ -753,10 +753,7 @@ public final class HLSFeedEngine {
         // external read-only references silent even if a late AVFoundation
         // callback raced with observer cancellation while teardown awaited.
         for player in retainedPlatformPlayers {
-            player.isMuted = true
-            player.volume = 0
-            player.pause()
-            player.cancelPendingPrerolls()
+            Self.silenceRetiredPlayer(player)
         }
         for attempt in analyticsAttempts where analytics.isActive(attempt) {
             analytics.end(attempt, lifecycle: .cancelled)
@@ -818,10 +815,17 @@ public final class HLSFeedEngine {
         }
 
         for entry in value.entries {
-            guard case .ready(let prepared) = entry.status,
-                  let item = itemsByID[entry.itemID],
+            guard let item = itemsByID[entry.itemID],
                   let generation = value.generation
             else { continue }
+            // Moving from neighbor to focus may expand the preparation target.
+            // A retained, successfully primed player already owns a playable
+            // buffer; keep that handoff independent of the additional fetches.
+            if reuseLease(
+                for: item, generation: generation, role: entry.role,
+                requiresPrimedPlayer: true
+            ) { continue }
+            guard case .ready(let prepared) = entry.status else { continue }
             ensureLease(
                 for: item,
                 prepared: prepared,
@@ -846,23 +850,7 @@ public final class HLSFeedEngine {
         generation: FeedNavigationGeneration,
         role: FeedPlan.Role
     ) {
-        if let slot = slot(for: item.id), var lease = slot.lease, lease.source == item.source {
-            slot.releaseTask?.cancel()
-            slot.releaseTask = nil
-            lease.generation = generation
-            lease.role = role
-            lease.telemetryPath = Self.telemetryPath(
-                reuse: lease.telemetryPath.reuse,
-                role: role,
-                source: item.source
-            )
-            analytics.updateAttribution(
-                Self.analyticsAttribution(from: lease.telemetryPath),
-                for: lease.analyticsAttempt
-            )
-            slot.lease = lease
-            return
-        }
+        if reuseLease(for: item, generation: generation, role: role) { return }
 
         guard let slot = availableSlot(for: role) else { return }
         failuresByItemID.removeValue(forKey: item.id)
@@ -873,6 +861,35 @@ public final class HLSFeedEngine {
             role: role,
             to: slot
         )
+    }
+
+    private func reuseLease(
+        for item: FeedPlaybackItem,
+        generation: FeedNavigationGeneration,
+        role: FeedPlan.Role,
+        requiresPrimedPlayer: Bool = false
+    ) -> Bool {
+        guard let slot = slot(for: item.id), !slot.isReleasing,
+              var lease = slot.lease, lease.source == item.source
+        else { return false }
+        if requiresPrimedPlayer {
+            guard lease.didCompleteInitialLoad,
+                  lease.phase == .warm || lease.phase == .focused
+            else { return false }
+        }
+        slot.releaseTask?.cancel()
+        slot.releaseTask = nil
+        lease.generation = generation
+        lease.role = role
+        lease.telemetryPath = Self.telemetryPath(
+            reuse: lease.telemetryPath.reuse, role: role, source: item.source
+        )
+        analytics.updateAttribution(
+            Self.analyticsAttribution(from: lease.telemetryPath),
+            for: lease.analyticsAttempt
+        )
+        slot.lease = lease
+        return true
     }
 
     private func availableSlot(for role: FeedPlan.Role) -> Slot? {
@@ -911,6 +928,7 @@ public final class HLSFeedEngine {
         let previousAnalyticsAttempt = slot.lease?.analyticsAttempt
         let previousAnalyticsTasks = slot.cancelAnalyticsObservers()
         let hadPreviousLease = slot.lease != nil
+        let retiredPlatformPlayer = hadPreviousLease ? slot.session.feedPlatformPlayer : nil
         previousTask?.cancel()
         slot.releaseTask?.cancel()
         slot.releaseTask = nil
@@ -993,7 +1011,10 @@ public final class HLSFeedEngine {
                 self.analytics.end(previousAnalyticsAttempt, lifecycle: .cancelled)
             }
             guard let self, let slot, self.owns(slot, token: token) else { return }
-            if hadPreviousLease { await slot.session.stopAndWait() }
+            if hadPreviousLease {
+                await slot.session.stopAndWait()
+                Self.silenceRetiredPlayer(retiredPlatformPlayer)
+            }
             guard self.owns(slot, token: token), !Task.isCancelled else {
                 self.recordStaleCompletion()
                 return
@@ -1402,6 +1423,7 @@ public final class HLSFeedEngine {
               let itemID = slot.lease?.itemID
         else { return }
         slot.isReleasing = true
+        let retiredPlatformPlayer = slot.session.feedPlatformPlayer
         slot.loadTask?.cancel()
         let loadTask = slot.loadTask
         let cancellationRequestedAt = loadTask.map { _ in telemetryClock.now() }
@@ -1436,6 +1458,7 @@ public final class HLSFeedEngine {
         await observationTask?.value
         for task in analyticsTasks { await task.value }
         await slot.session.stopAndWait()
+        Self.silenceRetiredPlayer(retiredPlatformPlayer)
         if let analyticsAttempt {
             analytics.end(analyticsAttempt, lifecycle: .cancelled)
         }
@@ -1457,6 +1480,7 @@ public final class HLSFeedEngine {
               var lease = slot.lease
         else { return }
         slot.isReleasing = true
+        let retiredPlatformPlayer = slot.session.feedPlatformPlayer
         lease.phase = .failed(message)
         lease.state = PlayerState(status: .failed(message))
         slot.lease = lease
@@ -1477,10 +1501,20 @@ public final class HLSFeedEngine {
         await observationTask?.value
         for task in analyticsTasks { await task.value }
         await slot.session.stopAndWait()
+        Self.silenceRetiredPlayer(retiredPlatformPlayer)
         analytics.end(lease.analyticsAttempt, lifecycle: .failed)
         slot.loadTask = nil
         slot.isReleasing = false
         rebuildSnapshot()
+    }
+
+    /// Teardown may reset native audio properties after the initial lease mute.
+    /// Retained read-only player references must remain silent after retirement.
+    private static func silenceRetiredPlayer(_ player: AVPlayer?) {
+        player?.isMuted = true
+        player?.volume = 0
+        player?.pause()
+        player?.cancelPendingPrerolls()
     }
 
     private func trimPoolIfNeeded() async {
@@ -1769,6 +1803,18 @@ public final class HLSFeedEngine {
         let activeLoads = slots.reduce(into: 0) { count, slot in
             if slot.loadTask != nil { count += 1 }
         }
+        // Preparation can fail before a player lease exists (for example an
+        // offline cold-cache miss). Surface those failures without retaining
+        // them beyond the coordinator's current bounded working set.
+        var reportedFailures = failuresByItemID
+        if let coordinator = latestCoordinatorSnapshot, let generation = coordinator.generation {
+            for entry in coordinator.entries {
+                guard case .failed(let message) = entry.status else { continue }
+                reportedFailures[entry.itemID] = .init(
+                    itemID: entry.itemID, generation: generation, message: message
+                )
+            }
+        }
         snapshot = HLSFeedEngineSnapshot(
             generation: latestCoordinatorSnapshot?.generation,
             targetFocusedItemID: targetFocusedItemID,
@@ -1776,7 +1822,7 @@ public final class HLSFeedEngine {
             audibleItemID: audibleItemIDs.count == 1 ? audibleItemIDs[0] : nil,
             requestedDestinationItemID: requestedDestinationItemID,
             playbacks: playbacks,
-            failures: failuresByItemID.values.sorted { lhs, rhs in
+            failures: reportedFailures.values.sorted { lhs, rhs in
                 let lhsIndex = itemIndices[lhs.itemID] ?? Int.max
                 let rhsIndex = itemIndices[rhs.itemID] ?? Int.max
                 if lhsIndex == rhsIndex { return lhs.itemID.rawValue < rhs.itemID.rawValue }
