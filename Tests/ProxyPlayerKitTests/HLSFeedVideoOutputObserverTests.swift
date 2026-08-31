@@ -1,9 +1,30 @@
 import AVFoundation
 import XCTest
+import os
 @testable import ProxyPlayerKit
 
 @MainActor
 final class HLSFeedVideoOutputObserverTests: XCTestCase {
+    func testOffMainLastReleaseDetachesOutputAndReleasesSampler() async throws {
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        let ownership = OSAllocatedUnfairLock(initialState: Optional(HLSFeedVideoOutputObserver(item: item)))
+        ownership.withLock { $0 }?.start(requestedAt: .zero, clock: .continuous, record: { _ in })
+        weak var released = ownership.withLock { $0 }
+        XCTAssertEqual(item.outputs.count, 1)
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                ownership.withLock { $0 = nil }
+                continuation.resume()
+            }
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while !item.outputs.isEmpty, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertNil(released)
+        XCTAssertTrue(item.outputs.isEmpty)
+    }
+
     func testPreparationAndPauseRetainOutputWithoutSampling() throws {
         let item = AVPlayerItem(asset: AVMutableComposition())
         let observer = HLSFeedVideoOutputObserver(item: item)

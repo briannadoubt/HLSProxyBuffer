@@ -34,15 +34,15 @@ public final class AVPlaybackMetricCollector {
 
     public let events: AsyncStream<PlaybackAnalytics.Event>
     public var snapshot: Snapshot {
-        let resources = source?.resources ?? .empty
+        let resources = lifetime.source?.resources ?? .empty
         return Snapshot(
-            collectionPath: source?.path ?? .none,
+            collectionPath: lifetime.source?.path ?? .none,
             observedItemCount: observedItemCount,
             emittedEventCount: emittedEventCount,
             droppedEventCount: droppedEventCount,
-            activeSourceCount: source == nil ? 0 : 1,
+            activeSourceCount: lifetime.source == nil ? 0 : 1,
             activeTaskCount: resources.taskCount,
-            activeObserverCount: (playerObservation == nil ? 0 : 1)
+            activeObserverCount: (lifetime.playerObservation == nil ? 0 : 1)
                 + resources.observerCount
         )
     }
@@ -55,8 +55,21 @@ public final class AVPlaybackMetricCollector {
 
     private weak var player: AVPlayer?
     private weak var currentItem: AVPlayerItem?
-    private var playerObservation: NSKeyValueObservation?
-    private var source: (any AVPlaybackMetricSource)?
+    @MainActor
+    private final class Lifetime {
+        var playerObservation: NSKeyValueObservation?
+        var source: (any AVPlaybackMetricSource)?
+
+        func stop() {
+            playerObservation?.invalidate()
+            playerObservation = nil
+            source?.stop()
+            source = nil
+        }
+
+        deinit {}
+    }
+    private let lifetime = Lifetime()
     private var generation: UInt64 = 0
     private var isFinished = false
     private var observedItemCount: UInt64 = 0
@@ -122,7 +135,7 @@ public final class AVPlaybackMetricCollector {
         guard !isFinished else { return }
         detachPlayer()
         self.player = player
-        playerObservation = player.observe(\.currentItem, options: [.initial, .new]) {
+        lifetime.playerObservation = player.observe(\.currentItem, options: [.initial, .new]) {
             [weak self, weak player] _, _ in
             Task { @MainActor [weak self, weak player] in
                 guard let self, let player, self.player === player else { return }
@@ -139,20 +152,19 @@ public final class AVPlaybackMetricCollector {
         continuation.finish()
     }
 
-    isolated deinit {
-        playerObservation?.invalidate()
-        source?.stop()
+    deinit {
         continuation.finish()
+        performMainActorCleanup { [lifetime] in lifetime.stop() }
     }
 
     private func replaceSource(for item: AVPlayerItem?, player: AVPlayer) {
         guard !isFinished else { return }
-        if currentItem === item, source != nil { return }
+        if currentItem === item, lifetime.source != nil { return }
 
         generation &+= 1
         let sourceGeneration = generation
-        source?.stop()
-        source = nil
+        lifetime.source?.stop()
+        lifetime.source = nil
         currentItem = item
 
         guard let item else {
@@ -161,7 +173,7 @@ public final class AVPlaybackMetricCollector {
 
         observedItemCount = Self.saturatingAdd(observedItemCount, 1)
         let source = sourceFactory.makeSource(item: item, player: player)
-        self.source = source
+        lifetime.source = source
         source.start { [weak self, weak item] sample in
             guard let self,
                   let item,
@@ -202,11 +214,11 @@ public final class AVPlaybackMetricCollector {
 
     private func detachPlayer() {
         generation &+= 1
-        source?.stop()
-        source = nil
+        lifetime.source?.stop()
+        lifetime.source = nil
         currentItem = nil
-        playerObservation?.invalidate()
-        playerObservation = nil
+        lifetime.playerObservation?.invalidate()
+        lifetime.playerObservation = nil
         player = nil
     }
 
@@ -646,13 +658,26 @@ private enum NativeAVPlaybackMetricProjector {
 final class LegacyAVPlaybackMetricSource: AVPlaybackMetricSource {
     let path = AVPlaybackMetricCollector.CollectionPath.legacyFallback
     var resources: AVPlaybackMetricSourceResources {
-        .init(taskCount: 0, observerCount: observations.count + notificationTokens.count)
+        .init(taskCount: 0, observerCount: lifetime.observations.count + lifetime.notificationTokens.count)
     }
 
     private weak var item: AVPlayerItem?
     private weak var player: AVPlayer?
-    private var observations: [NSKeyValueObservation] = []
-    private var notificationTokens: [NSObjectProtocol] = []
+    @MainActor
+    private final class Lifetime {
+        var observations: [NSKeyValueObservation] = []
+        var notificationTokens: [NSObjectProtocol] = []
+
+        func stop() {
+            for observation in observations { observation.invalidate() }
+            observations.removeAll()
+            for token in notificationTokens { NotificationCenter.default.removeObserver(token) }
+            notificationTokens.removeAll()
+        }
+
+        deinit {}
+    }
+    private let lifetime = Lifetime()
     private var deliver: (@MainActor @Sendable (AVPlaybackMetricSample) -> Void)?
     private var hasSeenLikelyToKeepUp = false
     private var hasEmittedFatalFailure = false
@@ -663,14 +688,14 @@ final class LegacyAVPlaybackMetricSource: AVPlaybackMetricSource {
     }
 
     func start(deliver: @escaping @MainActor @Sendable (AVPlaybackMetricSample) -> Void) {
-        guard observations.isEmpty, notificationTokens.isEmpty,
+        guard lifetime.observations.isEmpty, lifetime.notificationTokens.isEmpty,
               let item, let player
         else {
             return
         }
         self.deliver = deliver
 
-        observations.append(item.observe(\.isPlaybackLikelyToKeepUp, options: [.initial, .new]) {
+        lifetime.observations.append(item.observe(\.isPlaybackLikelyToKeepUp, options: [.initial, .new]) {
             [weak self] _, change in
             guard change.newValue == true else { return }
             Task { @MainActor [weak self] in
@@ -687,11 +712,11 @@ final class LegacyAVPlaybackMetricSource: AVPlaybackMetricSource {
                 self.deliver?(AVPlaybackMetricMapper.sample(from: input))
             }
         })
-        observations.append(item.observe(\.status, options: [.new]) { [weak self] item, _ in
+        lifetime.observations.append(item.observe(\.status, options: [.new]) { [weak self] item, _ in
             guard item.status == .failed else { return }
             Task { @MainActor [weak self] in self?.emitFatalFailureOnce() }
         })
-        observations.append(player.observe(\.rate, options: [.old, .new]) { [weak self] _, change in
+        lifetime.observations.append(player.observe(\.rate, options: [.old, .new]) { [weak self] _, change in
             guard let rate = change.newValue else { return }
             let previousRate = change.oldValue ?? 0
             Task { @MainActor [weak self] in
@@ -727,22 +752,14 @@ final class LegacyAVPlaybackMetricSource: AVPlaybackMetricSource {
     }
 
     func stop() {
-        for observation in observations { observation.invalidate() }
-        observations.removeAll()
-        for token in notificationTokens {
-            NotificationCenter.default.removeObserver(token)
-        }
-        notificationTokens.removeAll()
+        lifetime.stop()
         deliver = nil
         hasSeenLikelyToKeepUp = false
         hasEmittedFatalFailure = false
     }
 
-    isolated deinit {
-        for observation in observations { observation.invalidate() }
-        for token in notificationTokens {
-            NotificationCenter.default.removeObserver(token)
-        }
+    deinit {
+        performMainActorCleanup { [lifetime] in lifetime.stop() }
     }
 
     private func observe(
@@ -750,7 +767,7 @@ final class LegacyAVPlaybackMetricSource: AVPlaybackMetricSource {
         item: AVPlayerItem,
         input: @escaping @MainActor @Sendable () -> AVPlaybackMetricInput?
     ) {
-        notificationTokens.append(NotificationCenter.default.addObserver(
+        lifetime.notificationTokens.append(NotificationCenter.default.addObserver(
             forName: name,
             object: item,
             queue: .main

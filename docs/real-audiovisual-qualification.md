@@ -169,6 +169,31 @@ and offline reuse across engine instances. File-system regressions check that th
 qualification reset preserves ordinary cache bytes and does not accumulate new
 namespaces or create anything for the persistent scope.
 
+## Stable-runtime resource teardown (HLS-74)
+
+Hosted run 33378556362 passed all five iOS UI tests and both unchanged warm
+latency gates, then aborted four synchronous tvOS 26.2 teardown tests. The same
+four failures reproduced on iOS 26.1. Native crash stacks identify
+`TaskLocal::StopLookupScope` freeing an invalid pointer through
+`swift_task_deinitOnExecutorImpl`, not an AVFoundation buffer double-free.
+This matches the [upstream Swift runtime fix](https://github.com/swiftlang/swift/pull/85204)
+and [older-runtime report](https://github.com/swiftlang/swift/issues/88036).
+Two additional synchronous tests reproduce the same failure in the analytics
+collector and legacy metric source.
+
+All four resource owners now use ordinary deinitializers and transfer separate,
+main-actor-isolated lifetime objects to cleanup. Main-thread release performs
+cleanup synchronously; off-main last release enqueues one main-queue cleanup
+without escaping the dying owner or claiming unchecked Sendable conformance.
+Explicit stop remains synchronous and idempotent. Original synchronous tests
+remain in place, with additional off-main release coverage for observer removal,
+sampler release, metric-source stop, and stream termination. No playback behavior,
+measurement timestamp, sample attribution, or performance limit changes.
+
+The CI harness now stores the tvOS result bundle in the uploaded artifact
+directory, outside temporary DerivedData cleanup, so future failures retain
+their diagnostics. Final-head hosted verification and merge remain required.
+
 ## Listening and device boundaries
 
 Native PCM decode proves the packaged recorded soundtrack is decodable and

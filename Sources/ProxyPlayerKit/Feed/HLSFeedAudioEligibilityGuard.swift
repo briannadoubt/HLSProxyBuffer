@@ -7,17 +7,31 @@ import os
 final class HLSFeedAudioEligibilityGuard {
     private weak var player: AVPlayer?
     private var mustRemainMuted = false
-    private var muteObservation: NSKeyValueObservation?
-    private var volumeObservation: NSKeyValueObservation?
+    @MainActor
+    private final class Observations {
+        var mute: NSKeyValueObservation?
+        var volume: NSKeyValueObservation?
+
+        func stop() {
+            mute?.invalidate()
+            volume?.invalidate()
+            mute = nil
+            volume = nil
+        }
+
+        // The owning guard explicitly tears these down on the main actor.
+        deinit {}
+    }
+    private let observations = Observations()
     // KVO may arrive off-main. Coalesce those callbacks into at most one hop.
     private nonisolated let correctionPending = OSAllocatedUnfairLock(initialState: false)
 
     init(player: AVPlayer) {
         self.player = player
-        muteObservation = player.observe(\.isMuted, options: [.new]) { [weak self] _, _ in
+        observations.mute = player.observe(\.isMuted, options: [.new]) { [weak self] _, _ in
             self?.nativeAudioChanged()
         }
-        volumeObservation = player.observe(\.volume, options: [.new]) { [weak self] _, _ in
+        observations.volume = player.observe(\.volume, options: [.new]) { [weak self] _, _ in
             self?.nativeAudioChanged()
         }
     }
@@ -29,14 +43,13 @@ final class HLSFeedAudioEligibilityGuard {
     }
 
     func stop() {
-        muteObservation?.invalidate()
-        volumeObservation?.invalidate()
-        muteObservation = nil
-        volumeObservation = nil
+        observations.stop()
         player = nil
     }
 
-    isolated deinit { stop() }
+    deinit {
+        performMainActorCleanup { [observations] in observations.stop() }
+    }
 
     private nonisolated func nativeAudioChanged() {
         if Thread.isMainThread {

@@ -5,32 +5,46 @@ import AVFoundation
 /// availability, not display scan-out.
 @MainActor
 final class HLSFeedVideoOutputObserver {
-    private weak var item: AVPlayerItem?
-    private let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
-        kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-    ])
+    @MainActor
+    private final class Resources {
+        weak var item: AVPlayerItem?
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        ])
+        var task: Task<Void, Never>?
+
+        func stop() {
+            task?.cancel()
+            task = nil
+            item?.remove(output)
+            item = nil
+        }
+
+        // The observer transfers cleanup to the main actor before releasing us.
+        deinit {}
+    }
+    private let resources = Resources()
     private struct Sampling {
         let requestedAt: Duration?
         let clock: FeedCoordinatorClock
         let record: @MainActor (HLSFeedTelemetry.Event.Payload) -> Void
     }
     private var sampling: Sampling?
-    private var task: Task<Void, Never>?
     private var lastPresentationTime: CMTime?
     private var hasFirstFrame = false
 
-    var isSampling: Bool { task != nil }
+    var isSampling: Bool { resources.task != nil }
 
     init(item: AVPlayerItem) {
-        self.item = item
+        resources.item = item
         // Configure before preroll, not during a prepared handoff. Rendering
         // remains enabled; paused neighbors retain no sampled image buffers.
-        output.suppressesPlayerRendering = false
-        item.add(output)
+        resources.output.suppressesPlayerRendering = false
+        item.add(resources.output)
     }
 
     func isAttached(to item: AVPlayerItem) -> Bool {
-        self.item === item && item.outputs.contains { $0 === output }
+        resources.item === item && item.outputs.contains { $0 === resources.output }
     }
 
     func start(
@@ -39,9 +53,9 @@ final class HLSFeedVideoOutputObserver {
         record: @escaping @MainActor (HLSFeedTelemetry.Event.Payload) -> Void
     ) {
         pause()
-        guard item != nil else { return }
+        guard resources.item != nil else { return }
         sampling = Sampling(requestedAt: requestedAt, clock: clock, record: record)
-        task = Task { @MainActor [weak self] in
+        resources.task = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let delay = self?.sample() else { return }
                 do { try await Task.sleep(for: delay) } catch { return }
@@ -50,8 +64,8 @@ final class HLSFeedVideoOutputObserver {
     }
 
     func pause() {
-        task?.cancel()
-        task = nil
+        resources.task?.cancel()
+        resources.task = nil
         sampling = nil
         lastPresentationTime = nil
         hasFirstFrame = false
@@ -59,14 +73,16 @@ final class HLSFeedVideoOutputObserver {
 
     func stop() {
         pause()
-        item?.remove(output)
-        item = nil
+        resources.stop()
     }
 
-    isolated deinit { stop() }
+    deinit {
+        performMainActorCleanup { [resources] in resources.stop() }
+    }
 
     private func sample() -> Duration? {
-        guard let item, let sampling else { return nil }
+        guard let item = resources.item, let sampling else { return nil }
+        let output = resources.output
         let time = item.currentTime()
         if output.hasNewPixelBuffer(forItemTime: time) {
             var presentationTime = CMTime.invalid

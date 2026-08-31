@@ -173,10 +173,12 @@ if command -v xcodebuild >/dev/null 2>&1; then
     else
       echo "Running Release tvOS Simulator qualification on $TVOS_SIM_NAME..."
       TVOS_DERIVED_DATA="$CI_DERIVED_DATA_ROOT/tvos-package"
+      TVOS_RESULT_BUNDLE="$QUALIFICATION_ARTIFACT_DIR/HLSProxyTVOSQualification-$(date +%s).xcresult"
       xcodebuild \
         -scheme HLSProxyBuffer-Package \
         -configuration Release \
         -destination "platform=tvOS Simulator,id=$TVOS_SIM_UDID" \
+        -resultBundlePath "$TVOS_RESULT_BUNDLE" \
         -derivedDataPath "$TVOS_DERIVED_DATA" \
         ONLY_ACTIVE_ARCH=YES \
         ENABLE_TESTABILITY=YES \

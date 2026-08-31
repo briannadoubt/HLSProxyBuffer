@@ -1,9 +1,41 @@
 import AVFoundation
 import XCTest
+import os
 @testable import ProxyPlayerKit
 
 @MainActor
 final class HLSFeedAudioEligibilityGuardTests: XCTestCase {
+    func testSynchronousReleaseInvalidatesObserversWithoutExplicitStop() {
+        let player = AVPlayer()
+        var guardrail: HLSFeedAudioEligibilityGuard? = HLSFeedAudioEligibilityGuard(player: player)
+        guardrail?.setMuted(true)
+        weak var released = guardrail
+        guardrail = nil
+        XCTAssertNil(released)
+        player.isMuted = false
+        player.volume = 0.4
+        XCTAssertFalse(player.isMuted)
+        XCTAssertEqual(player.volume, 0.4)
+    }
+
+    func testOffMainLastReleaseDoesNotRetainGuardOrFightSubsequentControls() async {
+        let player = AVPlayer()
+        let ownership = OSAllocatedUnfairLock(initialState: Optional(HLSFeedAudioEligibilityGuard(player: player)))
+        ownership.withLock { $0 }?.setMuted(true)
+        weak var released = ownership.withLock { $0 }
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                ownership.withLock { $0 = nil }
+                continuation.resume()
+            }
+        }
+        XCTAssertNil(released)
+        player.isMuted = false
+        player.volume = 0.4
+        XCTAssertFalse(player.isMuted)
+        XCTAssertEqual(player.volume, 0.4)
+    }
+
     func testOffMainNativeChangesAreCoalescedAndCorrectedWithoutPlaying() async throws {
         let player = AVPlayer()
         let guardrail = HLSFeedAudioEligibilityGuard(player: player)
