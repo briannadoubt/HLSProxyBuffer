@@ -149,6 +149,12 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
             timeout: 15
         ))
         let report = reportElement.value as? String ?? reportElement.label
+        // Keep machine-readable failure evidence even when continueAfterFailure
+        // stops the test at the first performance/ownership assertion.
+        let attachment = XCTAttachment(data: Data(report.utf8), uniformTypeIdentifier: "public.json")
+        attachment.name = "hls-feed-ui-qualification.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
         XCTAssertTrue(waitForValue(
             "PASS",
             in: app.staticTexts["qualification-result"],
@@ -167,10 +173,6 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
             report
         )
         XCTAssertTrue(report.contains("\"passed\":true"), report)
-        let attachment = XCTAttachment(data: Data(report.utf8), uniformTypeIdentifier: "public.json")
-        attachment.name = "hls-feed-ui-qualification.json"
-        attachment.lifetime = .keepAlways
-        add(attachment)
     }
 
     @MainActor

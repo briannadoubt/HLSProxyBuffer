@@ -27,3 +27,19 @@ Regression coverage includes native online playback followed by a new engine
 using the same disk cache with the origin stopped, one canonical manifest request
 across preparation/playback, offline cold-miss failure, expiry/304/no-store rules,
 transport enforcement, canonical identity, and failure-to-recovery observation.
+
+## Warm handoff and preparation expansion
+
+A neighbor may already own a successfully prerolled player while its preparation
+result contains fewer leading segments than the focused policy requests. Moving
+focus now rebases that matching, primed lease into the accepted generation
+immediately. The coordinator continues expanding the preparation target under
+the same budgets, but those additional fetches do not delay the existing player.
+Loading, failed, replaced-source, and retiring leases do not use this fast path.
+Cancellation, focus ownership, and ordinary AVPlayer stall recovery are unchanged.
+
+A deterministic test holds the expansion open across focus and reversal; a
+native test verifies that the same buffered AVPlayer and item take focus before
+expansion finishes. The 500 ms warm-start and 250 ms cancellation gates remain
+unchanged. UI qualification attaches its JSON report before asserting success,
+so performance failures retain machine-readable evidence as well as test logs.

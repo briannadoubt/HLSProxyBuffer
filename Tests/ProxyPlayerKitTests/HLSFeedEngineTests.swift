@@ -7,6 +7,48 @@ import XCTest
 
 @MainActor
 final class HLSFeedEngineTests: XCTestCase {
+    func testWarmHandoffDoesNotWaitForExpandedFocusedPreparation() async throws {
+        let items = makeItems(count: 2)
+        let expansion = FeedTestLoadGate()
+        defer { expansion.release() }
+        let factory = FakeFeedSessionFactory()
+        var policy = try makePolicy(maximumPlayerCount: 2)
+        policy.prefetch.behindItemCount = 1
+        policy.budget.maximumResidentItems = 3
+        let engine = try makeEngine(
+            items: items, policy: policy, factory: factory,
+            beforePreparation: { request in
+                if request.generation.rawValue == 2, request.item.id == items[1].id {
+                    await expansion.wait()
+                }
+            }
+        )
+        try await engine.update(signal(generation: 1, focused: items[0].id))
+        _ = await engine.waitUntilSettled()
+        let warmSession = try XCTUnwrap(factory.session(loadedWith: items[1].id))
+        XCTAssertEqual(engine.snapshot.playback(for: items[1].id)?.phase, .warm)
+
+        // The neighbor owns a successfully primed player, but its one-segment
+        // preparation result cannot satisfy the focused two-segment target.
+        // Hold that expansion indefinitely: playback must not depend on it.
+        try await engine.update(signal(generation: 2, focused: items[1].id))
+        XCTAssertEqual(engine.snapshot.activeItemID, items[1].id)
+        XCTAssertEqual(engine.snapshot.playback(for: items[1].id)?.hasStartedPlayback, true)
+        XCTAssertEqual(factory.audiblePlayingItemIDs, [items[1].id])
+        XCTAssertEqual(warmSession.loadCount, 1)
+        XCTAssertEqual(warmSession.preparationCount, 1)
+
+        // Reversal must invalidate the pending expansion without letting its
+        // eventual completion reclaim focus or restart obsolete playback.
+        try await engine.update(signal(generation: 3, focused: items[0].id))
+        expansion.release()
+        _ = await engine.waitUntilSettled()
+        XCTAssertEqual(engine.snapshot.activeItemID, items[0].id)
+        XCTAssertEqual(factory.audiblePlayingItemIDs, [items[0].id])
+        XCTAssertLessThanOrEqual(factory.maximumAudiblePlayingCount, 1)
+        await engine.stop()
+    }
+
     func testLeaseRetirementResilencesRetainedNativePlayerAfterSessionTeardown() async throws {
         for failsDuringPlayback in [false, true] {
             let items = makeItems(count: 2)
@@ -877,9 +919,13 @@ final class HLSFeedEngineTests: XCTestCase {
         analytics: PlaybackAnalyticsTimeline? = nil,
         sharedCache: HLSSegmentCache? = nil,
         preparationFailureGenerations: Set<UInt64> = [],
+        beforePreparation: (@Sendable (FeedPreparationRequest) async -> Void)? = nil,
         playerPreparationRetryPolicy: HLSFeedPlayerPreparationRetryPolicy = .automaticFeed
     ) throws -> HLSFeedEngine {
-        let backend = ImmediateFeedPreparationBackend(failingGenerations: preparationFailureGenerations)
+        let backend = ImmediateFeedPreparationBackend(
+            failingGenerations: preparationFailureGenerations,
+            beforePreparation: beforePreparation
+        )
         let coordinator = try FeedCoordinator(items: items, policy: policy, backend: backend)
         return try HLSFeedEngine(
             items: items,
@@ -971,12 +1017,18 @@ final class HLSFeedEngineTests: XCTestCase {
 
 private actor ImmediateFeedPreparationBackend: FeedPreparing {
     private let failingGenerations: Set<UInt64>
+    private let beforePreparation: (@Sendable (FeedPreparationRequest) async -> Void)?
 
-    init(failingGenerations: Set<UInt64> = []) {
+    init(
+        failingGenerations: Set<UInt64> = [],
+        beforePreparation: (@Sendable (FeedPreparationRequest) async -> Void)? = nil
+    ) {
         self.failingGenerations = failingGenerations
+        self.beforePreparation = beforePreparation
     }
 
     func prepare(_ request: FeedPreparationRequest) async throws -> FeedPreparedItem {
+        await beforePreparation?(request)
         try Task.checkCancellation()
         if failingGenerations.contains(request.generation.rawValue) {
             throw URLError(.notConnectedToInternet)

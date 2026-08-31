@@ -815,10 +815,17 @@ public final class HLSFeedEngine {
         }
 
         for entry in value.entries {
-            guard case .ready(let prepared) = entry.status,
-                  let item = itemsByID[entry.itemID],
+            guard let item = itemsByID[entry.itemID],
                   let generation = value.generation
             else { continue }
+            // Moving from neighbor to focus may expand the preparation target.
+            // A retained, successfully primed player already owns a playable
+            // buffer; keep that handoff independent of the additional fetches.
+            if reuseLease(
+                for: item, generation: generation, role: entry.role,
+                requiresPrimedPlayer: true
+            ) { continue }
+            guard case .ready(let prepared) = entry.status else { continue }
             ensureLease(
                 for: item,
                 prepared: prepared,
@@ -843,23 +850,7 @@ public final class HLSFeedEngine {
         generation: FeedNavigationGeneration,
         role: FeedPlan.Role
     ) {
-        if let slot = slot(for: item.id), var lease = slot.lease, lease.source == item.source {
-            slot.releaseTask?.cancel()
-            slot.releaseTask = nil
-            lease.generation = generation
-            lease.role = role
-            lease.telemetryPath = Self.telemetryPath(
-                reuse: lease.telemetryPath.reuse,
-                role: role,
-                source: item.source
-            )
-            analytics.updateAttribution(
-                Self.analyticsAttribution(from: lease.telemetryPath),
-                for: lease.analyticsAttempt
-            )
-            slot.lease = lease
-            return
-        }
+        if reuseLease(for: item, generation: generation, role: role) { return }
 
         guard let slot = availableSlot(for: role) else { return }
         failuresByItemID.removeValue(forKey: item.id)
@@ -870,6 +861,35 @@ public final class HLSFeedEngine {
             role: role,
             to: slot
         )
+    }
+
+    private func reuseLease(
+        for item: FeedPlaybackItem,
+        generation: FeedNavigationGeneration,
+        role: FeedPlan.Role,
+        requiresPrimedPlayer: Bool = false
+    ) -> Bool {
+        guard let slot = slot(for: item.id), !slot.isReleasing,
+              var lease = slot.lease, lease.source == item.source
+        else { return false }
+        if requiresPrimedPlayer {
+            guard lease.didCompleteInitialLoad,
+                  lease.phase == .warm || lease.phase == .focused
+            else { return false }
+        }
+        slot.releaseTask?.cancel()
+        slot.releaseTask = nil
+        lease.generation = generation
+        lease.role = role
+        lease.telemetryPath = Self.telemetryPath(
+            reuse: lease.telemetryPath.reuse, role: role, source: item.source
+        )
+        analytics.updateAttribution(
+            Self.analyticsAttribution(from: lease.telemetryPath),
+            for: lease.analyticsAttempt
+        )
+        slot.lease = lease
+        return true
     }
 
     private func availableSlot(for role: FeedPlan.Role) -> Slot? {

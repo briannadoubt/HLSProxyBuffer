@@ -97,6 +97,10 @@ final class HLSFeedEngineAVIntegrationTests: XCTestCase {
         )
 
         try await engine.update(signal(generation: 2, focused: items[1].id))
+        XCTAssertEqual(
+            engine.snapshot.activeItemID, items[1].id,
+            "A prerolled warm handoff must not await an expanded preparation request; buffered=\(warmedItem.loadedTimeRanges)"
+        )
         snapshot = await engine.waitUntilSettled()
 
         XCTAssertEqual(snapshot.activeItemID, items[1].id)
