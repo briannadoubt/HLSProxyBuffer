@@ -98,6 +98,16 @@ arrays, and malformed JSON. Hosted run 33361191832 exposed this assertion bug:
 the real audiovisual report exceeded the unchanged warm playback-start gate even
 though the nested vertical report passed. That run is not passing qualification.
 
+HLS-70 moves synchronous video-output attachment immediately after the prepared
+`play()` command, still within the same activation call. Local diagnostic probes
+measured about 25–34 ms of attachment work before `play()` on several real-media
+handoffs. The ordering regression verifies that the command precedes attachment
+and that focus still owns an output before activation returns. Neither the
+`.playing` definition nor the decoded-image focus timestamp changes, and the
+player's wait/preroll behavior is unchanged. This removes a measured pre-command
+cost; those local timings alone do not establish the cause of the hosted failure
+or an end-to-end p95 improvement.
+
 ## Listening and device boundaries
 
 Native PCM decode proves the packaged recorded soundtrack is decodable and

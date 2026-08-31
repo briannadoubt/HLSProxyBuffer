@@ -7,6 +7,23 @@ import XCTest
 
 @MainActor
 final class HLSFeedEngineTests: XCTestCase {
+    func testPlayCommandPrecedesDecodedOutputAttachment() async throws {
+        let items = makeItems(count: 1)
+        let nativeItem = AVPlayerItem(asset: AVMutableComposition())
+        let factory = FakeFeedSessionFactory(platformPlayerFactory: { AVPlayer(playerItem: nativeItem) })
+        let engine = try makeEngine(
+            items: items, policy: makePolicy(maximumPlayerCount: 1, prefetchItemCount: 0), factory: factory
+        )
+        try await engine.update(signal(generation: 1, focused: items[0].id))
+        _ = await engine.waitUntilSettled()
+        let session = try XCTUnwrap(factory.session(loadedWith: items[0].id))
+        XCTAssertEqual(session.playCount, 1)
+        XCTAssertEqual(session.outputCountAtFirstPlay, 0, "Decoded telemetry setup must not precede the prepared play command")
+        XCTAssertEqual(nativeItem.outputs.count, 1, "The focused output is still attached before activation returns")
+        await engine.stop()
+        XCTAssertTrue(nativeItem.outputs.isEmpty)
+    }
+
     func testWarmHandoffDoesNotWaitForExpandedFocusedPreparation() async throws {
         let items = makeItems(count: 2)
         let expansion = FeedTestLoadGate()
@@ -1066,6 +1083,7 @@ private final class FakeFeedSessionFactory {
     let preparationResults: [Bool]?
     let preparationDelay: Duration
     let usesUnstartedPlatformPlayer: Bool
+    let platformPlayerFactory: (@MainActor () -> AVPlayer)?
     private(set) var sessions: [FakeFeedPlayerSession] = []
     private(set) var maximumAudiblePlayingCount = 0
 
@@ -1075,7 +1093,8 @@ private final class FakeFeedSessionFactory {
         failsPreparation: Bool = false,
         preparationResults: [Bool]? = nil,
         preparationDelay: Duration = .zero,
-        usesUnstartedPlatformPlayer: Bool = false
+        usesUnstartedPlatformPlayer: Bool = false,
+        platformPlayerFactory: (@MainActor () -> AVPlayer)? = nil
     ) {
         self.loadDelay = loadDelay
         self.failingItemIDs = failingItemIDs
@@ -1083,6 +1102,7 @@ private final class FakeFeedSessionFactory {
         self.preparationResults = preparationResults
         self.preparationDelay = preparationDelay
         self.usesUnstartedPlatformPlayer = usesUnstartedPlatformPlayer
+        self.platformPlayerFactory = platformPlayerFactory
     }
 
     func make(configuration: ProxyPlayerConfiguration) -> FakeFeedPlayerSession {
@@ -1093,7 +1113,7 @@ private final class FakeFeedSessionFactory {
             failsPreparation: failsPreparation,
             preparationResults: preparationResults,
             preparationDelay: preparationDelay,
-            platformPlayer: usesUnstartedPlatformPlayer ? AVPlayer() : nil
+            platformPlayer: platformPlayerFactory?() ?? (usesUnstartedPlatformPlayer ? AVPlayer() : nil)
         )
         session.onPlaybackMutation = { [weak self] in
             self?.captureAudiblePlaybackCount()
@@ -1137,6 +1157,7 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     private(set) var preparationCount = 0
     private(set) var preparationCancellationCount = 0
     private(set) var playCount = 0
+    private(set) var outputCountAtFirstPlay: Int?
     private(set) var playBeforePreparationCount = 0
     private(set) var pauseCount = 0
     private(set) var stopCount = 0
@@ -1262,6 +1283,9 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
 
     func play() {
         playCount += 1
+        if outputCountAtFirstPlay == nil {
+            outputCountAtFirstPlay = feedPlatformPlayer?.currentItem?.outputs.count ?? 0
+        }
         if preparationCount == 0 { playBeforePreparationCount += 1 }
         isPlaying = true
         onPlaybackMutation?()

@@ -1315,11 +1315,16 @@ public final class HLSFeedEngine {
         destination.session.setMuted(false)
         let hasPlatformPlayer = destination.session.feedPlatformPlayer != nil
         if hasPlatformPlayer {
-            observeDecodedVideo(in: destination, lease: destinationLease)
             observeActivatedPlayback(in: destination, token: destinationLease.token)
         }
         destination.session.play()
-        if !hasPlatformPlayer {
+        if hasPlatformPlayer {
+            // Output attachment synchronously configures AVFoundation. Issue
+            // the prepared play command first; telemetry must not gate it.
+            // Keep the original focus timestamp and install before returning,
+            // so decoded-image latency still includes all attachment work.
+            observeDecodedVideo(in: destination, lease: destinationLease)
+        } else {
             confirmActivatedPlayback(in: destination, token: destinationLease.token)
         }
     }
