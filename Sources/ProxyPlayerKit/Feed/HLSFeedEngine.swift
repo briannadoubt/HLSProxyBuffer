@@ -753,10 +753,7 @@ public final class HLSFeedEngine {
         // external read-only references silent even if a late AVFoundation
         // callback raced with observer cancellation while teardown awaited.
         for player in retainedPlatformPlayers {
-            player.isMuted = true
-            player.volume = 0
-            player.pause()
-            player.cancelPendingPrerolls()
+            Self.silenceRetiredPlayer(player)
         }
         for attempt in analyticsAttempts where analytics.isActive(attempt) {
             analytics.end(attempt, lifecycle: .cancelled)
@@ -911,6 +908,7 @@ public final class HLSFeedEngine {
         let previousAnalyticsAttempt = slot.lease?.analyticsAttempt
         let previousAnalyticsTasks = slot.cancelAnalyticsObservers()
         let hadPreviousLease = slot.lease != nil
+        let retiredPlatformPlayer = hadPreviousLease ? slot.session.feedPlatformPlayer : nil
         previousTask?.cancel()
         slot.releaseTask?.cancel()
         slot.releaseTask = nil
@@ -993,7 +991,10 @@ public final class HLSFeedEngine {
                 self.analytics.end(previousAnalyticsAttempt, lifecycle: .cancelled)
             }
             guard let self, let slot, self.owns(slot, token: token) else { return }
-            if hadPreviousLease { await slot.session.stopAndWait() }
+            if hadPreviousLease {
+                await slot.session.stopAndWait()
+                Self.silenceRetiredPlayer(retiredPlatformPlayer)
+            }
             guard self.owns(slot, token: token), !Task.isCancelled else {
                 self.recordStaleCompletion()
                 return
@@ -1402,6 +1403,7 @@ public final class HLSFeedEngine {
               let itemID = slot.lease?.itemID
         else { return }
         slot.isReleasing = true
+        let retiredPlatformPlayer = slot.session.feedPlatformPlayer
         slot.loadTask?.cancel()
         let loadTask = slot.loadTask
         let cancellationRequestedAt = loadTask.map { _ in telemetryClock.now() }
@@ -1436,6 +1438,7 @@ public final class HLSFeedEngine {
         await observationTask?.value
         for task in analyticsTasks { await task.value }
         await slot.session.stopAndWait()
+        Self.silenceRetiredPlayer(retiredPlatformPlayer)
         if let analyticsAttempt {
             analytics.end(analyticsAttempt, lifecycle: .cancelled)
         }
@@ -1457,6 +1460,7 @@ public final class HLSFeedEngine {
               var lease = slot.lease
         else { return }
         slot.isReleasing = true
+        let retiredPlatformPlayer = slot.session.feedPlatformPlayer
         lease.phase = .failed(message)
         lease.state = PlayerState(status: .failed(message))
         slot.lease = lease
@@ -1477,10 +1481,20 @@ public final class HLSFeedEngine {
         await observationTask?.value
         for task in analyticsTasks { await task.value }
         await slot.session.stopAndWait()
+        Self.silenceRetiredPlayer(retiredPlatformPlayer)
         analytics.end(lease.analyticsAttempt, lifecycle: .failed)
         slot.loadTask = nil
         slot.isReleasing = false
         rebuildSnapshot()
+    }
+
+    /// Teardown may reset native audio properties after the initial lease mute.
+    /// Retained read-only player references must remain silent after retirement.
+    private static func silenceRetiredPlayer(_ player: AVPlayer?) {
+        player?.isMuted = true
+        player?.volume = 0
+        player?.pause()
+        player?.cancelPendingPrerolls()
     }
 
     private func trimPoolIfNeeded() async {

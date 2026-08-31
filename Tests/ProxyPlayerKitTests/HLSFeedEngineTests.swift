@@ -7,6 +7,44 @@ import XCTest
 
 @MainActor
 final class HLSFeedEngineTests: XCTestCase {
+    func testLeaseRetirementResilencesRetainedNativePlayerAfterSessionTeardown() async throws {
+        for failsDuringPlayback in [false, true] {
+            let items = makeItems(count: 2)
+            let factory = FakeFeedSessionFactory(usesUnstartedPlatformPlayer: true)
+            let engine = try makeEngine(
+                items: items,
+                policy: makePolicy(maximumPlayerCount: 2),
+                factory: factory
+            )
+            try await engine.update(signal(generation: 1, focused: items[0].id))
+            _ = await engine.waitUntilSettled()
+            let session = try XCTUnwrap(factory.session(loadedWith: items[0].id))
+            let retiredPlayer = try XCTUnwrap(session.feedPlatformPlayer)
+            // Model a native teardown callback resetting audio properties after
+            // the engine's initial mute, without relying on its timing.
+            session.afterStop = {
+                retiredPlayer.isMuted = false
+                retiredPlayer.volume = 1
+            }
+            if failsDuringPlayback {
+                session.failCurrentPlayback(message: "retire failed player")
+                let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+                while session.stopCount == 0, ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(5))
+                }
+            } else {
+                try await engine.update(signal(generation: 2, focused: items[1].id))
+            }
+            _ = await engine.waitUntilSettled()
+            XCTAssertGreaterThan(session.stopCount, 0)
+            XCTAssertTrue(retiredPlayer.isMuted)
+            XCTAssertEqual(retiredPlayer.volume, 0)
+            XCTAssertEqual(retiredPlayer.rate, 0)
+            session.afterStop = nil
+            await engine.stop()
+        }
+    }
+
     func testOriginPreparationFailureIsVisibleAndClearsOnSuccessfulRetry() async throws {
         let items = makeItems(count: 1)
         let engine = try makeEngine(
@@ -1036,6 +1074,7 @@ private final class FakeFeedSessionFactory {
 @MainActor
 private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     var beforeLoadCompletion: (@MainActor (FeedItemID) async -> Void)?
+    var afterStop: (@MainActor () -> Void)?
     private(set) var state = PlayerState()
     let feedPlatformPlayer: AVPlayer?
     private(set) var configuration: ProxyPlayerConfiguration
@@ -1204,6 +1243,7 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
         for continuation in streamingContinuations.values { continuation.finish() }
         streamingContinuations.removeAll()
         activeStateObserverCount = 0
+        afterStop?()
     }
 
     func restartPlayback() async {

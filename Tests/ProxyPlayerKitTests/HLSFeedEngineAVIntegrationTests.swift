@@ -105,7 +105,10 @@ final class HLSFeedEngineAVIntegrationTests: XCTestCase {
         XCTAssertTrue(warmedPlayer.currentItem === warmedItem)
         XCTAssertFalse(warmedPlayer.isMuted)
         XCTAssertGreaterThan(warmedPlayer.volume, 0)
-        XCTAssertTrue(isEffectivelyMuted(initiallyFocusedPlayer))
+        XCTAssertTrue(
+            isEffectivelyMuted(initiallyFocusedPlayer),
+            "Retired player: muted=\(initiallyFocusedPlayer.isMuted), volume=\(initiallyFocusedPlayer.volume), rate=\(initiallyFocusedPlayer.rate)"
+        )
         XCTAssertEqual(snapshot.playback(for: items[1].id)?.phase, .focused)
         XCTAssertEqual(snapshot.maximumObservedPoolOccupancy, 2)
         XCTAssertEqual(snapshot.maximumObservedAudiblePlaybackCount, 1)
