@@ -90,6 +90,7 @@ final class FeedDemoAudiovisualIntegrationTests: XCTestCase {
                 XCTAssertGreaterThan(engine.telemetry.snapshot.paths.reduce(0) {
                     $0 + ($1.decodedFirstFrameLatency?.count ?? 0)
                 }, 0)
+                try assertPlaybackStartStages(engine)
                 _ = engine.setPlaybackSuspended(true)
                 XCTAssertEqual(engine.activeVideoSamplerCount, 0)
                 XCTAssertTrue(retained.allSatisfy { $0.isMuted || $0.volume == 0 })
@@ -131,6 +132,17 @@ final class FeedDemoAudiovisualIntegrationTests: XCTestCase {
             XCTAssertEqual(item.id, engine.snapshot.activeItemID)
             XCTAssertEqual(item.id, engine.snapshot.targetFocusedItemID)
             XCTAssertEqual(item.id, engine.snapshot.audibleItemID)
+        }
+    }
+
+    private func assertPlaybackStartStages(_ engine: HLSFeedEngine) throws {
+        for metrics in engine.telemetry.snapshot.paths where metrics.firstFrameLatency.count > 0 {
+            let stages = try XCTUnwrap(metrics.playbackStartStages)
+            let distributions = [stages.beforeActivation, stages.activationWork, stages.nativeStart, stages.callbackDelivery]
+            XCTAssertTrue(distributions.allSatisfy { $0.count == metrics.firstFrameLatency.count },
+                          "Every native start must retain its stage evidence")
+            XCTAssertEqual(distributions.reduce(0) { $0 + $1.sum }, metrics.firstFrameLatency.sum, accuracy: 0.000_001,
+                           "Stage timing must partition, not replace or shift, the end-to-end sample")
         }
     }
 

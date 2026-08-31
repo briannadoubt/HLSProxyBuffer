@@ -23,7 +23,7 @@ final class HLSFeedTelemetryTests: XCTestCase {
         XCTAssertEqual(metrics.advancingDecodedFrameCount, 9_999)
         let data = try JSONEncoder().encode(metrics)
         var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        for key in ["decodedFirstFrameLatency", "decodedFrameCount", "advancingDecodedFrameCount"] {
+        for key in ["decodedFirstFrameLatency", "decodedFrameCount", "advancingDecodedFrameCount", "playbackStartStages"] {
             legacy.removeValue(forKey: key)
         }
         let decoded = try JSONDecoder().decode(
@@ -31,7 +31,8 @@ final class HLSFeedTelemetryTests: XCTestCase {
         )
         XCTAssertNil(decoded.decodedFirstFrameLatency)
         XCTAssertNil(decoded.decodedFrameCount, "Legacy playing-state evidence must not invent decoded frames")
-        XCTAssertEqual(telemetry.snapshot.storageBound.histogramCount, 48)
+        XCTAssertNil(decoded.playbackStartStages)
+        XCTAssertEqual(telemetry.snapshot.storageBound.histogramCount, 96)
     }
 
     func testOneHundredThousandEventsKeepFixedStorageAndCorrectAggregates() throws {
@@ -78,9 +79,9 @@ final class HLSFeedTelemetryTests: XCTestCase {
         XCTAssertEqual(snapshot.eventCount, 100_001)
         XCTAssertEqual(snapshot.paths.count, 12)
         XCTAssertEqual(snapshot.storageBound.pathCount, 12)
-        XCTAssertEqual(snapshot.storageBound.histogramCount, 48)
+        XCTAssertEqual(snapshot.storageBound.histogramCount, 96)
         XCTAssertEqual(snapshot.storageBound.bucketsPerHistogram, 3)
-        XCTAssertEqual(snapshot.storageBound.maximumHistogramBucketCount, 144)
+        XCTAssertEqual(snapshot.storageBound.maximumHistogramBucketCount, 288)
         XCTAssertEqual(snapshot.storageBound.maximumCancellationOutcomeCount, 36)
         XCTAssertEqual(snapshot.storageBound.maximumBufferedEventCount, 2)
         XCTAssertEqual(metrics.firstFrameLatency.bucketCounts, [20_000, 20_000, 0])

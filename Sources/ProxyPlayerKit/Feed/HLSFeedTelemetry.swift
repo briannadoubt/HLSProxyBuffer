@@ -6,7 +6,7 @@ import os
 ///
 /// Aggregation cardinality is independent of item and event count. Metrics are
 /// partitioned into the twelve possible combinations of cache reuse, feed
-/// intent, and media kind. Each path owns four bounded histograms. Event
+/// intent, and media kind. Each path owns eight bounded histograms. Event
 /// subscribers and their newest-event buffers are capped by ``Configuration``.
 @Observable
 @MainActor
@@ -134,6 +134,10 @@ public final class HLSFeedTelemetry {
         /// Focus request to an actual image copied from AVPlayerItemVideoOutput.
         /// This is not proof of display scan-out. Nil in older exported snapshots.
         public let decodedFirstFrameLatency: Distribution?
+        /// A diagnostic decomposition of successful playback starts. This does
+        /// not replace either end-to-end latency measurement or exclude samples.
+        /// Nil in older exports that did not collect stage timing.
+        public let playbackStartStages: PlaybackStartStages?
         /// Sampled output images and strictly advancing image presentation times.
         /// Sampling is bounded; these are not the stream's total frame counts.
         public let decodedFrameCount: UInt64?
@@ -159,6 +163,17 @@ public final class HLSFeedTelemetry {
             let total = cacheHitCount + cacheMissCount
             return total > 0 ? Double(cacheHitCount) / Double(total) : nil
         }
+    }
+
+    public struct PlaybackStartStages: Equatable, Codable, Sendable {
+        /// Focus submission until the engine can activate the destination.
+        public let beforeActivation: Distribution
+        /// Synchronous handoff work before invoking the native play operation.
+        public let activationWork: Distribution
+        /// Play invocation until native time-control observation reports playing.
+        public let nativeStart: Distribution
+        /// Native observation until the main actor confirms current ownership.
+        public let callbackDelivery: Distribution
     }
 
     public struct ResourceSnapshot: Equatable, Codable, Sendable {
@@ -258,6 +273,10 @@ public final class HLSFeedTelemetry {
 
     public struct Event: Equatable, Sendable {
         public enum Payload: Equatable, Sendable {
+            case playbackStartStages(
+                beforeActivation: TimeInterval, activationWork: TimeInterval,
+                nativeStart: TimeInterval, callbackDelivery: TimeInterval
+            )
             case firstFrame(latency: TimeInterval)
             case decodedVideo(firstFrameLatency: TimeInterval?, frames: Int, advancingFrames: Int)
             case nativeAudioOwnership(observedPlayers: Int, eligiblePlayers: Int, ownershipAligned: Bool)
@@ -329,6 +348,10 @@ public final class HLSFeedTelemetry {
         let path: Path
         var firstFrameLatency: MutableDistribution
         var decodedFirstFrameLatency: MutableDistribution
+        var beforeActivation: MutableDistribution
+        var activationWork: MutableDistribution
+        var nativeStart: MutableDistribution
+        var callbackDelivery: MutableDistribution
         var decodedFrameCount: UInt64 = 0
         var advancingDecodedFrameCount: UInt64 = 0
         var stallDuration: MutableDistribution
@@ -348,6 +371,10 @@ public final class HLSFeedTelemetry {
             self.path = path
             self.firstFrameLatency = MutableDistribution(upperBounds: bounds)
             self.decodedFirstFrameLatency = MutableDistribution(upperBounds: bounds)
+            self.beforeActivation = MutableDistribution(upperBounds: bounds)
+            self.activationWork = MutableDistribution(upperBounds: bounds)
+            self.nativeStart = MutableDistribution(upperBounds: bounds)
+            self.callbackDelivery = MutableDistribution(upperBounds: bounds)
             self.stallDuration = MutableDistribution(upperBounds: bounds)
             self.cancellationLatency = MutableDistribution(upperBounds: bounds)
         }
@@ -357,6 +384,10 @@ public final class HLSFeedTelemetry {
                 path: path,
                 firstFrameLatency: firstFrameLatency.value,
                 decodedFirstFrameLatency: decodedFirstFrameLatency.value,
+                playbackStartStages: PlaybackStartStages(
+                    beforeActivation: beforeActivation.value, activationWork: activationWork.value,
+                    nativeStart: nativeStart.value, callbackDelivery: callbackDelivery.value
+                ),
                 decodedFrameCount: decodedFrameCount,
                 advancingDecodedFrameCount: advancingDecodedFrameCount,
                 stallDuration: stallDuration.value,
@@ -414,6 +445,13 @@ public final class HLSFeedTelemetry {
     /// Records one typed event and immediately updates the Observation snapshot.
     public func record(_ event: Event) {
         switch event.payload {
+        case .playbackStartStages(let before, let activation, let native, let delivery):
+            mutatePath(for: event) { path in
+                path.beforeActivation.record(before)
+                path.activationWork.record(activation)
+                path.nativeStart.record(native)
+                path.callbackDelivery.record(delivery)
+            }
         case .nativeAudioOwnership(let observed, let eligible, let aligned):
             nativeAudio = NativeAudioSnapshot(
                 sampleCount: Self.saturatingAdd(nativeAudio.sampleCount, observed > 0 ? 1 : 0),
@@ -616,7 +654,7 @@ public final class HLSFeedTelemetry {
     private static func storageBound(for configuration: Configuration) -> StorageBound {
         StorageBound(
             pathCount: Path.all.count,
-            histogramCount: Path.all.count * 4,
+            histogramCount: Path.all.count * 8,
             bucketsPerHistogram: configuration.latencyUpperBounds.count + 1,
             cancellationOutcomesPerPath: CancellationOutcome.allCases.count,
             maximumSubscriberCount: configuration.maximumSubscriberCount,

@@ -304,6 +304,10 @@ public final class PlaybackAnalyticsTimeline {
             states[attempt.token] = state
         }
         switch event.payload {
+        case .playbackStartStages:
+            // Fixed-cardinality feed telemetry owns the detailed decomposition.
+            // Keep analytics' existing end-to-end measurement unchanged.
+            return
         case .nativeAudioOwnership:
             // Aggregate-only audit; repeating mute samples need not flood the
             // ordered analytics timeline with identical resource events.

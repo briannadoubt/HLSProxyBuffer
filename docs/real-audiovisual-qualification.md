@@ -28,7 +28,7 @@ resident native player lease retains its prepared output while warm; retirement
 detaches it. There is at most one output per player (three in the short-form
 preset), but only the focused output is sampled. Pixel buffers and per-frame
 histories are never retained. Telemetry owns twelve
-fixed paths, four bounded histograms per path, and bounded newest-event streams.
+fixed paths, eight bounded histograms per path, and bounded newest-event streams.
 Older JSON snapshots decode new fields as `nil`, not invented evidence.
 
 The demo host configures its own playback/movie-playback audio session on iOS,
@@ -136,6 +136,17 @@ This does not change warm/cold attribution, timestamps, or performance gates.
 Hosted run 33367848192 failed real warm playback/decoded latency despite local
 passes; that aggregate result alone does not attribute both slow samples to this
 race. Final hosted verification is required after the correction.
+
+Hosted run 33370696812 still exceeded the unchanged warm gates after that fix
+(741 ms playing and 587 ms decoded maxima). Diagnostic `playbackStartStages`
+therefore splits successful starts into focus-to-activation wait, synchronous
+activation work, native play-to-playing time, and native-callback delivery to the
+main actor. Four additional fixed histograms per path retain no item IDs or
+navigation histories. Aggregation follows the original end-to-end sample, which
+keeps its timestamp, attribution, and gates; missing stage evidence never removes
+an end-to-end sample. Native callback time is captured before hopping actors.
+An older export decodes the additional stage field as nil. These diagnostics are
+not a fix or a claim that any one stage caused the hosted failure.
 
 HLS-71 gives both UI qualification launch modes a typed `freshQualification`
 cache scope. A worker prepares one reserved `HLSProxyBuffer-UIQualification`

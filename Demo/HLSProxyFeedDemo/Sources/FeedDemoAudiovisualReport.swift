@@ -7,6 +7,7 @@ struct FeedDemoAudiovisualReport: Codable, Equatable, Sendable {
     struct VideoPath: Codable, Equatable, Sendable {
         let path: HLSFeedTelemetry.Path
         let decodedFirstFrameLatency: HLSFeedTelemetry.Distribution?
+        let playbackStartStages: HLSFeedTelemetry.PlaybackStartStages?
         let sampledFrameCount: UInt64?
         let advancingFrameCount: UInt64?
     }
@@ -77,6 +78,7 @@ struct FeedDemoAudiovisualReport: Codable, Equatable, Sendable {
             vertical: vertical,
             videoPaths: telemetry.paths.map {
                 VideoPath(path: $0.path, decodedFirstFrameLatency: $0.decodedFirstFrameLatency,
+                          playbackStartStages: $0.playbackStartStages,
                           sampledFrameCount: $0.decodedFrameCount, advancingFrameCount: $0.advancingDecodedFrameCount)
             },
             nativeAudio: telemetry.nativeAudio, originPayload: origin.bodyBudget,

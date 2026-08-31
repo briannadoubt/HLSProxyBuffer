@@ -294,6 +294,7 @@ public final class HLSFeedEngine {
         let itemID: FeedItemID
         let generation: FeedNavigationGeneration
         let requestedAt: Duration
+        var startTiming: HLSFeedPlaybackStartTiming
         let wasReadyAtRequest: Bool
         let path: HLSFeedTelemetry.Path
     }
@@ -1325,6 +1326,10 @@ public final class HLSFeedEngine {
            destinationLease.isAudible {
             return
         }
+        if pendingFocus?.itemID == destinationLease.itemID,
+           pendingFocus?.generation == destinationLease.generation {
+            pendingFocus?.startTiming.activationBeganAt = telemetryClock.now()
+        }
         deactivateActivePlayback()
         guard var destinationLease = destination.lease,
               destinationLease.itemID == targetFocusedItemID,
@@ -1359,6 +1364,10 @@ public final class HLSFeedEngine {
             observeDecodedVideo(in: destination, lease: destinationLease)
             observeActivatedPlayback(in: destination, token: destinationLease.token)
         }
+        if pendingFocus?.itemID == destinationLease.itemID,
+           pendingFocus?.generation == destinationLease.generation {
+            pendingFocus?.startTiming.playInvokedAt = telemetryClock.now()
+        }
         destination.session.play()
         if !hasPlatformPlayer {
             confirmActivatedPlayback(in: destination, token: destinationLease.token)
@@ -1388,15 +1397,17 @@ public final class HLSFeedEngine {
 
     private func observeActivatedPlayback(in slot: Slot, token: UUID) {
         guard let player = slot.session.feedPlatformPlayer else { return }
+        let clock = telemetryClock
         slot.playbackStartObservation?.invalidate()
         slot.playbackStartObservation = player.observe(
             \.timeControlStatus,
             options: [.initial, .new]
         ) { [weak self, weak slot] player, _ in
             guard player.timeControlStatus == .playing else { return }
+            let nativePlayingAt = clock.now()
             Task { @MainActor [weak self, weak slot] in
                 guard let self, let slot else { return }
-                self.confirmActivatedPlayback(in: slot, token: token)
+                self.confirmActivatedPlayback(in: slot, token: token, nativePlayingAt: nativePlayingAt)
             }
         }
 
@@ -1452,7 +1463,7 @@ public final class HLSFeedEngine {
         }
     }
 
-    private func confirmActivatedPlayback(in slot: Slot, token: UUID) {
+    private func confirmActivatedPlayback(in slot: Slot, token: UUID, nativePlayingAt: Duration? = nil) {
         guard owns(slot, token: token),
               var lease = slot.lease,
               !isPlaybackSuspended,
@@ -1469,7 +1480,7 @@ public final class HLSFeedEngine {
         slot.playbackStartObservation = nil
         if pendingFocus?.itemID == lease.itemID,
            pendingFocus?.generation == lease.generation {
-            completePendingFocus(succeeded: true)
+            completePendingFocus(succeeded: true, nativePlayingAt: nativePlayingAt)
         }
         rebuildSnapshot()
     }
@@ -1712,22 +1723,26 @@ public final class HLSFeedEngine {
             intent: .focused,
             mediaKind: .videoOnDemand
         )
+        let requestedAt = telemetryClock.now()
         return PendingFocus(
             itemID: itemID,
             generation: generation,
-            requestedAt: telemetryClock.now(),
+            requestedAt: requestedAt,
+            startTiming: HLSFeedPlaybackStartTiming(requestedAt: requestedAt),
             wasReadyAtRequest: wasReady,
             path: path
         )
     }
 
-    private func completePendingFocus(succeeded: Bool) {
+    private func completePendingFocus(succeeded: Bool, nativePlayingAt: Duration? = nil) {
         guard let pendingFocus else { return }
         self.pendingFocus = nil
-        recordPendingFocus(pendingFocus, succeeded: succeeded)
+        recordPendingFocus(pendingFocus, succeeded: succeeded, nativePlayingAt: nativePlayingAt)
     }
 
-    private func recordPendingFocus(_ pendingFocus: PendingFocus, succeeded: Bool) {
+    private func recordPendingFocus(
+        _ pendingFocus: PendingFocus, succeeded: Bool, nativePlayingAt: Duration? = nil
+    ) {
         let attempt = slot(for: pendingFocus.itemID)?.lease?.analyticsAttempt
         recordTelemetry(.init(
             path: pendingFocus.path,
@@ -1737,12 +1752,21 @@ public final class HLSFeedEngine {
             )
         ), attempt: attempt)
         if succeeded {
+            let confirmedAt = telemetryClock.now()
             recordTelemetry(.init(
                 path: pendingFocus.path,
                 payload: .firstFrame(latency: Self.seconds(
-                    telemetryClock.now() - pendingFocus.requestedAt
+                    confirmedAt - pendingFocus.requestedAt
                 ))
             ), attempt: attempt)
+            // Diagnostic aggregation follows the original end-to-end sample;
+            // it cannot move that measurement later or replace a slow sample.
+            if let nativePlayingAt,
+               let stages = pendingFocus.startTiming.sample(
+                nativePlayingAt: nativePlayingAt, confirmedAt: confirmedAt
+               ) {
+                recordTelemetry(.init(path: pendingFocus.path, payload: stages), attempt: attempt)
+            }
         }
     }
 
