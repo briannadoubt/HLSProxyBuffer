@@ -125,6 +125,18 @@ Preparation now includes the output configuration, rather than moving it from
 one handoff measurement into the other. These local probes alone do not uniquely
 explain the original hosted failure; full hosted qualification remains required.
 
+HLS-73 covers a second completion order: the neighbor may still be loading when
+focus changes and finish priming while expanded focused preparation is pending.
+Both initial-load completion and a later ready-state notification now reconcile
+the newly primed current focus with the accepted working set before activation.
+Source identity, lease ownership, retirement, suspension, and current-focus
+checks remain mandatory. Held-task regressions reproduce the old generation
+barrier for both completion orders and verify that reversal cannot reclaim focus.
+This does not change warm/cold attribution, timestamps, or performance gates.
+Hosted run 33367848192 failed real warm playback/decoded latency despite local
+passes; that aggregate result alone does not attribute both slow samples to this
+race. Final hosted verification is required after the correction.
+
 HLS-71 gives both UI qualification launch modes a typed `freshQualification`
 cache scope. A worker prepares one reserved `HLSProxyBuffer-UIQualification`
 directory before constructing the engine; repeated runs reset only that directory.

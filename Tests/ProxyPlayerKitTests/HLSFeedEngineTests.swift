@@ -67,6 +67,90 @@ final class HLSFeedEngineTests: XCTestCase {
         await engine.stop()
     }
 
+    func testFinishingInitialPrimePromotesCurrentFocusBeforeExpansionCompletes() async throws {
+        try await exerciseFinishingPrimeDuringFocusExpansion(reversesFocus: false)
+    }
+
+    func testFinishingInitialPrimeAfterReversalDoesNotReclaimFocus() async throws {
+        try await exerciseFinishingPrimeDuringFocusExpansion(reversesFocus: true)
+    }
+
+    func testDelayedReadyAfterInitialPrimePromotesCurrentFocusBeforeExpansionCompletes() async throws {
+        try await exerciseFinishingPrimeDuringFocusExpansion(reversesFocus: false, delaysReadyState: true)
+    }
+
+    func testDelayedReadyAfterInitialPrimeAndReversalDoesNotReclaimFocus() async throws {
+        try await exerciseFinishingPrimeDuringFocusExpansion(reversesFocus: true, delaysReadyState: true)
+    }
+
+    private func exerciseFinishingPrimeDuringFocusExpansion(
+        reversesFocus: Bool,
+        delaysReadyState: Bool = false
+    ) async throws {
+        let items = makeItems(count: 2)
+        let initialLoad = FeedTestLoadGate()
+        let expansion = FeedTestLoadGate()
+        defer { initialLoad.release(); expansion.release() }
+        let factory = FakeFeedSessionFactory()
+        factory.beforeLoadCompletion = { itemID in
+            if itemID == items[1].id { await initialLoad.wait() }
+        }
+        var policy = try makePolicy(maximumPlayerCount: 2)
+        policy.prefetch.behindItemCount = 1
+        policy.budget.maximumResidentItems = 3
+        let engine = try makeEngine(
+            items: items, policy: policy, factory: factory,
+            beforePreparation: { request in
+                if request.generation.rawValue == 2, request.item.id == items[1].id {
+                    await expansion.wait()
+                }
+            }
+        )
+        try await engine.update(signal(generation: 1, focused: items[0].id))
+        let startedDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while (engine.snapshot.activeItemID != items[0].id
+               || factory.session(loadedWith: items[1].id) == nil),
+              ContinuousClock.now < startedDeadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let neighbor = try XCTUnwrap(factory.session(loadedWith: items[1].id))
+        neighbor.delaysLoadReadyState = delaysReadyState
+        XCTAssertEqual(engine.snapshot.activeItemID, items[0].id)
+        XCTAssertEqual(engine.snapshot.playback(for: items[1].id)?.phase, .loading)
+
+        try await engine.update(signal(generation: 2, focused: items[1].id))
+        if reversesFocus {
+            try await engine.update(signal(generation: 3, focused: items[0].id))
+        }
+        initialLoad.release()
+        if delaysReadyState {
+            let finishedDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while engine.snapshot.activeLoadCount != 0, ContinuousClock.now < finishedDeadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            XCTAssertEqual(neighbor.preparationCount, 1)
+            XCTAssertEqual(engine.snapshot.playback(for: items[1].id)?.phase, .loading)
+            neighbor.recoverPlayback()
+        }
+        let primedDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while engine.snapshot.playback(for: items[1].id)?.isImmediatelyPlayable != true,
+              ContinuousClock.now < primedDeadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let expectedFocus = items[reversesFocus ? 0 : 1].id
+        XCTAssertEqual(neighbor.preparationCount, 1)
+        XCTAssertEqual(engine.snapshot.activeItemID, expectedFocus,
+                       "Completed native preparation must not wait on held segment expansion")
+        XCTAssertEqual(factory.audiblePlayingItemIDs, [expectedFocus])
+        XCTAssertEqual(neighbor.playCount, reversesFocus ? 0 : 1)
+
+        expansion.release()
+        _ = await engine.waitUntilSettled()
+        XCTAssertEqual(engine.snapshot.activeItemID, expectedFocus)
+        XCTAssertLessThanOrEqual(factory.maximumAudiblePlayingCount, 1)
+        await engine.stop()
+    }
+
     func testLeaseRetirementResilencesRetainedNativePlayerAfterSessionTeardown() async throws {
         for failsDuringPlayback in [false, true] {
             let items = makeItems(count: 2)
@@ -1147,6 +1231,7 @@ private final class FakeFeedSessionFactory {
 @MainActor
 private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     var beforeLoadCompletion: (@MainActor (FeedItemID) async -> Void)?
+    var delaysLoadReadyState = false
     var afterStop: (@MainActor () -> Void)?
     private(set) var state = PlayerState()
     let feedPlatformPlayer: AVPlayer?
@@ -1240,7 +1325,7 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
         if loadDelay > .zero { try? await Task.sleep(for: loadDelay) }
         if let loadedItemID, failingItemIDs.contains(loadedItemID) {
             transition(to: PlayerState(status: .failed("fixture failure")))
-        } else {
+        } else if !delaysLoadReadyState {
             transition(to: PlayerState(status: .ready, bufferDepthSeconds: 2))
         }
         isStopped = false

@@ -1164,11 +1164,7 @@ public final class HLSFeedEngine {
         } else {
             installPlaybackEndObserver(for: slot, token: token)
         }
-        if !isPlaybackSuspended,
-           lease.itemID == targetFocusedItemID,
-           lease.phase == .warm {
-            activate(slot)
-        }
+        activateNewlyPrimedLease(in: slot)
         rebuildSnapshot()
     }
 
@@ -1294,12 +1290,26 @@ public final class HLSFeedEngine {
                 await self.release(slot, token: token)
             }
         }
-        if !isPlaybackSuspended,
-           lease.itemID == targetFocusedItemID,
-           lease.phase == .warm {
-            activate(slot)
-        }
+        activateNewlyPrimedLease(in: slot)
         rebuildSnapshot()
+    }
+
+    private func activateNewlyPrimedLease(in slot: Slot) {
+        guard !isStopped, !isPlaybackSuspended,
+              let lease = slot.lease, lease.phase == .warm,
+              lease.itemID == targetFocusedItemID,
+              let current = latestCoordinatorSnapshot,
+              let generation = current.generation,
+              let entry = current.entries.first(where: { $0.itemID == lease.itemID }),
+              let item = itemsByID[lease.itemID]
+        else { return }
+        // A focus change may have arrived while native preparation was still
+        // running. Reconcile its completed lease with the accepted working set
+        // now; waiting for expanded segment preparation to publish again would
+        // keep an already-playable player behind a stale-generation barrier.
+        guard reuseLease(for: item, generation: generation, role: entry.role,
+                         requiresPrimedPlayer: true) else { return }
+        activate(slot)
     }
 
     private func activate(_ destination: Slot) {
