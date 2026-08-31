@@ -73,12 +73,14 @@ final class AVPlaybackMetricCollectorIntegrationTests: XCTestCase {
 
         player.play()
         await fulfillment(of: [receivedMetric], timeout: 15)
+        // Finish the stream even if the expectation timed out. Waiting for the
+        // consumer first would leave a failed qualification hanging forever.
+        collector.stop()
         let event = await consumer.value
         XCTAssertEqual(event?.source, .avFoundation)
         XCTAssertEqual(event?.correlation, correlation)
         XCTAssertTrue(event?.measurements.allSatisfy { $0.value.isFinite } == true)
 
-        collector.stop()
         XCTAssertEqual(collector.snapshot.activeSourceCount, 0)
         XCTAssertEqual(collector.snapshot.activeTaskCount, 0)
         XCTAssertEqual(collector.snapshot.activeObserverCount, 0)
