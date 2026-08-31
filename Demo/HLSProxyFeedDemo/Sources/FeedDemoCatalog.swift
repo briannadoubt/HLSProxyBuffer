@@ -82,6 +82,7 @@ struct FeedDemoEntry: Identifiable, Sendable {
     let detail: LocalizedStringResource
     let item: FeedPlaybackItem
     let accentIndex: Int
+    var attribution: String? = nil
 }
 
 /// Stable, ordered fixture identities shared by the demo catalog and its
@@ -122,7 +123,96 @@ enum FeedDemoFixtureCatalog {
 }
 
 enum FeedDemoCatalog {
-    static func entries(for mode: FeedDemoMode, baseURL: URL) -> [FeedDemoEntry] {
+    static func entries(
+        for mode: FeedDemoMode, baseURL: URL, library: FeedDemoMediaLibrary?
+    ) throws -> [FeedDemoEntry] {
+        guard let library else { return syntheticEntries(for: mode, baseURL: baseURL) }
+        let root = baseURL.appendingPathComponent(library.catalog.corpusVersion)
+        func entry(_ clip: FeedDemoMediaLibrary.Clip, id: String, index: Int) -> FeedDemoEntry {
+            let rendition = clip.renditions.first { $0.id == "360p" }
+            let startupPaths = rendition.map { [$0.initializationPath] + $0.segmentPaths.prefix(2) } ?? []
+            let bytes = startupPaths.reduce(0) { $0 + (library.resourcesByPath[$1]?.byteCount ?? 0) }
+            return FeedDemoEntry(
+                id: FeedItemID(rawValue: id),
+                title: LocalizedStringResource("\(clip.title)", bundle: #bundle),
+                detail: LocalizedStringResource("\(Int(clip.duration))-second recorded audiovisual excerpt", bundle: #bundle),
+                item: FeedPlaybackItem(
+                    id: FeedItemID(rawValue: id),
+                    source: .stream(url: root.appendingPathComponent(clip.masterPath), kind: .videoOnDemand),
+                    estimatedPreparationBytes: bytes
+                ),
+                accentIndex: index,
+                attribution: library.catalog.sources.first { $0.id == clip.sourceID }?.credit
+            )
+        }
+        switch mode {
+        case .shortForm, .paged, .continuous, .offlineFirst:
+            let prefix: String
+            let count: Int
+            switch mode {
+            case .paged: prefix = "page"; count = 20
+            case .continuous: prefix = "window"; count = 24
+            case .offlineFirst: prefix = "offline"; count = 20
+            default: prefix = "short"; count = 24
+            }
+            return library.shortClips.prefix(count).enumerated().map {
+                entry($0.element, id: "\(prefix)-\($0.offset)", index: $0.offset)
+            }
+        case .longForm:
+            guard let clip = library.continuousClip else {
+                throw FeedDemoMediaLibrary.ValidationError.invalid("continuous clip missing")
+            }
+            return [entry(clip, id: "long-form", index: 2)]
+        case .looping:
+            guard let clip = library.shortClips.first else {
+                throw FeedDemoMediaLibrary.ValidationError.invalid("loop clip missing")
+            }
+            return [entry(clip, id: "looping-short", index: 4)]
+        case .liveDVR:
+            return [FeedDemoEntry(
+                id: "live-window",
+                title: LocalizedStringResource("Simulated live window", bundle: #bundle),
+                detail: LocalizedStringResource("Prerecorded footage • moving 12-second DVR window", bundle: #bundle),
+                item: FeedPlaybackItem(
+                    id: "live-window",
+                    source: .stream(url: root.appendingPathComponent("live/playlist.m3u8"), kind: .live),
+                    estimatedPreparationBytes: 512 * 1_024
+                ),
+                accentIndex: 3,
+                attribution: library.catalog.sources.first { $0.id == library.continuousClip?.sourceID }?.credit
+            )]
+        case .stitched:
+            let clips = try library.shortClips.prefix(2).map { clip -> ProxyPlaybackClip in
+                guard let rendition = clip.renditions.first(where: { $0.id == "360p" }) else {
+                    throw FeedDemoMediaLibrary.ValidationError.invalid("stitching rendition missing")
+                }
+                return ProxyPlaybackClip(
+                    id: clip.id,
+                    playlistURL: root.appendingPathComponent(rendition.playlistPath),
+                    mediaSignature: HLSClipMediaSignature(
+                        container: .fragmentedMP4,
+                        codecs: [rendition.videoCodec, rendition.audioCodec],
+                        tracks: [
+                            .init(kind: .video, codec: rendition.videoCodec),
+                            .init(kind: .audio, codec: rendition.audioCodec, layout: rendition.audioLayout),
+                        ],
+                        videoRange: rendition.videoRange,
+                        segmentsAreIndependent: true
+                    )
+                )
+            }
+            return [FeedDemoEntry(
+                id: "stitched-a-b",
+                title: LocalizedStringResource("Two real clips, one timeline", bundle: #bundle),
+                detail: LocalizedStringResource("Original synchronized sound • explicit decoder compatibility", bundle: #bundle),
+                item: FeedPlaybackItem(id: "stitched-a-b", source: .compatibleClips(clips), estimatedPreparationBytes: 1_024 * 1_024),
+                accentIndex: 5,
+                attribution: "NASA • Blender Foundation / www.bigbuckbunny.org"
+            )]
+        }
+    }
+
+    private static func syntheticEntries(for mode: FeedDemoMode, baseURL: URL) -> [FeedDemoEntry] {
         switch mode {
         case .shortForm:
             return shortEntries(

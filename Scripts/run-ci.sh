@@ -159,13 +159,15 @@ if command -v xcodebuild >/dev/null 2>&1; then
     if ! wait_for_simulator_boot "$TVOS_SIM_UDID" 300; then
       echo "tvOS simulator boot timed out; skipping tvOS smoke test."
     else
-      echo "Running tvOS Simulator smoke test on $TVOS_SIM_NAME..."
+      echo "Running Release tvOS Simulator qualification on $TVOS_SIM_NAME..."
       TVOS_DERIVED_DATA="$CI_DERIVED_DATA_ROOT/tvos-package"
       xcodebuild \
         -scheme HLSProxyBuffer-Package \
+        -configuration Release \
         -destination "platform=tvOS Simulator,id=$TVOS_SIM_UDID" \
         -derivedDataPath "$TVOS_DERIVED_DATA" \
         ONLY_ACTIVE_ARCH=YES \
+        ENABLE_TESTABILITY=YES \
         -skip-testing:ProxyPlayerKitTests/PlaybackAnalyticsPerformanceTests \
         test
       remove_derived_data "$TVOS_DERIVED_DATA"

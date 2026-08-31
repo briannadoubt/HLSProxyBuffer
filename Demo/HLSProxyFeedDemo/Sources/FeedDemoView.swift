@@ -167,6 +167,7 @@ private struct FeedDemoQualificationView: View {
 
 private struct FeedDemoShell: View {
     @State private var isInspectorPresented = false
+    @State private var isCreditsPresented = false
 
     let model: FeedDemoModel
     let showsQualificationControls: Bool
@@ -180,30 +181,36 @@ private struct FeedDemoShell: View {
             FeedDemoPrimaryChrome(model: model)
         }
         .overlay(alignment: .bottom) {
-            FeedDemoPrimaryHUD(
-                entries: model.entries,
-                focusedItemID: model.focusedItemID,
-                focusedPlayback: model.focusedItemID.flatMap {
-                    model.engineSnapshot.playback(for: $0)
-                },
-                metrics: model.metrics
-            )
-        }
-        .overlay(alignment: .bottomTrailing) {
-            if showsQualificationControls {
-                FeedDemoVerticalQualificationControls(model: model)
-                    .padding(.trailing, 12)
-                    .padding(.bottom, 172)
-            } else {
-                FeedDemoAnalyticsLauncher(
-                    inspector: model.analyticsInspector,
-                    onOpen: { isInspectorPresented = true }
+            VStack(alignment: .trailing, spacing: 8) {
+                if showsQualificationControls {
+                    FeedDemoVerticalQualificationControls(model: model)
+                        .padding(.horizontal, 12)
+                } else {
+                    FeedDemoAnalyticsLauncher(
+                        inspector: model.analyticsInspector,
+                        onOpen: { isInspectorPresented = true }
+                    )
+                    .padding(.horizontal, 16)
+                }
+                FeedDemoPrimaryHUD(
+                    entries: model.entries,
+                    focusedItemID: model.focusedItemID,
+                    focusedPlayback: model.focusedItemID.flatMap {
+                        model.engineSnapshot.playback(for: $0)
+                    },
+                    metrics: model.metrics,
+                    showsPageTitle: model.selectedMode.layout == .paged,
+                    showsCredits: !model.mediaSources.isEmpty,
+                    onOpenCredits: { isCreditsPresented = true }
                 )
-                .padding(.trailing, 16)
-                .padding(.bottom, 184)
             }
         }
         .tint(.mint)
+        .sheet(isPresented: $isCreditsPresented) {
+            FeedDemoMediaCreditsView(sources: model.mediaSources) {
+                isCreditsPresented = false
+            }
+        }
         .sheet(isPresented: $isInspectorPresented) {
             FeedDemoAnalyticsInspectorView(
                 inspector: model.analyticsInspector,
@@ -354,6 +361,12 @@ private struct FeedDemoPrimaryChrome: View {
                 .font(.caption2)
                 .foregroundStyle(.white.opacity(0.68))
                 .accessibilityIdentifier("background-warming-disclosure")
+            if model.usesColdOriginFallback {
+                Text("Preferred demo port is busy; this launch uses a cold cache identity.", bundle: #bundle)
+                    .font(.caption2)
+                    .foregroundStyle(.yellow)
+                    .accessibilityIdentifier("cold-origin-fallback")
+            }
             if model.selectedMode == .liveDVR, model.engine != nil {
                 FeedDemoLiveControls(
                     onSeek: { seconds in
@@ -384,9 +397,16 @@ private struct FeedDemoPrimaryHUD: View {
     let focusedItemID: FeedItemID?
     let focusedPlayback: HLSFeedPlayback?
     let metrics: FeedDemoMetrics
+    let showsPageTitle: Bool
+    let showsCredits: Bool
+    let onOpenCredits: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if showsPageTitle, let entry = entries.first(where: { $0.id == focusedItemID }) {
+                Text(entry.title).font(.headline).lineLimit(2)
+                Text(entry.detail).font(.caption).foregroundStyle(.white.opacity(0.72))
+            }
             HStack {
                 Text(positionText)
                     .font(.caption.monospacedDigit().weight(.bold))
@@ -421,6 +441,24 @@ private struct FeedDemoPrimaryHUD: View {
                     title: LocalizedStringResource("Cancels", bundle: #bundle),
                     value: "\(metrics.acknowledgedCancellationCount)"
                 )
+            }
+            if let attribution = entries.first(where: { $0.id == focusedItemID })?.attribution {
+                Text(verbatim: attribution)
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.75))
+                    .lineLimit(2)
+                    .accessibilityIdentifier("feed-media-attribution")
+            }
+            if showsCredits {
+                Button(action: onOpenCredits) {
+                    Label {
+                        Text("Media credits", bundle: #bundle)
+                    } icon: {
+                        Image(systemName: "info.circle")
+                    }
+                    .font(.caption.weight(.semibold))
+                }
+                .accessibilityIdentifier("media-credits-button")
             }
         }
         .foregroundStyle(.white)
@@ -897,12 +935,14 @@ private struct FeedDemoCard: View {
                     }
                 }
                 Spacer()
-                Text(entry.title)
-                    .font(.title.bold())
-                    .foregroundStyle(.white)
-                Text(entry.detail)
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.72))
+                if showsTopStatus {
+                    Text(entry.title)
+                        .font(.title.bold())
+                        .foregroundStyle(.white)
+                    Text(entry.detail)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.72))
+                }
             }
             .padding(.horizontal, 18)
             .padding(.top, 18)

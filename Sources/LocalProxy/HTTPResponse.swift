@@ -20,17 +20,30 @@ public struct HTTPResponse: Sendable {
     /// Size of the selected representation when its body is intentionally absent
     /// (HEAD or 304). Normal responses always derive framing from the actual body.
     public let representationLength: Int?
+    private let bodyLifetime: BodyLifetime?
 
+    private final class BodyLifetime: Sendable {
+        let release: @Sendable () -> Void
+        init(release: @escaping @Sendable () -> Void) { self.release = release }
+        deinit { release() }
+    }
+
+    /// `onBodyRelease` runs once when the last response copy is released. The
+    /// server retains that copy through transport completion, including errors.
+    /// Use it to release body admission/storage resources, not to infer receipt
+    /// by the remote client. Callers retaining body bytes separately own those bytes.
     public init(
         status: Status,
         headers: [String: String] = [:],
         body: Data = Data(),
-        representationLength: Int? = nil
+        representationLength: Int? = nil,
+        onBodyRelease: (@Sendable () -> Void)? = nil
     ) {
         self.status = status
         self.headers = headers
         self.body = body
         self.representationLength = representationLength.map { max(0, $0) }
+        self.bodyLifetime = onBodyRelease.map(BodyLifetime.init)
     }
 
     public func headerData(connection: String = "keep-alive", includeBody: Bool = true) -> Data {

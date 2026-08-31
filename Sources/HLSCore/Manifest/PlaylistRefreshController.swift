@@ -98,6 +98,10 @@ public actor PlaylistRefreshController {
         self.manifestLoader = manifestLoader
     }
 
+    deinit {
+        if managesSession { session.invalidateAndCancel() }
+    }
+
     public func updateConfiguration(_ configuration: Configuration) {
         self.configuration = configuration
     }

@@ -1,10 +1,133 @@
 #if canImport(Network)
 import XCTest
+import Network
 @testable import LocalProxy
 @testable import HLSCore
 
 @available(macOS 12.0, *)
 final class ProxyServerIntegrationTests: XCTestCase {
+    func testCancellingOnlySegmentClientCancelsOriginFetch() async throws {
+        let entered = expectation(description: "origin fetch started")
+        let cancelled = expectation(description: "origin fetch cancelled")
+        let fetcher = CancellationTestSegmentSource(entered: entered, cancelled: cancelled)
+        let (handler, request) = try await cancellationTestHandler(fetcher: fetcher)
+        let task = Task { await handler(request) }
+        await fulfillment(of: [entered], timeout: 1)
+        task.cancel()
+        await fulfillment(of: [cancelled], timeout: 0.25)
+        await fetcher.release()
+        _ = await task.value
+    }
+
+    func testCancellingSharedWaiterReturnsPromptlyWithoutCancellingOtherClient() async throws {
+        let entered = expectation(description: "origin fetch started")
+        let cancelled = expectation(description: "origin fetch must remain shared")
+        cancelled.isInverted = true
+        let fetcher = CancellationTestSegmentSource(entered: entered, cancelled: cancelled)
+        let coordinator = SegmentLoadCoordinator()
+        let segment = HLSSegment(
+            url: try XCTUnwrap(URL(string: "https://cdn.example.com/shared.m4s")),
+            duration: 2, sequence: 1
+        )
+        let firstReturned = expectation(description: "cancelled client returned")
+        let first = Task {
+            defer { firstReturned.fulfill() }
+            return try await coordinator.data(for: "shared") { try await fetcher.fetchSegment(segment) }
+        }
+        await fulfillment(of: [entered], timeout: 1)
+        let second = Task {
+            try await coordinator.data(for: "shared") { try await fetcher.fetchSegment(segment) }
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while await coordinator.waiterCount(for: "shared") < 2, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        let admitted = await coordinator.waiterCount(for: "shared")
+        XCTAssertEqual(admitted, 2, "Cancellation starts only after both waiters are admitted")
+        first.cancel()
+        await fulfillment(of: [firstReturned], timeout: 0.25)
+        await fetcher.release()
+        let data = try await second.value
+        XCTAssertEqual(data, Data("shared".utf8))
+        _ = try? await first.value
+        await fulfillment(of: [cancelled], timeout: 0.05)
+        let count = await fetcher.count
+        XCTAssertEqual(count, 1)
+    }
+
+    private func cancellationTestHandler(fetcher: CancellationTestSegmentSource) async throws -> (ProxyRouter.Handler, HTTPRequest) {
+        let segment = HLSSegment(
+            url: try XCTUnwrap(URL(string: "https://cdn.example.com/cancellation.m4s")),
+            duration: 2, sequence: 1
+        )
+        let catalog = SegmentCatalog()
+        await catalog.update(with: MediaPlaylist(targetDuration: 2, segments: [segment]))
+        let handler = SegmentHandler(
+            cache: HLSSegmentCache(capacityBytes: 1024), catalog: catalog,
+            fetcher: fetcher, scheduler: SegmentPrefetchScheduler()
+        ).makeHandler()
+        let configuration = HLSRewriteConfiguration(
+            proxyBaseURL: try XCTUnwrap(URL(string: "http://127.0.0.1:8080"))
+        )
+        let request = HTTPRequest(
+            method: .get, path: configuration.segmentURL(for: segment).path,
+            headers: [:], body: Data()
+        )
+        return (handler, request)
+    }
+
+    func testPipelinedRequestArrivingDuringRouteWaitIsServedInOrder() async throws {
+        let firstStarted = expectation(description: "first route admitted")
+        let router = ProxyRouter()
+        router.register(path: "/*") { request in
+            if request.path == "/first" {
+                firstStarted.fulfill()
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            return HTTPResponse(status: .ok, body: Data(request.path.utf8))
+        }
+        let server = ProxyServer(router: router)
+        let url = try await server.startAndWait()
+        defer { server.stop() }
+        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: UInt16(try XCTUnwrap(url.port))))
+        let connection = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
+        connection.start(queue: DispatchQueue(label: "hls.pipeline-test"))
+        defer { connection.cancel() }
+        let timeout = Task {
+            try? await Task.sleep(for: .seconds(3))
+            if !Task.isCancelled { connection.cancel() }
+        }
+        defer { timeout.cancel() }
+        try await send("GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n", on: connection)
+        await fulfillment(of: [firstStarted], timeout: 1)
+        try await send("GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", on: connection)
+        var received = Data()
+        while true {
+            let chunk: (Data?, Bool) = try await withCheckedThrowingContinuation { continuation in
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, complete, error in
+                    if let error { continuation.resume(throwing: error) }
+                    else { continuation.resume(returning: (data, complete)) }
+                }
+            }
+            if let data = chunk.0 { received.append(data) }
+            if chunk.1 { break }
+        }
+        let text = String(decoding: received, as: UTF8.self)
+        XCTAssertEqual(text.components(separatedBy: "HTTP/1.1 200 OK").count - 1, 2)
+        let first = try XCTUnwrap(text.range(of: "/first"))
+        let second = try XCTUnwrap(text.range(of: "/second"))
+        XCTAssertLessThan(first.lowerBound, second.lowerBound)
+    }
+
+    private func send(_ text: String, on connection: NWConnection) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connection.send(content: Data(text.utf8), completion: .contentProcessed { error in
+                if let error { continuation.resume(throwing: error) }
+                else { continuation.resume() }
+            })
+        }
+    }
+
     func testOnDemandFetchServesSegmentAndRefreshesPlaylist() async throws {
         let playlist = MediaPlaylist(
             targetDuration: 4,
@@ -140,6 +263,32 @@ final class ProxyServerIntegrationTests: XCTestCase {
         XCTAssertEqual(Set(responses), [Data("shared-data".utf8)])
         let count = await fetcher.currentCount()
         XCTAssertEqual(count, 1)
+    }
+}
+
+private actor CancellationTestSegmentSource: SegmentSource {
+    let entered: XCTestExpectation
+    let cancelled: XCTestExpectation
+    private var isReleased = false
+    private(set) var count = 0
+
+    init(entered: XCTestExpectation, cancelled: XCTestExpectation) {
+        self.entered = entered
+        self.cancelled = cancelled
+    }
+
+    func release() { isReleased = true }
+
+    func fetchSegment(_ segment: HLSSegment) async throws -> Data {
+        count += 1
+        entered.fulfill()
+        do {
+            while !isReleased { try await Task.sleep(for: .milliseconds(5)) }
+            return Data("shared".utf8)
+        } catch {
+            cancelled.fulfill()
+            throw error
+        }
     }
 }
 

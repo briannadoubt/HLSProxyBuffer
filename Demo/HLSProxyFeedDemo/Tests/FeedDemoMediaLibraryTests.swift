@@ -159,7 +159,7 @@ final class FeedDemoMediaLibraryTests: XCTestCase {
     }
 
     func testSyntheticOriginDoesNotExposeOrPreloadRealCorpus() async throws {
-        let origin = try FeedDemoFixtureOrigin()
+        let origin = try FeedDemoFixtureOrigin(configuration: .synthetic)
         let baseURL = try await origin.start()
         defer { origin.stop() }
         let (_, response) = try await URLSession.shared.data(from: baseURL.appendingPathComponent("real/feed-01/360p/segment-000.m4s"))

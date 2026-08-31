@@ -15,7 +15,9 @@ struct HLSProxyFeedDemoApp: App {
 #endif
 
     init() {
-        let model = FeedDemoModel()
+        let synthetic = ProcessInfo.processInfo.arguments.contains("--qualification-mode")
+            || ProcessInfo.processInfo.arguments.contains("--synthetic-media")
+        let model = FeedDemoModel(mediaConfiguration: synthetic ? .synthetic : .realMedia)
         _model = State(initialValue: model)
 #if canImport(BackgroundTasks) && os(iOS)
         FeedDemoBackgroundProcessingBridge.shared.install(model)

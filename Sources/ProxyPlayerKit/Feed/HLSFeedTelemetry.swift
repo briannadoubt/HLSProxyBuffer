@@ -144,6 +144,9 @@ public final class HLSFeedTelemetry {
         public let handoffAttemptCount: UInt64
         public let handoffReadyCount: UInt64
         public let handoffSuccessCount: UInt64
+        /// Successful playback among requests that were already ready.
+        /// Nil only when decoding an older snapshot without this joint count.
+        public let handoffReadySuccessCount: UInt64?
 
         public var cacheHitRate: Double? {
             let total = cacheHitCount + cacheMissCount
@@ -317,6 +320,7 @@ public final class HLSFeedTelemetry {
         var handoffAttemptCount: UInt64 = 0
         var handoffReadyCount: UInt64 = 0
         var handoffSuccessCount: UInt64 = 0
+        var handoffReadySuccessCount: UInt64 = 0
 
         init(path: Path, bounds: [TimeInterval]) {
             self.path = path
@@ -339,7 +343,8 @@ public final class HLSFeedTelemetry {
                 cancellationOutcomeCounts: cancellationOutcomeCounts,
                 handoffAttemptCount: handoffAttemptCount,
                 handoffReadyCount: handoffReadyCount,
-                handoffSuccessCount: handoffSuccessCount
+                handoffSuccessCount: handoffSuccessCount,
+                handoffReadySuccessCount: handoffReadySuccessCount
             )
         }
     }
@@ -422,6 +427,9 @@ public final class HLSFeedTelemetry {
                 }
                 if succeeded {
                     path.handoffSuccessCount = Self.saturatingAdd(path.handoffSuccessCount, 1)
+                    if wasReady {
+                        path.handoffReadySuccessCount = Self.saturatingAdd(path.handoffReadySuccessCount, 1)
+                    }
                 }
             }
             signposter.emitEvent("Feed Handoff")

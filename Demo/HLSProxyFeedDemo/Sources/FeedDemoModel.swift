@@ -46,8 +46,13 @@ final class FeedDemoModel {
     private(set) var qualificationNetworkCondition: FeedDemoQualificationNetworkCondition = .normal
     private(set) var applicationPhase: FeedDemoApplicationPhase = .active
     private(set) var backgroundSnapshot = FeedDemoBackgroundLifecycleSnapshot.empty
+    private(set) var mediaSources: [FeedDemoMediaLibrary.Source] = []
+    private(set) var usesColdOriginFallback = false
 
     @ObservationIgnored private let clock = ContinuousClock()
+    @ObservationIgnored private let mediaConfiguration: FeedDemoFixtureOrigin.Configuration
+    @ObservationIgnored private var startupGeneration = UUID()
+    @ObservationIgnored private var installationGeneration = UUID()
     @ObservationIgnored private let backgroundWarmingPolicy =
         HLSFeedBackgroundWarmingPolicy.shortFormFeed
     @ObservationIgnored private let backgroundEnvironment:
@@ -76,10 +81,12 @@ final class FeedDemoModel {
     @ObservationIgnored private var qualificationAwaitsForeground = false
 
     init(
+        mediaConfiguration: FeedDemoFixtureOrigin.Configuration = .realMedia,
         backgroundScheduler: (any FeedDemoBackgroundScheduling)? = nil,
         backgroundEnvironment: (any FeedDemoBackgroundEnvironmentProviding)? = nil,
         backgroundSchedulePolicy: FeedDemoBackgroundSchedulePolicy = .shortFormFeed
     ) {
+        self.mediaConfiguration = mediaConfiguration
         let scheduler = backgroundScheduler ?? FeedDemoBackgroundDependencies.makeScheduler()
         self.backgroundEnvironment = backgroundEnvironment
             ?? FeedDemoBackgroundDependencies.makeEnvironmentProvider()
@@ -90,17 +97,34 @@ final class FeedDemoModel {
     }
 
     func start() async {
-        guard origin == nil else { return }
+        guard origin == nil, status != .starting else { return }
         status = .starting
+        let generation = UUID()
+        startupGeneration = generation
         do {
-            let fixtureOrigin = try FeedDemoFixtureOrigin()
+            let configuration = mediaConfiguration
+            let loader = Task.detached(priority: .userInitiated) {
+                try Task.checkCancellation()
+                return try FeedDemoFixtureOrigin(configuration: configuration)
+            }
+            let fixtureOrigin = try await withTaskCancellationHandler {
+                try await loader.value
+            } onCancel: { loader.cancel() }
+            try Task.checkCancellation()
             let baseURL = try await fixtureOrigin.start()
+            guard generation == startupGeneration else { fixtureOrigin.stop(); return }
             origin = fixtureOrigin
+            mediaSources = fixtureOrigin.library?.catalog.sources ?? []
+            usesColdOriginFallback = fixtureOrigin.usesFallbackPort
             startedAt = clock.now
-            try await install(mode: selectedMode, baseURL: baseURL)
+            guard try await install(mode: selectedMode, baseURL: baseURL),
+                  generation == startupGeneration else { return }
             reconcilePlaybackForApplicationPhase()
             status = .running
         } catch {
+            guard generation == startupGeneration else { return }
+            origin?.stop()
+            origin = nil
             status = .failed(error.localizedDescription)
         }
     }
@@ -111,7 +135,7 @@ final class FeedDemoModel {
         guard let baseURL = origin?.baseURL else { return }
         status = .starting
         do {
-            try await install(mode: mode, baseURL: baseURL)
+            guard try await install(mode: mode, baseURL: baseURL) else { return }
             status = .running
         } catch {
             status = .failed(error.localizedDescription)
@@ -332,6 +356,10 @@ final class FeedDemoModel {
     }
 
     func stop() async {
+        startupGeneration = UUID()
+        installationGeneration = UUID()
+        mediaSources = []
+        usesColdOriginFallback = false
         backgroundLifecycle.cancelActive()
         backgroundLifecycle.cancelPending()
         refreshBackgroundSnapshot()
@@ -366,7 +394,9 @@ final class FeedDemoModel {
         status = .idle
     }
 
-    private func install(mode: FeedDemoMode, baseURL: URL) async throws {
+    private func install(mode: FeedDemoMode, baseURL: URL) async throws -> Bool {
+        let generation = UUID()
+        installationGeneration = generation
         signalTask?.cancel()
         engineUpdatesTask?.cancel()
         telemetryTask?.cancel()
@@ -377,7 +407,8 @@ final class FeedDemoModel {
         await stopCurrentEngineAndAnalytics()
         for task in observationTasks { await task.value }
 
-        let nextEntries = FeedDemoCatalog.entries(for: mode, baseURL: baseURL)
+        guard generation == installationGeneration, origin?.baseURL == baseURL else { return false }
+        let nextEntries = try FeedDemoCatalog.entries(for: mode, baseURL: baseURL, library: origin?.library)
         let policy = mode.policy
         let nextEngine = try HLSFeedEngine(
             items: nextEntries.map(\.item),
@@ -417,6 +448,7 @@ final class FeedDemoModel {
             submitSignal(requestedFocus: first.id)
         }
         reconcilePlaybackForApplicationPhase()
+        return true
     }
 
     private func observeEngine(_ observedEngine: HLSFeedEngine, policy: FeedPlaybackPolicy) {

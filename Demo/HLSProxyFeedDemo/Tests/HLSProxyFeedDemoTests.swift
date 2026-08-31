@@ -6,6 +6,38 @@ import HLSCore
 
 @MainActor
 final class HLSProxyFeedDemoTests: XCTestCase {
+    func testReadyHandoffGateDoesNotMixColdRequestsWithReadyOutcomes() {
+        let telemetry = HLSFeedTelemetry()
+        let path = HLSFeedTelemetry.Path(reuse: .warm, intent: .focused, mediaKind: .videoOnDemand)
+        for _ in 0..<100 {
+            telemetry.record(.init(path: path, payload: .handoff(wasReady: true, succeeded: true)))
+        }
+        for _ in 0..<2 {
+            telemetry.record(.init(path: path, payload: .handoff(wasReady: false, succeeded: false)))
+        }
+        func report() -> FeedDemoQualificationReport {
+            .make(
+                navigationCount: 100, measuredNavigationCount: 100, requestedItemID: nil,
+                snapshot: .empty, telemetry: telemetry.snapshot, policy: .shortFormFeed,
+                warmupMemoryBytes: 0
+            )
+        }
+        let coldFailures = report()
+        XCTAssertEqual(coldFailures.readyHandoffSuccessRate, 1)
+        XCTAssertLessThan(coldFailures.handoffSuccessRate ?? 1, 0.99)
+        XCTAssertFalse(coldFailures.failures.contains("successful ready handoffs fell below 99 percent"))
+        for _ in 0..<400 {
+            telemetry.record(.init(path: path, payload: .handoff(wasReady: false, succeeded: true)))
+        }
+        for _ in 0..<2 {
+            telemetry.record(.init(path: path, payload: .handoff(wasReady: true, succeeded: false)))
+        }
+        let warmFailures = report()
+        XCTAssertGreaterThan(warmFailures.handoffSuccessRate ?? 0, 0.99)
+        XCTAssertLessThan(warmFailures.readyHandoffSuccessRate ?? 1, 0.99)
+        XCTAssertTrue(warmFailures.failures.contains("successful ready handoffs fell below 99 percent"))
+    }
+
     func testVerticalQualificationReportIsBoundedSanitizedAndCoversEveryMetric() throws {
         let telemetry = HLSFeedTelemetry(configuration: .init(
             latencyUpperBounds: [0.05, 0.1, 0.25],
@@ -133,11 +165,11 @@ final class HLSProxyFeedDemoTests: XCTestCase {
     }
 
     func testPrimaryShortFormCatalogHasTwentyFourStableDistinctHLSItems() async throws {
-        let origin = try FeedDemoFixtureOrigin()
+        let origin = try FeedDemoFixtureOrigin(configuration: .synthetic)
         let baseURL = try await origin.start()
         defer { origin.stop() }
 
-        let entries = FeedDemoCatalog.entries(for: .shortForm, baseURL: baseURL)
+        let entries = try FeedDemoCatalog.entries(for: .shortForm, baseURL: baseURL, library: nil)
         XCTAssertEqual(entries.count, 24)
         XCTAssertEqual(Set(entries.map(\.id)).count, 24)
         let urls = entries.compactMap { entry -> URL? in
@@ -165,12 +197,12 @@ final class HLSProxyFeedDemoTests: XCTestCase {
     }
 
     func testEveryModeUsesAValidatedPolicyAndLocalFixtureCatalog() async throws {
-        let origin = try FeedDemoFixtureOrigin()
+        let origin = try FeedDemoFixtureOrigin(configuration: .synthetic)
         let baseURL = try await origin.start()
         defer { origin.stop() }
 
         for mode in FeedDemoMode.allCases {
-            let entries = FeedDemoCatalog.entries(for: mode, baseURL: baseURL)
+            let entries = try FeedDemoCatalog.entries(for: mode, baseURL: baseURL, library: nil)
             XCTAssertFalse(entries.isEmpty, "\(mode) must have a runnable fixture catalog")
             XCTAssertNoThrow(try mode.policy.validated())
             XCTAssertEqual(Set(entries.map(\.id)).count, entries.count)
@@ -198,7 +230,7 @@ final class HLSProxyFeedDemoTests: XCTestCase {
     }
 
     func testFixtureOriginServesByteRangesAndValidators() async throws {
-        let origin = try FeedDemoFixtureOrigin()
+        let origin = try FeedDemoFixtureOrigin(configuration: .synthetic)
         let baseURL = try await origin.start()
         defer { origin.stop() }
         let url = baseURL
@@ -215,7 +247,7 @@ final class HLSProxyFeedDemoTests: XCTestCase {
     }
 
     func testFixtureOriginHeadAdvertisesFullLengthWithoutBodyAndIgnoresRange() async throws {
-        let origin = try FeedDemoFixtureOrigin()
+        let origin = try FeedDemoFixtureOrigin(configuration: .synthetic)
         let baseURL = try await origin.start()
         defer { origin.stop() }
         let config = URLSessionConfiguration.ephemeral
@@ -244,7 +276,7 @@ final class HLSProxyFeedDemoTests: XCTestCase {
     }
 
     func testFixtureOriginControlsFaultsOfflinePoorNetworkAndRequestAccounting() async throws {
-        let origin = try FeedDemoFixtureOrigin()
+        let origin = try FeedDemoFixtureOrigin(configuration: .synthetic)
         let baseURL = try await origin.start()
         defer { origin.stop() }
         let configuration = URLSessionConfiguration.ephemeral
@@ -314,11 +346,13 @@ final class HLSProxyFeedDemoTests: XCTestCase {
 
         await origin.resetRequestAccounting()
         let resetSnapshot = await origin.snapshot()
-        XCTAssertEqual(resetSnapshot, .empty)
+        var emptyAccounting = FeedDemoFixtureOrigin.Snapshot.empty
+        emptyAccounting.originBinding = "ephemeral"
+        XCTAssertEqual(resetSnapshot, emptyAccounting)
     }
 
     func testFixtureOriginAccountsForConcurrentFeedItemsIndependently() async throws {
-        let origin = try FeedDemoFixtureOrigin()
+        let origin = try FeedDemoFixtureOrigin(configuration: .synthetic)
         let baseURL = try await origin.start()
         defer { origin.stop() }
         await origin.setNetworkProfile(.init(responseDelay: .milliseconds(100)))
@@ -540,7 +574,7 @@ final class HLSProxyFeedDemoTests: XCTestCase {
     }
 
     func testDemoAnalyticsPipelineCoversEveryPlaybackMode() async throws {
-        let model = FeedDemoModel()
+        let model = FeedDemoModel(mediaConfiguration: .synthetic)
         await model.start()
 
         XCTAssertEqual(model.status, .running)
@@ -661,6 +695,7 @@ final class HLSProxyFeedDemoTests: XCTestCase {
             networkInterface: .wifi
         ))
         let model = FeedDemoModel(
+            mediaConfiguration: .synthetic,
             backgroundScheduler: scheduler,
             backgroundEnvironment: environment
         )

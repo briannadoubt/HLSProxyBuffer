@@ -206,9 +206,13 @@ extension ProxyHLSPlayer: HLSFeedPlayerSession {
     }
 
     func restartPlayback() async {
-        guard let player else { return }
-        player.currentItem?.cancelPendingSeeks()
-        await player.seek(to: .zero)
+        guard !Task.isCancelled, let player, let item = player.currentItem,
+              !player.isMuted else { return }
+        item.cancelPendingSeeks()
+        // At end-of-item, tvOS can defer seek completion until playback resumes.
+        // Submit the rewind and play without a suspension point between them.
+        // No completion callback may later restart a retired or muted lease.
+        player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { _ in }
         play()
     }
 }

@@ -9,11 +9,14 @@
 /* Begin PBXBuildFile section */
 		00FB70F9D1944984844CD3C0 /* FeedDemoAnalyticsInspector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 533503BD14232605870AC970 /* FeedDemoAnalyticsInspector.swift */; };
 		04CCF75EB57068B2F1ED14A6 /* Fixtures in Resources */ = {isa = PBXBuildFile; fileRef = 1BC85C15EC5A307F9C358B7F /* Fixtures */; };
+		1C2C9D91C1F77C627E88B9F4 /* FeedDemoLivePlaylist.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82D70244A9E0275023133785 /* FeedDemoLivePlaylist.swift */; };
 		1DE9B45D7666EA9D0151D625 /* HLSProxyBuffer in Frameworks */ = {isa = PBXBuildFile; productRef = 5DEE21009CCC529C00077F4C /* HLSProxyBuffer */; };
 		24BBF26D7CA029F2478C676A /* FeedDemoSignalBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D8961D850963CA1AE629A41 /* FeedDemoSignalBuilder.swift */; };
 		3A4B88F3FB1D4088B8CF5424 /* FeedDemoQualification.swift in Sources */ = {isa = PBXBuildFile; fileRef = 303559D318E4BC284CE77C39 /* FeedDemoQualification.swift */; };
 		4CA4A9D9BAFEA3E2282CB320 /* HLSProxyFeedDemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B42E870069D71B1C9759E707 /* HLSProxyFeedDemoApp.swift */; };
+		55D5FE0C1560A00E72600D0A /* FeedDemoBodyBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9180994D474A0BFD119695B2 /* FeedDemoBodyBudget.swift */; };
 		69978CF3DA6A9351B357D379 /* FeedDemoFixtureOrigin.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBCFA5A19660D90ED78B1C54 /* FeedDemoFixtureOrigin.swift */; };
+		7DFBA3135CCAF92727EAD11E /* FeedDemoMediaCreditsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4A2C37F70975959F4F07E8E /* FeedDemoMediaCreditsView.swift */; };
 		84FAC34C21A194101128520C /* FeedDemoMediaLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EC66B9FF0B33B3F42A55262 /* FeedDemoMediaLibrary.swift */; };
 		91A0D8AF5CB8CDAA46FFEAA7 /* HLSCore in Frameworks */ = {isa = PBXBuildFile; productRef = 80502095A6E48AA5E6AE3429 /* HLSCore */; };
 		9F7946F13905F8B630B68254 /* FeedDemoModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED56CD1BFEBDA23EED9467CF /* FeedDemoModel.swift */; };
@@ -35,6 +38,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		017CA0E005892A53EF1D9FE0 /* hls-real-feed.fbx3vf */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "hls-real-feed.fbx3vf"; path = ../..; sourceTree = SOURCE_ROOT; };
 		15A87D0CFA813634B16458E0 /* HLSProxyFeedDemoApp.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = HLSProxyFeedDemoApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1BC85C15EC5A307F9C358B7F /* Fixtures */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fixtures; sourceTree = SOURCE_ROOT; };
 		303559D318E4BC284CE77C39 /* FeedDemoQualification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoQualification.swift; sourceTree = "<group>"; };
@@ -43,13 +47,15 @@
 		5995C9797B54E0268FDBAE8C /* FeedDemoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoView.swift; sourceTree = "<group>"; };
 		5AC599B1E8D0D143E04649DF /* FeedDemoBackgroundLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoBackgroundLifecycle.swift; sourceTree = "<group>"; };
 		5D8961D850963CA1AE629A41 /* FeedDemoSignalBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoSignalBuilder.swift; sourceTree = "<group>"; };
+		82D70244A9E0275023133785 /* FeedDemoLivePlaylist.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoLivePlaylist.swift; sourceTree = "<group>"; };
+		9180994D474A0BFD119695B2 /* FeedDemoBodyBudget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoBodyBudget.swift; sourceTree = "<group>"; };
 		A01534D45F570E145A974181 /* HLSProxyFeedDemoAppUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HLSProxyFeedDemoAppUITests.swift; sourceTree = "<group>"; };
 		B42E870069D71B1C9759E707 /* HLSProxyFeedDemoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HLSProxyFeedDemoApp.swift; sourceTree = "<group>"; };
-		C06D4D4FC9755133A49993BF /* HLSProxyBuffer */ = {isa = PBXFileReference; lastKnownFileType = folder; name = HLSProxyBuffer; path = ../..; sourceTree = SOURCE_ROOT; };
 		C282D7878B2FFDF7BD31492B /* HLSProxyFeedDemoAppUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = HLSProxyFeedDemoAppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		CF676DC7A09A1B5C505C422B /* FeedDemoCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoCatalog.swift; sourceTree = "<group>"; };
 		EBCFA5A19660D90ED78B1C54 /* FeedDemoFixtureOrigin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoFixtureOrigin.swift; sourceTree = "<group>"; };
 		ED56CD1BFEBDA23EED9467CF /* FeedDemoModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoModel.swift; sourceTree = "<group>"; };
+		F4A2C37F70975959F4F07E8E /* FeedDemoMediaCreditsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDemoMediaCreditsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -69,7 +75,7 @@
 		265030D67E02C503504E5617 /* Packages */ = {
 			isa = PBXGroup;
 			children = (
-				C06D4D4FC9755133A49993BF /* HLSProxyBuffer */,
+				017CA0E005892A53EF1D9FE0 /* hls-real-feed.fbx3vf */,
 			);
 			name = Packages;
 			sourceTree = "<group>";
@@ -99,8 +105,11 @@
 			children = (
 				533503BD14232605870AC970 /* FeedDemoAnalyticsInspector.swift */,
 				5AC599B1E8D0D143E04649DF /* FeedDemoBackgroundLifecycle.swift */,
+				9180994D474A0BFD119695B2 /* FeedDemoBodyBudget.swift */,
 				CF676DC7A09A1B5C505C422B /* FeedDemoCatalog.swift */,
 				EBCFA5A19660D90ED78B1C54 /* FeedDemoFixtureOrigin.swift */,
+				82D70244A9E0275023133785 /* FeedDemoLivePlaylist.swift */,
+				F4A2C37F70975959F4F07E8E /* FeedDemoMediaCreditsView.swift */,
 				4EC66B9FF0B33B3F42A55262 /* FeedDemoMediaLibrary.swift */,
 				ED56CD1BFEBDA23EED9467CF /* FeedDemoModel.swift */,
 				303559D318E4BC284CE77C39 /* FeedDemoQualification.swift */,
@@ -221,8 +230,11 @@
 			files = (
 				00FB70F9D1944984844CD3C0 /* FeedDemoAnalyticsInspector.swift in Sources */,
 				FE3F57BD936F0A2BBF45DAFD /* FeedDemoBackgroundLifecycle.swift in Sources */,
+				55D5FE0C1560A00E72600D0A /* FeedDemoBodyBudget.swift in Sources */,
 				F6A8E81993610BE2C1C0077B /* FeedDemoCatalog.swift in Sources */,
 				69978CF3DA6A9351B357D379 /* FeedDemoFixtureOrigin.swift in Sources */,
+				1C2C9D91C1F77C627E88B9F4 /* FeedDemoLivePlaylist.swift in Sources */,
+				7DFBA3135CCAF92727EAD11E /* FeedDemoMediaCreditsView.swift in Sources */,
 				84FAC34C21A194101128520C /* FeedDemoMediaLibrary.swift in Sources */,
 				9F7946F13905F8B630B68254 /* FeedDemoModel.swift in Sources */,
 				3A4B88F3FB1D4088B8CF5424 /* FeedDemoQualification.swift in Sources */,
