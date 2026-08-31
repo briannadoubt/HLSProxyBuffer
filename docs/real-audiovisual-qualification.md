@@ -90,6 +90,14 @@ The resulting `hls-real-audiovisual-feed.json` uses schema 1 and kind
 not source URLs, request histories, headers, or user identifiers. Failure JSON is
 attached before UI pass assertions.
 
+HLS-69 requires the UI gate to decode the root schema version, report kind, and
+Boolean `passed` field. A successful nested vertical report cannot override a
+failed audiovisual envelope. A focused regression rejects root failure with
+nested success, missing/wrongly typed fields, unsupported versions, wrong kinds,
+arrays, and malformed JSON. Hosted run 33361191832 exposed this assertion bug:
+the real audiovisual report exceeded the unchanged warm playback-start gate even
+though the nested vertical report passed. That run is not passing qualification.
+
 ## Listening and device boundaries
 
 Native PCM decode proves the packaged recorded soundtrack is decodable and
@@ -104,6 +112,16 @@ human direction if the required OS permission or process isolation is unavailabl
 Physical-device speakers, route changes/headphones, silent-switch behavior,
 subjective A/V sync, energy/thermals, and hardware decoding remain separate device
 qualification and must not be claimed from simulator CI.
+
+On 2026-08-31, after explicit macOS Audio Capture approval, a private process tap
+captured eight seconds of the verified simulator demo's output (stereo 48 kHz
+PCM; no microphone or system mix). The maintainer listened to the actual-output
+recording and confirmed the audio was fine. Together with the separately
+inspected moving NASA playback video, this completes the simulator listening
+smoke only; it does not establish synchronized-capture or physical-device results.
+The first temporary recorder attempt reached capture but failed to write its
+interleaved buffer using a deinterleaved file-processing format. Matching the
+file's processing format to the tap buffer corrected the recorder, not the app.
 
 References: [AVAssetReaderTrackOutput](https://developer.apple.com/documentation/avfoundation/avassetreadertrackoutput),
 [AVPlayerItemVideoOutput](https://developer.apple.com/documentation/avfoundation/avplayeritemvideooutput),
