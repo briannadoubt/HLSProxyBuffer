@@ -69,3 +69,8 @@ xcodebuild \
 The scheme intentionally uses Release configuration. Regenerate the project
 after editing `project.yml` with `xcodegen generate --spec
 Demo/HLSProxyFeedDemo/project.yml`.
+
+The tvOS simulator stage also uses Release, with `ENABLE_TESTABILITY=YES`
+for the package's internal regression tests. Its cold/warm preparation limits
+remain 250 ms/50 ms; unoptimized Debug timing is not a release-performance
+measurement. Host Debug correctness and sanitizer gates remain separate.
