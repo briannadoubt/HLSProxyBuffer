@@ -93,6 +93,14 @@ The resulting `hls-real-audiovisual-feed.json` uses schema 1 and kind
 not source URLs, request histories, headers, or user identifiers. Failure JSON is
 attached before UI pass assertions.
 
+HLS-72 selects exported attachments by parsed root report kind, not text matches
+inside nested reports or UUID filename order. Selection requires exactly one
+schema-1 envelope with a Boolean result, then the existing pass gate validates
+it. A failed report remains selected and fails the gate; it is not skipped in
+favor of another report. Contract tests cover nested kinds, reversed ordering,
+paths with spaces, missing/ambiguous reports, invalid envelopes, malformed JSON,
+and multiple JSON documents in one attachment.
+
 HLS-69 requires the UI gate to decode the root schema version, report kind, and
 Boolean `passed` field. A successful nested vertical report cannot override a
 failed audiovisual envelope. A focused regression rejects root failure with

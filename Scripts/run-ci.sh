@@ -5,7 +5,12 @@ QUALIFICATION_ARTIFACT_DIR="${HLS_CI_ARTIFACT_DIR:-$PWD/ci-artifacts}"
 mkdir -p "$QUALIFICATION_ARTIFACT_DIR"
 export HLS_CI_ARTIFACT_DIR="$QUALIFICATION_ARTIFACT_DIR"
 
+if ! command -v jq >/dev/null 2>&1; then
+  echo "jq is required to validate feed qualification reports"
+  exit 1
+fi
 bash Scripts/test-audiovisual-report.sh
+bash Scripts/test-report-selection.sh
 
 CI_DERIVED_DATA_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/hlsproxy-ci-derived.XXXXXX")
 
@@ -132,19 +137,10 @@ if command -v xcodebuild >/dev/null 2>&1; then
     xcrun xcresulttool export attachments \
       --path "$UI_RESULT_BUNDLE" \
       --output-path "$UI_ATTACHMENT_DIR"
-    VERTICAL_REPORT_SOURCE=$(grep -l \
-      '"qualificationKind":"vertical_paging_ui"' \
-      "$UI_ATTACHMENT_DIR"/*.json 2>/dev/null | head -n 1 || true)
-    if [ -z "$VERTICAL_REPORT_SOURCE" ]; then
-      echo "Missing vertical_paging_ui attachment in $UI_RESULT_BUNDLE"
-      exit 1
-    fi
+    VERTICAL_REPORT_SOURCE=$(bash Scripts/select-qualification-report.sh \
+      vertical_paging_ui "$UI_ATTACHMENT_DIR"/*.json)
     VERTICAL_REPORT="$QUALIFICATION_ARTIFACT_DIR/hls-feed-vertical-ui-qualification.json"
     cp "$VERTICAL_REPORT_SOURCE" "$VERTICAL_REPORT"
-    if ! command -v jq >/dev/null 2>&1; then
-      echo "jq is required to validate the vertical-feed UI report"
-      exit 1
-    fi
     if ! jq -e \
       '.qualificationKind == "vertical_paging_ui" and .passed == true' \
       "$VERTICAL_REPORT" >/dev/null; then
@@ -152,12 +148,8 @@ if command -v xcodebuild >/dev/null 2>&1; then
       exit 1
     fi
     echo "Vertical-feed UI qualification report: $VERTICAL_REPORT"
-    AUDIOVISUAL_SOURCE=$(grep -l '"qualificationKind":"real_audiovisual_feed_ui"' \
-      "$UI_ATTACHMENT_DIR"/*.json 2>/dev/null | head -n 1 || true)
-    if [ -z "$AUDIOVISUAL_SOURCE" ]; then
-      echo "Missing real audiovisual UI attachment in $UI_RESULT_BUNDLE"
-      exit 1
-    fi
+    AUDIOVISUAL_SOURCE=$(bash Scripts/select-qualification-report.sh \
+      real_audiovisual_feed_ui "$UI_ATTACHMENT_DIR"/*.json)
     cp "$AUDIOVISUAL_SOURCE" "$QUALIFICATION_ARTIFACT_DIR/hls-real-audiovisual-ui.json"
     jq -n -e \
       --slurpfile ui "$AUDIOVISUAL_SOURCE" \
