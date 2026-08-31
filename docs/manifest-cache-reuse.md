@@ -43,3 +43,19 @@ native test verifies that the same buffered AVPlayer and item take focus before
 expansion finishes. The 500 ms warm-start and 250 ms cancellation gates remain
 unchanged. UI qualification attaches its JSON report before asserting success,
 so performance failures retain machine-readable evidence as well as test logs.
+
+## Caller-owned load cancellation
+
+Both ordinary and stitched loading retain an internal task so that replacing a
+load or stopping the player can cancel it. Awaiting an unstructured task alone
+does not propagate cancellation from a feed lease's task. The load now forwards
+caller cancellation to that exact owned task, including its manifest requests
+and retry delays. An already-cancelled caller starts no request, and cancellation
+does not become a playback failure. Generation checks keep a retired caller from
+changing the state of a newer load. No public API migration is required.
+
+Four regressions hold origin responses for five seconds and require caller
+acknowledgement within the existing 250 ms deadline, for both loading APIs and
+already-cancelled callers. They failed before cancellation forwarding and pass
+afterward. This isolates a concrete cancellation gap; hosted real-paging
+qualification remains required independently of these regression results.

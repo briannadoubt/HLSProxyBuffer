@@ -323,6 +323,7 @@ public final class ProxyHLSPlayer {
         from remoteURL: URL,
         quality: HLSRewriteConfiguration.QualityPolicy = .automatic
     ) async {
+        guard !Task.isCancelled else { return }
         clipStitchingError = nil
         player?.currentItem?.cancelPendingSeeks()
         currentLiveWindow = nil
@@ -332,11 +333,12 @@ public final class ProxyHLSPlayer {
         activeLoadTask?.cancel()
         if let activeLoadTask { _ = await activeLoadTask.result }
         if let cleanupTask { await cleanupTask.value }
-        guard generation == sessionGeneration else { return }
+        guard generation == sessionGeneration, !Task.isCancelled else { return }
         if let initializationTask {
             await initializationTask.value
             self.initializationTask = nil
         }
+        guard generation == sessionGeneration, !Task.isCancelled else { return }
         let resolvedQuality = resolveQualityPolicy(requested: quality)
         updateState(PlayerState(
             status: .buffering,
@@ -352,7 +354,7 @@ public final class ProxyHLSPlayer {
         }
         activeLoadTask = task
         do {
-            try await task.value
+            try await awaitOwnedLoad(task)
             if generation == sessionGeneration { activeLoadTask = nil }
         } catch is CancellationError {
             if generation == sessionGeneration {
@@ -372,6 +374,7 @@ public final class ProxyHLSPlayer {
     /// The player owns manifest resolution, validation, proxy routing, buffering,
     /// and the `AVPlayerItem`; adopters only provide trusted media signatures.
     public func load(clips: [ProxyPlaybackClip]) async throws {
+        try Task.checkCancellation()
         clipStitchingError = nil
         player?.currentItem?.cancelPendingSeeks()
         currentLiveWindow = nil
@@ -381,11 +384,13 @@ public final class ProxyHLSPlayer {
         activeLoadTask?.cancel()
         if let activeLoadTask { _ = await activeLoadTask.result }
         if let cleanupTask { await cleanupTask.value }
+        try Task.checkCancellation()
         guard generation == sessionGeneration else { throw CancellationError() }
         if let initializationTask {
             await initializationTask.value
             self.initializationTask = nil
         }
+        try ensureActiveSession(generation)
         updateState(PlayerState(status: .buffering, qualityDescription: "stitched"))
         let task = Task { @MainActor [weak self] in
             guard let self else { throw CancellationError() }
@@ -393,7 +398,7 @@ public final class ProxyHLSPlayer {
         }
         activeLoadTask = task
         do {
-            try await task.value
+            try await awaitOwnedLoad(task)
             if generation == sessionGeneration { activeLoadTask = nil }
         } catch is CancellationError {
             if generation == sessionGeneration {
@@ -412,6 +417,18 @@ public final class ProxyHLSPlayer {
                 updateState(PlayerState(status: .failed(error.localizedDescription)))
             }
             throw error
+        }
+    }
+
+    private func awaitOwnedLoad(_ task: Task<Void, Error>) async throws {
+        // The stored task allows replacement/stop to cancel a load, but is
+        // unstructured: awaiting its value does not inherit caller cancellation.
+        // Capture this exact task so a retired caller cannot cancel a newer load.
+        try await withTaskCancellationHandler {
+            try await task.value
+            try Task.checkCancellation()
+        } onCancel: {
+            task.cancel()
         }
     }
 

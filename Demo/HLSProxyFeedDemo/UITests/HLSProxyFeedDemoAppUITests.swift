@@ -86,15 +86,15 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
             timeout: 15
         ))
         let report = value(of: reportElement)
-        XCTAssertTrue(report.contains("\"qualificationKind\":\"vertical_paging_ui\""), report)
-        XCTAssertTrue(report.contains("\"passed\":true"), report)
-        XCTAssertTrue(report.contains("\"finalOwnershipAligned\":true"), report)
-        XCTAssertTrue(report.contains("\"networkConditionTransitionCount\":3"), report)
-
         let attachment = XCTAttachment(data: Data(report.utf8), uniformTypeIdentifier: "public.json")
         attachment.name = "hls-feed-vertical-ui-qualification.json"
         attachment.lifetime = .keepAlways
         add(attachment)
+
+        XCTAssertTrue(report.contains("\"qualificationKind\":\"vertical_paging_ui\""), report)
+        XCTAssertTrue(report.contains("\"passed\":true"), report)
+        XCTAssertTrue(report.contains("\"finalOwnershipAligned\":true"), report)
+        XCTAssertTrue(report.contains("\"networkConditionTransitionCount\":3"), report)
     }
 
     @MainActor
