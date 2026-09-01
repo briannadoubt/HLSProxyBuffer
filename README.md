@@ -15,6 +15,21 @@ HLSProxyBuffer turns ordered HLS sources plus framework-independent viewport sig
 
 ## Quick Start
 
+Add the package to your `Package.swift` and select the products your app needs:
+
+```swift
+dependencies: [
+    .package(
+        url: "https://github.com/briannadoubt/HLSProxyBuffer.git",
+        from: "0.2.0"
+    )
+]
+```
+
+For the high-level player and automatic feed API, depend on the
+`HLSProxyBuffer` product and import `ProxyPlayerKit`. `HLSCore` and
+`LocalProxy` are also available as focused products for custom pipelines.
+
 ```sh
 swift build
 swift test
@@ -183,6 +198,9 @@ specs/ & docs/         # Reference designs, buffer policies, LL-HLS primer
 ```
 
 Additional design docs live under `docs/` and `specs/`. `HLSProxyFeedDemo` is the standalone reference app; `ProxyVideoView` remains useful for a single-stream preview.
+
+See the [0.2.0 release notes](CHANGELOG.md#020---2026-08-31) for migration
+guidance from the `0.1.0` prerelease.
 
 ## Contributing
 
