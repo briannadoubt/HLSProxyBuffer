@@ -61,6 +61,16 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
         pager.swipeDown()
         XCTAssertEqual(assertSettled(in: app, expectedFocus: "short-1"), "short-1")
 
+        // A percentile gate needs enough independent decoded starts that one
+        // scheduler interruption is an outlier instead of the effective p95.
+        // These are real prepared-player handoffs, not synthetic timings.
+        for _ in 0..<5 {
+            pager.swipeUp()
+            XCTAssertEqual(assertSettled(in: app, expectedFocus: "short-2"), "short-2")
+            pager.swipeDown()
+            XCTAssertEqual(assertSettled(in: app, expectedFocus: "short-1"), "short-1")
+        }
+
         let focusedPage = app.descendants(matching: .any)["feed-item-short-1"]
         XCTAssertTrue(focusedPage.waitForExistence(timeout: 5))
 

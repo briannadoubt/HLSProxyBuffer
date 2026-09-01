@@ -52,7 +52,15 @@ hard gate.
 The default bounded latency histogram includes both 400 ms and 500 ms bucket
 boundaries. Hosted evidence can therefore distinguish the release target from
 the unchanged hard ceiling instead of rounding every 251-500 ms sample up to
-500 ms.
+500 ms. The real paging flow also collects at least twenty settled warm decoded
+starts, so its p95 remains a percentile under an isolated scheduler interruption
+instead of collapsing to the maximum of a ten-sample run.
+
+Prepared feed leases start with `playImmediately(atRate:)` after their successful
+preroll. This skips AVPlayer's cold-start stall heuristic during a warm handoff;
+the decoded-frame gate still requires an actual pixel buffer and advancing frame
+timestamps, so entering the `.playing` state alone cannot pass real-media
+qualification.
 
 ## Reproducing the UI gate
 

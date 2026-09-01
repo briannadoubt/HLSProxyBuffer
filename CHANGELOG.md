@@ -47,6 +47,9 @@ integration surfaces.
 - Stabilized player teardown, stale-completion rejection, transient preroll
   recovery, background/foreground transitions, silent retirement, and focused
   audio ownership across rapid feed navigation.
+- Started successfully prerolled feed leases without reapplying AVPlayer's
+  cold-start stall heuristic, while retaining decoded-frame qualification for
+  real warm handoffs.
 - Added bounded streaming and feed telemetry for latency, stalls, cache behavior,
   cancellation, handoff success, origin traffic, and resource-pool occupancy.
 
