@@ -430,6 +430,31 @@ final class HLSFeedEngineTests: XCTestCase {
         XCTAssertTrue(factory.sessions.allSatisfy { $0.isMuted && !$0.isPlaying })
     }
 
+    func testForegroundResumeReprimesPlatformSessionBeforePlaying() async throws {
+        let items = makeItems(count: 1)
+        let policy = try makePolicy(maximumPlayerCount: 1, prefetchItemCount: 0)
+        let factory = FakeFeedSessionFactory(usesUnstartedPlatformPlayer: true)
+        let engine = try makeEngine(items: items, policy: policy, factory: factory)
+
+        try await engine.update(signal(generation: 1, focused: items[0].id))
+        _ = await engine.waitUntilSettled()
+        let session = try XCTUnwrap(factory.session(loadedWith: items[0].id))
+        XCTAssertEqual(session.preparationCount, 1)
+        XCTAssertEqual(session.playCount, 1)
+
+        _ = engine.setPlaybackSuspended(true)
+        _ = engine.setPlaybackSuspended(false)
+        XCTAssertEqual(session.playCount, 1, "Foreground recovery must re-prime before replaying")
+        _ = await engine.waitUntilSettled()
+
+        XCTAssertEqual(session.preparationCount, 2)
+        XCTAssertEqual(session.playCount, 2)
+        XCTAssertEqual(engine.snapshot.activeItemID, items[0].id)
+        XCTAssertEqual(engine.snapshot.audibleItemID, items[0].id)
+
+        await engine.stop()
+    }
+
     func testNewGenerationCancelsAndRejectsStalePlayerCompletion() async throws {
         let items = makeItems(count: 3)
         let policy = try makePolicy(maximumPlayerCount: 1, prefetchItemCount: 0)

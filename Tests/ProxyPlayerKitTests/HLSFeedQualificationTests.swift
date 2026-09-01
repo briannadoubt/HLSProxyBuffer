@@ -107,7 +107,7 @@ final class HLSFeedQualificationTests: XCTestCase {
         XCTAssertTrue(report.passed, report.failureCodes.joined(separator: ", "))
         XCTAssertEqual(report.schemaVersion, 1)
         XCTAssertEqual(report.metrics.firstFrameLatency.count, 2)
-        XCTAssertEqual(report.metrics.firstFrameLatency.p95Milliseconds, 100)
+        XCTAssertEqual(report.metrics.firstFrameLatency.p95Milliseconds, 80)
         XCTAssertEqual(report.metrics.stallDuration.count, 1)
         XCTAssertEqual(report.metrics.cacheHitRequestCount, 6)
         XCTAssertEqual(report.metrics.cacheMissRequestCount, 2)

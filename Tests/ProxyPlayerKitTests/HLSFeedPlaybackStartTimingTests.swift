@@ -41,7 +41,7 @@ final class HLSFeedPlaybackStartTimingTests: XCTestCase {
         let stages = try XCTUnwrap(metrics.playbackStartStages)
         XCTAssertEqual(metrics.firstFrameLatency.count, 1)
         XCTAssertEqual(metrics.firstFrameLatency.maximum, 0.75)
-        XCTAssertEqual(metrics.firstFrameLatency.approximateQuantile(0.95), 1)
+        XCTAssertEqual(metrics.firstFrameLatency.approximateQuantile(0.95), 0.75)
         XCTAssertEqual(stages.beforeActivation.count, 1_000)
         XCTAssertEqual(stages.activationWork.maximum, 0.02)
         XCTAssertEqual(stages.nativeStart.maximum, 0.6)
