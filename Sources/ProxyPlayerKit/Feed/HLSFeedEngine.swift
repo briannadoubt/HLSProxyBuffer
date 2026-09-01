@@ -124,7 +124,6 @@ protocol HLSFeedPlayerSession: AnyObject {
         willPreroll: @MainActor (AVPlayerItem) -> Void
     ) async -> Bool
     func play()
-    func playPrepared()
     func pause()
     func setMuted(_ isMuted: Bool)
     func setPlaybackRate(_ rate: Float)
@@ -136,10 +135,6 @@ protocol HLSFeedPlayerSession: AnyObject {
 }
 
 extension HLSFeedPlayerSession {
-    func playPrepared() {
-        play()
-    }
-
     func prepareForImmediatePlayback(
         retryPolicy: HLSFeedPlayerPreparationRetryPolicy,
         willPreroll: @MainActor (AVPlayerItem) -> Void
@@ -158,13 +153,6 @@ extension HLSFeedPlayerSession {
 }
 
 extension ProxyHLSPlayer: HLSFeedPlayerSession {
-    func playPrepared() {
-        // Feed leases have already completed a successful AVPlayer preroll.
-        // Starting that prepared pipeline immediately avoids asking AVPlayer to
-        // apply its cold-start stall heuristic again during a warm handoff.
-        playPreparedForFeed()
-    }
-
     var feedPlatformPlayer: AVPlayer? { player }
 
     func prepareForImmediatePlayback(
@@ -284,11 +272,6 @@ struct HLSFeedPlayerPreparationRetryPolicy: Equatable, Sendable {
 @Observable
 @MainActor
 public final class HLSFeedEngine {
-    private enum ActivationStart {
-        case preparedHandoff
-        case foregroundResume
-    }
-
     private struct Lease {
         let token: UUID
         let itemID: FeedItemID
@@ -615,7 +598,7 @@ public final class HLSFeedEngine {
             recordPlaybackLifecycle(.resumed)
             if let targetFocusedItemID,
                let destination = slot(for: targetFocusedItemID) {
-                activate(destination, start: .foregroundResume)
+                activate(destination)
             }
         }
         rebuildSnapshot()
@@ -1330,10 +1313,7 @@ public final class HLSFeedEngine {
         activate(slot)
     }
 
-    private func activate(
-        _ destination: Slot,
-        start: ActivationStart = .preparedHandoff
-    ) {
+    private func activate(_ destination: Slot) {
         guard !isPlaybackSuspended,
               let targetFocusedItemID,
               let destinationLease = destination.lease,
@@ -1388,15 +1368,11 @@ public final class HLSFeedEngine {
            pendingFocus?.generation == destinationLease.generation {
             pendingFocus?.startTiming.playInvokedAt = telemetryClock.now()
         }
-        switch start {
-        case .preparedHandoff:
-            destination.session.playPrepared()
-        case .foregroundResume:
-            // A background-interrupted AVPlayer is not freshly prerolled.
-            // Let AVPlayer apply its normal resume semantics here while warm
-            // feed handoffs continue to use the low-latency prepared path.
-            destination.session.play()
-        }
+        // AVPlayer still owns the final transition from a successfully
+        // prerolled item into playback. Its normal stall-minimizing path is
+        // more reliable than forcing playImmediately(atRate:) on a pipeline
+        // whose readiness can change between preroll and focus handoff.
+        destination.session.play()
         if !hasPlatformPlayer {
             confirmActivatedPlayback(in: destination, token: destinationLease.token)
         }
