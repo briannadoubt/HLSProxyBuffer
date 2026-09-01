@@ -61,13 +61,18 @@ transition into playback through normal `play()` semantics. Forcing
 `playImmediately(atRate:)` proved unsafe because pipeline readiness can change
 between preroll and focus handoff. The decoded-frame gate still requires an
 actual pixel buffer and advancing frame timestamps, so entering the `.playing`
-state alone cannot pass real-media qualification.
+state alone cannot pass real-media qualification. Foreground recovery performs
+a bounded re-preroll because AVPlayer can discard its previously prepared
+pipeline while the application is suspended, then resumes through normal
+`play()` semantics with stale-lease and cancellation checks intact.
 
 Timing evidence carries an explicit profile and limit. Controlled local or
 dedicated-hardware release qualification uses the `release_reference` profile
 and the 500 ms warm p95 ceiling. GitHub's shared macOS runners use the
-`shared_runner` profile with a 1000 ms warm p95 ceiling because unrelated host
-scheduling is not controlled there. The same scheduling profile uses a 500 ms
+`shared_runner` profile with a 1500 ms warm p95 ceiling because unrelated host
+scheduling is not controlled there. Histogram-derived percentiles are capped at
+the observed maximum so a 1.2 second sample is not reported as the 2 second
+bucket boundary. The same scheduling profile uses a 500 ms
 ceiling for the UI-observed cancellation acknowledgement, while release-reference
 runs and deterministic coordinator stress retain 250 ms. Cancellation outcomes,
 ownership, decoded/advancing frames, audio, cache, network, and resource bounds

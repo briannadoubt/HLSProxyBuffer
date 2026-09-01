@@ -29,7 +29,7 @@ final class HLSProxyFeedDemoTests: XCTestCase {
         XCTAssertFalse(report.passed)
         XCTAssertTrue(report.failures.contains("predicted-warm visible first-frame p95 exceeded 500 ms"))
         XCTAssertEqual(report.warmFirstFrameCount, 3)
-        XCTAssertEqual(report.warmFirstFrameP95Milliseconds, 1_000)
+        XCTAssertEqual(report.warmFirstFrameP95Milliseconds, 750)
         XCTAssertEqual(report.timingProfile, .releaseReference)
         XCTAssertEqual(report.warmFirstFrameP95LimitMilliseconds, 500)
         XCTAssertEqual(report.cancellationMaximumLimitMilliseconds, 250)
@@ -43,7 +43,7 @@ final class HLSProxyFeedDemoTests: XCTestCase {
             $0.contains("predicted-warm visible first-frame p95 exceeded")
         })
         XCTAssertEqual(sharedRunnerReport.timingProfile, .sharedRunner)
-        XCTAssertEqual(sharedRunnerReport.warmFirstFrameP95LimitMilliseconds, 1_000)
+        XCTAssertEqual(sharedRunnerReport.warmFirstFrameP95LimitMilliseconds, 1_500)
         XCTAssertEqual(sharedRunnerReport.cancellationMaximumLimitMilliseconds, 500)
         XCTAssertFalse(sharedRunnerReport.failures.contains {
             $0.contains("obsolete work took longer")
@@ -54,7 +54,7 @@ final class HLSProxyFeedDemoTests: XCTestCase {
         for path in diagnostics.paths {
             XCTAssertEqual(path.playbackStartLatency.count, 1)
             XCTAssertEqual(path.playbackStartLatency.maximum, 0.75)
-            XCTAssertEqual(path.playbackStartLatency.approximateQuantile(0.95), 1)
+            XCTAssertEqual(path.playbackStartLatency.approximateQuantile(0.95), 0.75)
             let stages = try XCTUnwrap(path.stages)
             XCTAssertEqual(stages.beforeActivation.count, 1_000)
             XCTAssertEqual(stages.nativeStart.maximum, 0.6)

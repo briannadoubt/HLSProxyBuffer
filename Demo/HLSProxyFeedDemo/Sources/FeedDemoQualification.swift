@@ -22,9 +22,9 @@ struct FeedDemoQualificationTimingPolicy: Equatable, Sendable {
     )
     static let sharedRunner = Self(
         profile: .sharedRunner,
-        warmFirstFrameP95Seconds: 1,
-        warmPlaybackP95Seconds: 1,
-        warmDecodedP95Seconds: 1,
+        warmFirstFrameP95Seconds: 1.5,
+        warmPlaybackP95Seconds: 1.5,
+        warmDecodedP95Seconds: 1.5,
         cancellationMaximumSeconds: 0.5
     )
 }
@@ -455,7 +455,9 @@ struct FeedDemoVerticalQualificationReport: Codable, Equatable, Sendable {
             for (index, bucketCount) in buckets.enumerated() {
                 cumulative = add(cumulative, bucketCount)
                 if cumulative >= rank {
-                    return index < bounds.count ? bounds[index] : maximum
+                    let bucketEstimate = index < bounds.count ? bounds[index] : maximum
+                    guard let bucketEstimate else { return nil }
+                    return maximum.map { min(bucketEstimate, $0) } ?? bucketEstimate
                 }
             }
             return maximum

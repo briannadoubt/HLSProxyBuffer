@@ -114,7 +114,9 @@ public final class HLSFeedTelemetry {
             for (index, bucketCount) in bucketCounts.enumerated() {
                 cumulative = Self.saturatingAdd(cumulative, bucketCount)
                 guard cumulative >= rank else { continue }
-                return index < upperBounds.count ? upperBounds[index] : maximum
+                let bucketEstimate = index < upperBounds.count ? upperBounds[index] : maximum
+                guard let bucketEstimate else { return nil }
+                return maximum.map { min(bucketEstimate, $0) } ?? bucketEstimate
             }
             return maximum
         }

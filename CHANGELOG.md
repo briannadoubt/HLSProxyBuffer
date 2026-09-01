@@ -49,11 +49,13 @@ integration surfaces.
   audio ownership across rapid feed navigation.
 - Kept successful preroll as the feed-readiness gate while leaving the final
   playback transition to AVPlayer's normal stall-minimizing path; real warm
-  handoffs and foreground recovery retain decoded-frame qualification.
-- Added explicit 500 ms release-reference and 1000 ms shared-runner warm-start
+  handoffs and foreground recovery retain decoded-frame qualification, and
+  foreground recovery re-primes pipelines that suspension may invalidate.
+- Added explicit 500 ms release-reference and 1500 ms shared-runner warm-start
   timing profiles, plus 250 ms and 500 ms observed cancellation-liveness ceilings
-  respectively. Qualification artifacts record the active profile while decoded
-  frames, ownership, cancellation outcomes, cache, and resource gates stay fixed;
+  respectively. Histogram percentiles cannot exceed their observed maxima.
+  Qualification artifacts record the active profile while decoded frames,
+  ownership, cancellation outcomes, cache, and resource gates stay fixed;
   deterministic coordinator stress continues to enforce 250 ms cancellation.
 - Added bounded streaming and feed telemetry for latency, stalls, cache behavior,
   cancellation, handoff success, origin traffic, and resource-pool occupancy.

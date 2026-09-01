@@ -272,6 +272,11 @@ struct HLSFeedPlayerPreparationRetryPolicy: Equatable, Sendable {
 @Observable
 @MainActor
 public final class HLSFeedEngine {
+    private enum ActivationStart {
+        case normal
+        case foregroundRecovery
+    }
+
     private struct Lease {
         let token: UUID
         let itemID: FeedItemID
@@ -309,6 +314,7 @@ public final class HLSFeedEngine {
         var streamingTelemetryTask: Task<Void, Never>?
         var avMetricTask: Task<Void, Never>?
         var avMetricCollector: AVPlaybackMetricCollector?
+        var foregroundResumeTask: Task<Void, Never>?
         var releaseTask: Task<Void, Never>?
         var playbackEndObserver: NSObjectProtocol?
         var playbackStartObservation: NSKeyValueObservation?
@@ -347,6 +353,14 @@ public final class HLSFeedEngine {
             avMetricCollector?.stop()
             avMetricCollector = nil
             return tasks
+        }
+
+        @discardableResult
+        func cancelForegroundResume() -> Task<Void, Never>? {
+            let task = foregroundResumeTask
+            task?.cancel()
+            foregroundResumeTask = nil
+            return task
         }
     }
 
@@ -598,7 +612,7 @@ public final class HLSFeedEngine {
             recordPlaybackLifecycle(.resumed)
             if let targetFocusedItemID,
                let destination = slot(for: targetFocusedItemID) {
-                activate(destination)
+                activate(destination, start: .foregroundRecovery)
             }
         }
         rebuildSnapshot()
@@ -701,7 +715,9 @@ public final class HLSFeedEngine {
         let value = await coordinator.waitUntilIdle()
         acceptCoordinatorSnapshot(value)
         while true {
-            let tasks = slots.compactMap(\.loadTask) + slots.compactMap(\.releaseTask)
+            let tasks = slots.compactMap(\.loadTask)
+                + slots.compactMap(\.foregroundResumeTask)
+                + slots.compactMap(\.releaseTask)
             guard !tasks.isEmpty else { break }
             for task in tasks { await task.value }
         }
@@ -760,6 +776,7 @@ public final class HLSFeedEngine {
         await coordinator.stop()
 
         let loadTasks = slots.compactMap(\.loadTask)
+        let foregroundResumeTasks = slots.compactMap(\.foregroundResumeTask)
         let releaseTasks = slots.compactMap(\.releaseTask)
         let observationTasks = slots.compactMap(\.observationTask)
         let analyticsAttempts = slots.compactMap { $0.lease?.analyticsAttempt }
@@ -772,6 +789,7 @@ public final class HLSFeedEngine {
                 slot.lease = lease
             }
             slot.loadTask?.cancel()
+            slot.cancelForegroundResume()
             slot.releaseTask?.cancel()
             slot.cancelLeaseObservers()
             analyticsTasks += slot.cancelAnalyticsObservers()
@@ -781,6 +799,7 @@ public final class HLSFeedEngine {
         await coordinatorObservationTask?.value
         await cacheSampleTask?.value
         for task in loadTasks { await task.value }
+        for task in foregroundResumeTasks { await task.value }
         for task in releaseTasks { await task.value }
         for task in observationTasks { await task.value }
         for task in analyticsTasks { await task.value }
@@ -959,6 +978,7 @@ public final class HLSFeedEngine {
         to slot: Slot
     ) {
         let previousTask = slot.loadTask
+        let previousForegroundResumeTask = slot.cancelForegroundResume()
         let playerCancellationRequestedAt = previousTask.map { _ in telemetryClock.now() }
         let playerCancellationPath = slot.lease?.telemetryPath
         let previousAnalyticsAttempt = slot.lease?.analyticsAttempt
@@ -1044,6 +1064,7 @@ public final class HLSFeedEngine {
                     ), attempt: previousAnalyticsAttempt)
                 }
             }
+            await previousForegroundResumeTask?.value
             for task in previousAnalyticsTasks { await task.value }
             if let self, let previousAnalyticsAttempt {
                 self.analytics.end(previousAnalyticsAttempt, lifecycle: .cancelled)
@@ -1313,7 +1334,10 @@ public final class HLSFeedEngine {
         activate(slot)
     }
 
-    private func activate(_ destination: Slot) {
+    private func activate(
+        _ destination: Slot,
+        start: ActivationStart = .normal
+    ) {
         guard !isPlaybackSuspended,
               let targetFocusedItemID,
               let destinationLease = destination.lease,
@@ -1368,13 +1392,45 @@ public final class HLSFeedEngine {
            pendingFocus?.generation == destinationLease.generation {
             pendingFocus?.startTiming.playInvokedAt = telemetryClock.now()
         }
-        // AVPlayer still owns the final transition from a successfully
-        // prerolled item into playback. Its normal stall-minimizing path is
-        // more reliable than forcing playImmediately(atRate:) on a pipeline
-        // whose readiness can change between preroll and focus handoff.
-        destination.session.play()
+        switch start {
+        case .normal:
+            // AVPlayer still owns the final transition from a successfully
+            // prerolled item into playback. Its normal stall-minimizing path is
+            // more reliable than forcing playImmediately(atRate:) on a pipeline
+            // whose readiness can change between preroll and focus handoff.
+            destination.session.play()
+        case .foregroundRecovery where hasPlatformPlayer:
+            resumeAfterForegroundInterruption(destination, token: destinationLease.token)
+        case .foregroundRecovery:
+            destination.session.play()
+        }
         if !hasPlatformPlayer {
             confirmActivatedPlayback(in: destination, token: destinationLease.token)
+        }
+    }
+
+    private func resumeAfterForegroundInterruption(_ slot: Slot, token: UUID) {
+        slot.cancelForegroundResume()
+        slot.foregroundResumeTask = Task { @MainActor [weak self, weak slot] in
+            guard let self, let slot, self.owns(slot, token: token) else { return }
+            let prepared = await slot.session.prepareForImmediatePlayback(
+                retryPolicy: self.playerPreparationRetryPolicy
+            )
+            guard !Task.isCancelled, self.owns(slot, token: token),
+                  !slot.isReleasing, !self.isStopped, !self.isPlaybackSuspended,
+                  slot.lease?.phase == .focused, slot.lease?.isAudible == true,
+                  self.activeItemID == slot.lease?.itemID,
+                  self.targetFocusedItemID == slot.lease?.itemID
+            else { return }
+            slot.foregroundResumeTask = nil
+            // A foregrounded AVPlayer may have lost the preroll it held before
+            // suspension. Re-prime that same item before asking AVPlayer to
+            // resume; if the bounded preroll cannot complete, normal play is a
+            // safe fallback and existing failure observation remains active.
+            slot.session.play()
+            if !prepared {
+                self.rebuildSnapshot()
+            }
         }
     }
 
@@ -1382,6 +1438,7 @@ public final class HLSFeedEngine {
         let previouslyActiveItemID = activeItemID
         for slot in slots {
             slot.videoOutputObserver?.pause()
+            slot.cancelForegroundResume()
             slot.session.setMuted(true)
             guard var lease = slot.lease else { continue }
             lease.isAudible = false
@@ -1546,6 +1603,7 @@ public final class HLSFeedEngine {
         let analyticsAttempt = releasedLease?.analyticsAttempt
         slot.loadTask = nil
         let observationTask = slot.cancelLeaseObservers()
+        let foregroundResumeTask = slot.cancelForegroundResume()
         let analyticsTasks = slot.cancelAnalyticsObservers()
         slot.session.setMuted(true)
         slot.session.pause()
@@ -1566,6 +1624,7 @@ public final class HLSFeedEngine {
             }
         }
         await observationTask?.value
+        await foregroundResumeTask?.value
         for task in analyticsTasks { await task.value }
         await slot.session.stopAndWait()
         Self.silenceRetiredPlayer(retiredPlatformPlayer)
@@ -1601,6 +1660,7 @@ public final class HLSFeedEngine {
         )
         rebuildSnapshot()
         let observationTask = slot.cancelLeaseObservers()
+        let foregroundResumeTask = slot.cancelForegroundResume()
         let analyticsTasks = slot.cancelAnalyticsObservers()
         slot.session.setMuted(true)
         slot.session.pause()
@@ -1609,6 +1669,7 @@ public final class HLSFeedEngine {
         if activeItemID == lease.itemID { activeItemID = nil }
         if pendingFocus?.itemID == lease.itemID { completePendingFocus(succeeded: false) }
         await observationTask?.value
+        await foregroundResumeTask?.value
         for task in analyticsTasks { await task.value }
         await slot.session.stopAndWait()
         Self.silenceRetiredPlayer(retiredPlatformPlayer)

@@ -87,7 +87,7 @@ final class HLSFeedTelemetryTests: XCTestCase {
         XCTAssertEqual(metrics.firstFrameLatency.bucketCounts, [20_000, 20_000, 0])
         XCTAssertEqual(metrics.firstFrameLatency.count, 40_000)
         XCTAssertEqual(metrics.firstFrameLatency.approximateQuantile(0.5), 0.1)
-        XCTAssertEqual(metrics.firstFrameLatency.approximateQuantile(0.95), 1)
+        XCTAssertEqual(metrics.firstFrameLatency.approximateQuantile(0.95), 0.2)
         XCTAssertEqual(metrics.stallDuration.count, 20_000)
         XCTAssertEqual(metrics.cancellationLatency.count, 20_000)
         XCTAssertEqual(metrics.cancellationOutcomeCounts[.acknowledged], 20_000)
@@ -279,7 +279,7 @@ final class HLSFeedTelemetryTests: XCTestCase {
         let distribution = try XCTUnwrap(
             telemetry.snapshot.metrics(for: path)?.firstFrameLatency
         )
-        XCTAssertEqual(distribution.approximateQuantile(0.95), 0.4)
+        XCTAssertEqual(distribution.approximateQuantile(0.95), 0.375)
         XCTAssertTrue(distribution.upperBounds.contains(0.4))
         XCTAssertTrue(distribution.upperBounds.contains(0.5))
     }
