@@ -1,6 +1,31 @@
 import Foundation
 import ProxyPlayerKit
 
+struct FeedDemoQualificationTimingPolicy: Equatable, Sendable {
+    enum Profile: String, Codable, Sendable {
+        case releaseReference = "release_reference"
+        case sharedRunner = "shared_runner"
+    }
+
+    let profile: Profile
+    let warmFirstFrameP95Seconds: TimeInterval
+    let warmPlaybackP95Seconds: TimeInterval
+    let warmDecodedP95Seconds: TimeInterval
+
+    static let releaseReference = Self(
+        profile: .releaseReference,
+        warmFirstFrameP95Seconds: 0.5,
+        warmPlaybackP95Seconds: 0.5,
+        warmDecodedP95Seconds: 0.5
+    )
+    static let sharedRunner = Self(
+        profile: .sharedRunner,
+        warmFirstFrameP95Seconds: 1,
+        warmPlaybackP95Seconds: 1,
+        warmDecodedP95Seconds: 1
+    )
+}
+
 struct FeedDemoQualificationReport: Codable, Equatable, Sendable {
     /// Fixed-cardinality diagnostic evidence, separate from the unchanged gate.
     struct PlaybackStartDiagnostics: Codable, Equatable, Sendable {
@@ -24,6 +49,8 @@ struct FeedDemoQualificationReport: Codable, Equatable, Sendable {
     let firstFrameCount: UInt64
     let warmFirstFrameCount: UInt64
     let warmFirstFrameP95Milliseconds: Double?
+    let timingProfile: FeedDemoQualificationTimingPolicy.Profile?
+    let warmFirstFrameP95LimitMilliseconds: Double?
     let cancellationCount: UInt64
     let cancellationMaximumMilliseconds: Double?
     let handoffAttemptCount: UInt64
@@ -59,7 +86,8 @@ struct FeedDemoQualificationReport: Codable, Equatable, Sendable {
         snapshot: HLSFeedEngineSnapshot,
         telemetry: HLSFeedTelemetry.Snapshot,
         policy: FeedPlaybackPolicy,
-        warmupMemoryBytes: Int?
+        warmupMemoryBytes: Int?,
+        timingPolicy: FeedDemoQualificationTimingPolicy = .releaseReference
     ) -> Self {
         let warmFirstFramePaths = telemetry.paths.filter {
             $0.path.reuse == .warm && $0.path.intent == .focused
@@ -120,8 +148,10 @@ struct FeedDemoQualificationReport: Codable, Equatable, Sendable {
         }
         if warmFirstFrameCount == 0 {
             failures.append("no predicted-warm first-frame samples were recorded")
-        } else if let warmFirstFrameP95, warmFirstFrameP95 > 0.5 {
-            failures.append("predicted-warm visible first-frame p95 exceeded 500 ms")
+        } else if let warmFirstFrameP95,
+                  warmFirstFrameP95 > timingPolicy.warmFirstFrameP95Seconds {
+            let limit = Int(timingPolicy.warmFirstFrameP95Seconds * 1_000)
+            failures.append("predicted-warm visible first-frame p95 exceeded \(limit) ms")
         }
         if let cancellationMaximum, cancellationMaximum > 0.25 {
             failures.append("obsolete work took longer than 250 ms to drain")
@@ -151,6 +181,8 @@ struct FeedDemoQualificationReport: Codable, Equatable, Sendable {
             firstFrameCount: telemetry.firstFrameCount,
             warmFirstFrameCount: warmFirstFrameCount,
             warmFirstFrameP95Milliseconds: warmFirstFrameP95.map { $0 * 1_000 },
+            timingProfile: timingPolicy.profile,
+            warmFirstFrameP95LimitMilliseconds: timingPolicy.warmFirstFrameP95Seconds * 1_000,
             cancellationCount: telemetry.cancellationCount,
             cancellationMaximumMilliseconds: cancellationMaximum.map { $0 * 1_000 },
             handoffAttemptCount: handoffAttemptCount,

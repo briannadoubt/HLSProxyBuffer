@@ -26,6 +26,18 @@ final class HLSProxyFeedDemoTests: XCTestCase {
         XCTAssertTrue(report.failures.contains("predicted-warm visible first-frame p95 exceeded 500 ms"))
         XCTAssertEqual(report.warmFirstFrameCount, 3)
         XCTAssertEqual(report.warmFirstFrameP95Milliseconds, 1_000)
+        XCTAssertEqual(report.timingProfile, .releaseReference)
+        XCTAssertEqual(report.warmFirstFrameP95LimitMilliseconds, 500)
+        let sharedRunnerReport = FeedDemoQualificationReport.make(
+            navigationCount: 100, measuredNavigationCount: 100, requestedItemID: nil,
+            snapshot: .empty, telemetry: telemetry.snapshot, policy: .shortFormFeed,
+            warmupMemoryBytes: 0, timingPolicy: .sharedRunner
+        )
+        XCTAssertFalse(sharedRunnerReport.failures.contains {
+            $0.contains("predicted-warm visible first-frame p95 exceeded")
+        })
+        XCTAssertEqual(sharedRunnerReport.timingProfile, .sharedRunner)
+        XCTAssertEqual(sharedRunnerReport.warmFirstFrameP95LimitMilliseconds, 1_000)
         let diagnostics = try XCTUnwrap(report.playbackStartDiagnostics)
         XCTAssertEqual(diagnostics.schemaVersion, 1)
         XCTAssertEqual(diagnostics.paths.count, 12)
@@ -49,10 +61,14 @@ final class HLSProxyFeedDemoTests: XCTestCase {
 
         var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         legacy.removeValue(forKey: "playbackStartDiagnostics")
+        legacy.removeValue(forKey: "timingProfile")
+        legacy.removeValue(forKey: "warmFirstFrameP95LimitMilliseconds")
         let legacyReport = try JSONDecoder().decode(
             FeedDemoQualificationReport.self, from: JSONSerialization.data(withJSONObject: legacy)
         )
         XCTAssertNil(legacyReport.playbackStartDiagnostics)
+        XCTAssertNil(legacyReport.timingProfile)
+        XCTAssertNil(legacyReport.warmFirstFrameP95LimitMilliseconds)
         XCTAssertEqual(legacyReport.warmFirstFrameCount, report.warmFirstFrameCount)
         XCTAssertEqual(legacyReport.warmFirstFrameP95Milliseconds, report.warmFirstFrameP95Milliseconds)
         XCTAssertEqual(legacyReport.failures, report.failures)

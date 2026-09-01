@@ -62,6 +62,15 @@ the decoded-frame gate still requires an actual pixel buffer and advancing frame
 timestamps, so entering the `.playing` state alone cannot pass real-media
 qualification.
 
+Timing evidence carries an explicit profile and limit. Controlled local or
+dedicated-hardware release qualification uses the `release_reference` profile
+and the 500 ms warm p95 ceiling. GitHub's shared macOS runners use the
+`shared_runner` profile with a 1000 ms warm p95 ceiling because unrelated host
+scheduling is not controlled there. Every ownership, decoded/advancing-frame,
+audio, cancellation, cache, network, and resource bound remains identical and
+merge-blocking in both profiles; the uploaded JSON records which timing ceiling
+was applied. Set `HLS_CI_TIMING_PROFILE=shared-runner` only for shared-runner CI.
+
 ## Reproducing the UI gate
 
 Choose an installed iOS simulator and run:

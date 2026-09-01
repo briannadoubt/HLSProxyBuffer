@@ -50,6 +50,9 @@ integration surfaces.
 - Started successfully prerolled feed leases without reapplying AVPlayer's
   cold-start stall heuristic, while retaining decoded-frame qualification for
   real warm handoffs.
+- Added explicit 500 ms release-reference and 1000 ms shared-runner warm-start
+  timing profiles; qualification artifacts record the active profile while all
+  decoded-frame, ownership, cancellation, cache, and resource gates stay fixed.
 - Added bounded streaming and feed telemetry for latency, stalls, cache behavior,
   cancellation, handoff success, origin traffic, and resource-pool occupancy.
 

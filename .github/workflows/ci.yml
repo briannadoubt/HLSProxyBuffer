@@ -31,6 +31,7 @@ jobs:
       - name: Run CI script
         env:
           HLS_CI_ARTIFACT_DIR: ${{ github.workspace }}/ci-artifacts
+          HLS_CI_TIMING_PROFILE: shared-runner
         run: bash Scripts/run-ci.sh
       - name: Upload feed qualification evidence
         if: always()

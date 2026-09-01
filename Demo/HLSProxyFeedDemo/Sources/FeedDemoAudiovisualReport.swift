@@ -27,6 +27,9 @@ struct FeedDemoAudiovisualReport: Codable, Equatable, Sendable {
     let warmDecodedFirstFrame: FeedDemoVerticalQualificationReport.Distribution
     let coldDecodedFirstFrame: FeedDemoVerticalQualificationReport.Distribution
     let finalFramesAdvancing: Bool
+    let timingProfile: FeedDemoQualificationTimingPolicy.Profile?
+    let warmPlaybackP95LimitMilliseconds: Double?
+    let warmDecodedP95LimitMilliseconds: Double?
 
     var json: String {
         let encoder = JSONEncoder()
@@ -41,7 +44,8 @@ struct FeedDemoAudiovisualReport: Codable, Equatable, Sendable {
         engine: HLSFeedEngineSnapshot,
         telemetry: HLSFeedTelemetry.Snapshot,
         origin: FeedDemoFixtureOrigin.Snapshot,
-        configuration: FeedDemoFixtureOrigin.Configuration
+        configuration: FeedDemoFixtureOrigin.Configuration,
+        timingPolicy: FeedDemoQualificationTimingPolicy = .releaseReference
     ) -> Self {
         let warm = telemetry.paths.filter { $0.path.reuse == .warm && $0.path.intent == .focused }
         let cold = telemetry.paths.filter { $0.path.reuse == .cold && $0.path.intent == .focused }
@@ -58,8 +62,14 @@ struct FeedDemoAudiovisualReport: Codable, Equatable, Sendable {
         if warmPlayback.count == 0 || warmDecoded.count == 0 {
             failures.append("missing_warm_frame_samples")
         }
-        if let p95 = warmPlayback.p95Milliseconds, p95 > 500 { failures.append("warm_playback_p95_exceeded") }
-        if let p95 = warmDecoded.p95Milliseconds, p95 > 500 { failures.append("warm_decoded_p95_exceeded") }
+        if let p95 = warmPlayback.p95Milliseconds,
+           p95 > timingPolicy.warmPlaybackP95Seconds * 1_000 {
+            failures.append("warm_playback_p95_exceeded")
+        }
+        if let p95 = warmDecoded.p95Milliseconds,
+           p95 > timingPolicy.warmDecodedP95Seconds * 1_000 {
+            failures.append("warm_decoded_p95_exceeded")
+        }
         if telemetry.nativeAudio?.sampleCount == 0 || telemetry.nativeAudio == nil {
             failures.append("missing_native_audio_ownership")
         }
@@ -84,7 +94,10 @@ struct FeedDemoAudiovisualReport: Codable, Equatable, Sendable {
             nativeAudio: telemetry.nativeAudio, originPayload: origin.bodyBudget,
             originBodyLimit: configuration.maximumConcurrentBodies, originPayloadByteLimit: payloadLimit,
             warmPlaybackStart: warmPlayback, warmDecodedFirstFrame: warmDecoded, coldDecodedFirstFrame: coldDecoded,
-            finalFramesAdvancing: active?.hasAdvancingVideoFrames == true
+            finalFramesAdvancing: active?.hasAdvancingVideoFrames == true,
+            timingProfile: timingPolicy.profile,
+            warmPlaybackP95LimitMilliseconds: timingPolicy.warmPlaybackP95Seconds * 1_000,
+            warmDecodedP95LimitMilliseconds: timingPolicy.warmDecodedP95Seconds * 1_000
         )
     }
 }
