@@ -5,8 +5,12 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
     private let measuredNavigationCount = 100
 
     private var timingLaunchArguments: [String] {
+#if HLS_SHARED_RUNNER_TIMING
+        ["--shared-runner-qualification-timing"]
+#else
         ProcessInfo.processInfo.environment["HLS_CI_TIMING_PROFILE"] == "shared-runner"
             ? ["--shared-runner-qualification-timing"] : []
+#endif
     }
 
     private var expectedTimingProfile: String {

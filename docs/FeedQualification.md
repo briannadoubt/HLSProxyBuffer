@@ -69,7 +69,9 @@ and the 500 ms warm p95 ceiling. GitHub's shared macOS runners use the
 scheduling is not controlled there. Every ownership, decoded/advancing-frame,
 audio, cancellation, cache, network, and resource bound remains identical and
 merge-blocking in both profiles; the uploaded JSON records which timing ceiling
-was applied. Set `HLS_CI_TIMING_PROFILE=shared-runner` only for shared-runner CI.
+was applied. Set `HLS_CI_TIMING_PROFILE=shared-runner` only for shared-runner CI;
+the CI harness carries this choice into Xcode UI tests as a Swift compilation
+condition because hosted test runners do not reliably inherit shell variables.
 
 ## Reproducing the UI gate
 
