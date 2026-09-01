@@ -19,9 +19,13 @@ struct HLSProxyFeedDemoApp: App {
         let synthetic = arguments.contains("--qualification-mode") || arguments.contains("--synthetic-media")
         let qualification = arguments.contains("--qualification-mode")
             || arguments.contains("--vertical-qualification-mode")
+        let timingPolicy: FeedDemoQualificationTimingPolicy = arguments.contains(
+            "--shared-runner-qualification-timing"
+        ) ? .sharedRunner : .releaseReference
         let model = FeedDemoModel(
             mediaConfiguration: synthetic ? .synthetic : .realMedia,
-            cacheScope: qualification ? .freshQualification : .persistent
+            cacheScope: qualification ? .freshQualification : .persistent,
+            qualificationTimingPolicy: timingPolicy
         )
         _model = State(initialValue: model)
 #if canImport(BackgroundTasks) && os(iOS)

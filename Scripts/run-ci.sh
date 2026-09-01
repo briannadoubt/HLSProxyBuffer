@@ -5,6 +5,24 @@ QUALIFICATION_ARTIFACT_DIR="${HLS_CI_ARTIFACT_DIR:-$PWD/ci-artifacts}"
 mkdir -p "$QUALIFICATION_ARTIFACT_DIR"
 export HLS_CI_ARTIFACT_DIR="$QUALIFICATION_ARTIFACT_DIR"
 
+QUALIFICATION_XCODEBUILD_SETTINGS=()
+case "${HLS_CI_TIMING_PROFILE:-release-reference}" in
+  release-reference)
+    ;;
+  shared-runner)
+    # Xcode's hosted UI-test runner does not reliably inherit the workflow
+    # process environment. Carry the selected profile across that boundary as
+    # a compile condition instead.
+    QUALIFICATION_XCODEBUILD_SETTINGS+=(
+      'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) HLS_SHARED_RUNNER_TIMING'
+    )
+    ;;
+  *)
+    echo "Unsupported HLS_CI_TIMING_PROFILE: ${HLS_CI_TIMING_PROFILE}"
+    exit 1
+    ;;
+esac
+
 if ! command -v jq >/dev/null 2>&1; then
   echo "jq is required to validate feed qualification reports"
   exit 1
@@ -130,6 +148,7 @@ if command -v xcodebuild >/dev/null 2>&1; then
       -resultBundlePath "$UI_RESULT_BUNDLE" \
       -derivedDataPath "$FEED_DEMO_DERIVED_DATA" \
       ONLY_ACTIVE_ARCH=YES \
+      "${QUALIFICATION_XCODEBUILD_SETTINGS[@]}" \
       test
 
     echo "Exporting the real vertical-feed UI qualification report..."

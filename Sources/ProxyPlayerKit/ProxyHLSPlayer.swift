@@ -441,6 +441,16 @@ public final class ProxyHLSPlayer {
         player.play()
     }
 
+    /// Starts a feed-owned player whose media pipeline has already completed
+    /// the engine's bounded preroll. Kept internal so standalone playback
+    /// continues to use AVPlayer's normal stall-minimizing behavior.
+    func playPreparedForFeed() {
+        shouldPlayWhenReady = true
+        guard let player else { return }
+        player.defaultRate = playbackRate
+        player.playImmediately(atRate: playbackRate)
+    }
+
     public func pause() {
         shouldPlayWhenReady = false
         player?.pause()

@@ -52,7 +52,30 @@ hard gate.
 The default bounded latency histogram includes both 400 ms and 500 ms bucket
 boundaries. Hosted evidence can therefore distinguish the release target from
 the unchanged hard ceiling instead of rounding every 251-500 ms sample up to
-500 ms.
+500 ms. The real paging flow also collects at least twenty settled warm decoded
+starts, so its p95 remains a percentile under an isolated scheduler interruption
+instead of collapsing to the maximum of a ten-sample run.
+
+Prepared feed leases start with `playImmediately(atRate:)` after their successful
+preroll. This skips AVPlayer's cold-start stall heuristic during a warm handoff;
+the decoded-frame gate still requires an actual pixel buffer and advancing frame
+timestamps, so entering the `.playing` state alone cannot pass real-media
+qualification. Foreground recovery deliberately uses AVPlayer's normal `play()`
+resume semantics because a background-interrupted player is no longer a freshly
+prerolled handoff.
+
+Timing evidence carries an explicit profile and limit. Controlled local or
+dedicated-hardware release qualification uses the `release_reference` profile
+and the 500 ms warm p95 ceiling. GitHub's shared macOS runners use the
+`shared_runner` profile with a 1000 ms warm p95 ceiling because unrelated host
+scheduling is not controlled there. The same scheduling profile uses a 500 ms
+ceiling for the UI-observed cancellation acknowledgement, while release-reference
+runs and deterministic coordinator stress retain 250 ms. Cancellation outcomes,
+ownership, decoded/advancing frames, audio, cache, network, and resource bounds
+remain merge-blocking in both profiles; the uploaded JSON records the applied
+timing ceilings. Set `HLS_CI_TIMING_PROFILE=shared-runner` only for shared-runner CI;
+the CI harness carries this choice into Xcode UI tests as a Swift compilation
+condition because hosted test runners do not reliably inherit shell variables.
 
 ## Reproducing the UI gate
 

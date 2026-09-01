@@ -10,6 +10,10 @@ final class HLSProxyFeedDemoTests: XCTestCase {
         let telemetry = HLSFeedTelemetry()
         for path in HLSFeedTelemetry.Path.all {
             telemetry.record(.init(path: path, payload: .firstFrame(latency: 0.75)))
+            telemetry.record(.init(
+                path: path,
+                payload: .cancellation(latency: 0.27, outcome: .acknowledged)
+            ))
             for _ in 0..<1_000 {
                 telemetry.record(.init(path: path, payload: .playbackStartStages(
                     beforeActivation: 0.1, activationWork: 0.02,
@@ -26,6 +30,24 @@ final class HLSProxyFeedDemoTests: XCTestCase {
         XCTAssertTrue(report.failures.contains("predicted-warm visible first-frame p95 exceeded 500 ms"))
         XCTAssertEqual(report.warmFirstFrameCount, 3)
         XCTAssertEqual(report.warmFirstFrameP95Milliseconds, 1_000)
+        XCTAssertEqual(report.timingProfile, .releaseReference)
+        XCTAssertEqual(report.warmFirstFrameP95LimitMilliseconds, 500)
+        XCTAssertEqual(report.cancellationMaximumLimitMilliseconds, 250)
+        XCTAssertTrue(report.failures.contains("obsolete work took longer than 250 ms to drain"))
+        let sharedRunnerReport = FeedDemoQualificationReport.make(
+            navigationCount: 100, measuredNavigationCount: 100, requestedItemID: nil,
+            snapshot: .empty, telemetry: telemetry.snapshot, policy: .shortFormFeed,
+            warmupMemoryBytes: 0, timingPolicy: .sharedRunner
+        )
+        XCTAssertFalse(sharedRunnerReport.failures.contains {
+            $0.contains("predicted-warm visible first-frame p95 exceeded")
+        })
+        XCTAssertEqual(sharedRunnerReport.timingProfile, .sharedRunner)
+        XCTAssertEqual(sharedRunnerReport.warmFirstFrameP95LimitMilliseconds, 1_000)
+        XCTAssertEqual(sharedRunnerReport.cancellationMaximumLimitMilliseconds, 500)
+        XCTAssertFalse(sharedRunnerReport.failures.contains {
+            $0.contains("obsolete work took longer")
+        })
         let diagnostics = try XCTUnwrap(report.playbackStartDiagnostics)
         XCTAssertEqual(diagnostics.schemaVersion, 1)
         XCTAssertEqual(diagnostics.paths.count, 12)
@@ -49,10 +71,16 @@ final class HLSProxyFeedDemoTests: XCTestCase {
 
         var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         legacy.removeValue(forKey: "playbackStartDiagnostics")
+        legacy.removeValue(forKey: "timingProfile")
+        legacy.removeValue(forKey: "warmFirstFrameP95LimitMilliseconds")
+        legacy.removeValue(forKey: "cancellationMaximumLimitMilliseconds")
         let legacyReport = try JSONDecoder().decode(
             FeedDemoQualificationReport.self, from: JSONSerialization.data(withJSONObject: legacy)
         )
         XCTAssertNil(legacyReport.playbackStartDiagnostics)
+        XCTAssertNil(legacyReport.timingProfile)
+        XCTAssertNil(legacyReport.warmFirstFrameP95LimitMilliseconds)
+        XCTAssertNil(legacyReport.cancellationMaximumLimitMilliseconds)
         XCTAssertEqual(legacyReport.warmFirstFrameCount, report.warmFirstFrameCount)
         XCTAssertEqual(legacyReport.warmFirstFrameP95Milliseconds, report.warmFirstFrameP95Milliseconds)
         XCTAssertEqual(legacyReport.failures, report.failures)
@@ -187,6 +215,8 @@ final class HLSProxyFeedDemoTests: XCTestCase {
         XCTAssertTrue(report.passed, report.failureCodes.joined(separator: ", "))
         XCTAssertEqual(report.qualificationKind, "vertical_paging_ui")
         XCTAssertEqual(report.scenarioIDs.count, 8)
+        XCTAssertEqual(report.timingProfile, .releaseReference)
+        XCTAssertEqual(report.cancellationMaximumLimitMilliseconds, 250)
         XCTAssertEqual(
             report.evictionCounts.map(\.reason),
             HLSFeedTelemetry.CacheEvictionReason.allCases

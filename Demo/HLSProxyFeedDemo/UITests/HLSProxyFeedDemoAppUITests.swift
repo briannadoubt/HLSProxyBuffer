@@ -4,6 +4,19 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
     private let itemCount = 24
     private let measuredNavigationCount = 100
 
+    private var timingLaunchArguments: [String] {
+#if HLS_SHARED_RUNNER_TIMING
+        ["--shared-runner-qualification-timing"]
+#else
+        ProcessInfo.processInfo.environment["HLS_CI_TIMING_PROFILE"] == "shared-runner"
+            ? ["--shared-runner-qualification-timing"] : []
+#endif
+    }
+
+    private var expectedTimingProfile: String {
+        timingLaunchArguments.isEmpty ? "release_reference" : "shared_runner"
+    }
+
     override func setUpWithError() throws {
         continueAfterFailure = false
     }
@@ -46,7 +59,7 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
     func testPrimaryFeedQualifiesRealVerticalPagingAndAdverseConditions() throws {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        app.launchArguments = ["--vertical-qualification-mode"]
+        app.launchArguments = ["--vertical-qualification-mode"] + timingLaunchArguments
         app.launch()
 
         let pager = app.scrollViews["primary-vertical-feed"]
@@ -60,6 +73,16 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
         XCTAssertEqual(assertSettled(in: app, expectedFocus: "short-2"), "short-2")
         pager.swipeDown()
         XCTAssertEqual(assertSettled(in: app, expectedFocus: "short-1"), "short-1")
+
+        // A percentile gate needs enough independent decoded starts that one
+        // scheduler interruption is an outlier instead of the effective p95.
+        // These are real prepared-player handoffs, not synthetic timings.
+        for _ in 0..<5 {
+            pager.swipeUp()
+            XCTAssertEqual(assertSettled(in: app, expectedFocus: "short-2"), "short-2")
+            pager.swipeDown()
+            XCTAssertEqual(assertSettled(in: app, expectedFocus: "short-1"), "short-1")
+        }
 
         let focusedPage = app.descendants(matching: .any)["feed-item-short-1"]
         XCTAssertTrue(focusedPage.waitForExistence(timeout: 5))
@@ -133,6 +156,7 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
         audiovisualAttachment.lifetime = .keepAlways
         add(audiovisualAttachment)
         XCTAssertTrue(reportPassed(audiovisual, kind: "real_audiovisual_feed_ui"), audiovisual)
+        XCTAssertTrue(audiovisual.contains("\"timingProfile\":\"\(expectedTimingProfile)\""), audiovisual)
 
         XCTAssertTrue(reportPassed(report, kind: "vertical_paging_ui"), report)
         XCTAssertTrue(report.contains("\"finalOwnershipAligned\":true"), report)
@@ -143,7 +167,7 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
     func testOneHundredRapidNavigationsKeepPlaybackAndResourcesCorrect() throws {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        app.launchArguments = ["--qualification-mode"]
+        app.launchArguments = ["--qualification-mode"] + timingLaunchArguments
         app.launch()
 
         XCTAssertTrue(waitForValue("Ready", in: app.staticTexts["qualification-ready"], timeout: 10))
@@ -215,6 +239,7 @@ final class HLSProxyFeedDemoAppUITests: XCTestCase {
             report
         )
         XCTAssertTrue(report.contains("\"passed\":true"), report)
+        XCTAssertTrue(report.contains("\"timingProfile\":\"\(expectedTimingProfile)\""), report)
     }
 
     @MainActor

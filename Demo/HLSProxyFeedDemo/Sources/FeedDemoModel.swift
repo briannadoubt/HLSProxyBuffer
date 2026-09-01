@@ -57,6 +57,7 @@ final class FeedDemoModel {
     @ObservationIgnored private let clock = ContinuousClock()
     @ObservationIgnored private let mediaConfiguration: FeedDemoFixtureOrigin.Configuration
     @ObservationIgnored private let cacheScope: FeedDemoCacheScope
+    @ObservationIgnored private let qualificationTimingPolicy: FeedDemoQualificationTimingPolicy
     @ObservationIgnored private var cacheDirectory: URL?
     @ObservationIgnored private let audioSession: any FeedDemoAudioSessionManaging
     @ObservationIgnored private var startupGeneration = UUID()
@@ -91,6 +92,7 @@ final class FeedDemoModel {
     init(
         mediaConfiguration: FeedDemoFixtureOrigin.Configuration = .realMedia,
         cacheScope: FeedDemoCacheScope = .persistent,
+        qualificationTimingPolicy: FeedDemoQualificationTimingPolicy = .releaseReference,
         audioSession: (any FeedDemoAudioSessionManaging)? = nil,
         backgroundScheduler: (any FeedDemoBackgroundScheduling)? = nil,
         backgroundEnvironment: (any FeedDemoBackgroundEnvironmentProviding)? = nil,
@@ -98,6 +100,7 @@ final class FeedDemoModel {
     ) {
         self.mediaConfiguration = mediaConfiguration
         self.cacheScope = cacheScope
+        self.qualificationTimingPolicy = qualificationTimingPolicy
         self.audioSession = audioSession ?? FeedDemoAudioSession()
         let scheduler = backgroundScheduler ?? FeedDemoBackgroundDependencies.makeScheduler()
         self.backgroundEnvironment = backgroundEnvironment
@@ -218,7 +221,8 @@ final class FeedDemoModel {
             snapshot: engineSnapshot,
             telemetry: engine.telemetry.snapshot,
             policy: selectedMode.policy,
-            warmupMemoryBytes: qualificationWarmupMemoryBytes
+            warmupMemoryBytes: qualificationWarmupMemoryBytes,
+            timingPolicy: qualificationTimingPolicy
         )
     }
 
@@ -267,12 +271,14 @@ final class FeedDemoModel {
             networkConditionTransitionCount: qualificationNetworkConditionTransitionCount,
             memoryPressureActionCount: qualificationMemoryPressureActionCount,
             backgroundTransitionCount: qualificationBackgroundTransitionCount,
-            foregroundTransitionCount: qualificationForegroundTransitionCount
+            foregroundTransitionCount: qualificationForegroundTransitionCount,
+            timingPolicy: qualificationTimingPolicy
         )
         verticalQualificationReport = vertical
         audiovisualQualificationReport = FeedDemoAudiovisualReport.make(
             vertical: vertical, engine: engineSnapshot, telemetry: engine.telemetry.snapshot,
-            origin: originSnapshot, configuration: mediaConfiguration
+            origin: originSnapshot, configuration: mediaConfiguration,
+            timingPolicy: qualificationTimingPolicy
         )
     }
 
