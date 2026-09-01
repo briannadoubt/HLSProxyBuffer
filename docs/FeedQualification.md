@@ -60,16 +60,20 @@ Prepared feed leases start with `playImmediately(atRate:)` after their successfu
 preroll. This skips AVPlayer's cold-start stall heuristic during a warm handoff;
 the decoded-frame gate still requires an actual pixel buffer and advancing frame
 timestamps, so entering the `.playing` state alone cannot pass real-media
-qualification.
+qualification. Foreground recovery deliberately uses AVPlayer's normal `play()`
+resume semantics because a background-interrupted player is no longer a freshly
+prerolled handoff.
 
 Timing evidence carries an explicit profile and limit. Controlled local or
 dedicated-hardware release qualification uses the `release_reference` profile
 and the 500 ms warm p95 ceiling. GitHub's shared macOS runners use the
 `shared_runner` profile with a 1000 ms warm p95 ceiling because unrelated host
-scheduling is not controlled there. Every ownership, decoded/advancing-frame,
-audio, cancellation, cache, network, and resource bound remains identical and
-merge-blocking in both profiles; the uploaded JSON records which timing ceiling
-was applied. Set `HLS_CI_TIMING_PROFILE=shared-runner` only for shared-runner CI;
+scheduling is not controlled there. The same scheduling profile uses a 500 ms
+ceiling for the UI-observed cancellation acknowledgement, while release-reference
+runs and deterministic coordinator stress retain 250 ms. Cancellation outcomes,
+ownership, decoded/advancing frames, audio, cache, network, and resource bounds
+remain merge-blocking in both profiles; the uploaded JSON records the applied
+timing ceilings. Set `HLS_CI_TIMING_PROFILE=shared-runner` only for shared-runner CI;
 the CI harness carries this choice into Xcode UI tests as a Swift compilation
 condition because hosted test runners do not reliably inherit shell variables.
 

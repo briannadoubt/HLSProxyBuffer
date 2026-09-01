@@ -420,6 +420,9 @@ final class HLSFeedEngineTests: XCTestCase {
         XCTAssertEqual(snapshot.activeItemID, items[1].id)
         XCTAssertEqual(snapshot.audibleItemID, items[1].id)
         XCTAssertEqual(factory.audiblePlayingItemIDs, [items[1].id])
+        let resumedSession = try XCTUnwrap(factory.session(loadedWith: items[1].id))
+        XCTAssertEqual(resumedSession.regularPlayCount, 1)
+        XCTAssertEqual(resumedSession.preparedPlayCount, 0)
         XCTAssertLessThanOrEqual(snapshot.allocatedPlayerCount, 2)
         XCTAssertEqual(factory.maximumAudiblePlayingCount, 1)
 
@@ -1243,6 +1246,8 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     private(set) var preparationCount = 0
     private(set) var preparationCancellationCount = 0
     private(set) var playCount = 0
+    private(set) var regularPlayCount = 0
+    private(set) var preparedPlayCount = 0
     private(set) var outputCountAtFirstPlay: Int?
     private(set) var outputCountAtFirstPreparation: Int?
     private(set) var playBeforePreparationCount = 0
@@ -1372,6 +1377,16 @@ private final class FakeFeedPlayerSession: HLSFeedPlayerSession {
     }
 
     func play() {
+        regularPlayCount += 1
+        recordPlay()
+    }
+
+    func playPrepared() {
+        preparedPlayCount += 1
+        recordPlay()
+    }
+
+    private func recordPlay() {
         playCount += 1
         if outputCountAtFirstPlay == nil {
             outputCountAtFirstPlay = feedPlatformPlayer?.currentItem?.outputs.count ?? 0

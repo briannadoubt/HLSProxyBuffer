@@ -284,6 +284,11 @@ struct HLSFeedPlayerPreparationRetryPolicy: Equatable, Sendable {
 @Observable
 @MainActor
 public final class HLSFeedEngine {
+    private enum ActivationStart {
+        case preparedHandoff
+        case foregroundResume
+    }
+
     private struct Lease {
         let token: UUID
         let itemID: FeedItemID
@@ -610,7 +615,7 @@ public final class HLSFeedEngine {
             recordPlaybackLifecycle(.resumed)
             if let targetFocusedItemID,
                let destination = slot(for: targetFocusedItemID) {
-                activate(destination)
+                activate(destination, start: .foregroundResume)
             }
         }
         rebuildSnapshot()
@@ -1325,7 +1330,10 @@ public final class HLSFeedEngine {
         activate(slot)
     }
 
-    private func activate(_ destination: Slot) {
+    private func activate(
+        _ destination: Slot,
+        start: ActivationStart = .preparedHandoff
+    ) {
         guard !isPlaybackSuspended,
               let targetFocusedItemID,
               let destinationLease = destination.lease,
@@ -1380,7 +1388,15 @@ public final class HLSFeedEngine {
            pendingFocus?.generation == destinationLease.generation {
             pendingFocus?.startTiming.playInvokedAt = telemetryClock.now()
         }
-        destination.session.playPrepared()
+        switch start {
+        case .preparedHandoff:
+            destination.session.playPrepared()
+        case .foregroundResume:
+            // A background-interrupted AVPlayer is not freshly prerolled.
+            // Let AVPlayer apply its normal resume semantics here while warm
+            // feed handoffs continue to use the low-latency prepared path.
+            destination.session.play()
+        }
         if !hasPlatformPlayer {
             confirmActivatedPlayback(in: destination, token: destinationLease.token)
         }

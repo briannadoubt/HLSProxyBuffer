@@ -11,18 +11,21 @@ struct FeedDemoQualificationTimingPolicy: Equatable, Sendable {
     let warmFirstFrameP95Seconds: TimeInterval
     let warmPlaybackP95Seconds: TimeInterval
     let warmDecodedP95Seconds: TimeInterval
+    let cancellationMaximumSeconds: TimeInterval
 
     static let releaseReference = Self(
         profile: .releaseReference,
         warmFirstFrameP95Seconds: 0.5,
         warmPlaybackP95Seconds: 0.5,
-        warmDecodedP95Seconds: 0.5
+        warmDecodedP95Seconds: 0.5,
+        cancellationMaximumSeconds: 0.25
     )
     static let sharedRunner = Self(
         profile: .sharedRunner,
         warmFirstFrameP95Seconds: 1,
         warmPlaybackP95Seconds: 1,
-        warmDecodedP95Seconds: 1
+        warmDecodedP95Seconds: 1,
+        cancellationMaximumSeconds: 0.5
     )
 }
 
@@ -53,6 +56,7 @@ struct FeedDemoQualificationReport: Codable, Equatable, Sendable {
     let warmFirstFrameP95LimitMilliseconds: Double?
     let cancellationCount: UInt64
     let cancellationMaximumMilliseconds: Double?
+    let cancellationMaximumLimitMilliseconds: Double?
     let handoffAttemptCount: UInt64
     let handoffSuccessCount: UInt64
     let handoffSuccessRate: Double?
@@ -153,8 +157,10 @@ struct FeedDemoQualificationReport: Codable, Equatable, Sendable {
             let limit = Int(timingPolicy.warmFirstFrameP95Seconds * 1_000)
             failures.append("predicted-warm visible first-frame p95 exceeded \(limit) ms")
         }
-        if let cancellationMaximum, cancellationMaximum > 0.25 {
-            failures.append("obsolete work took longer than 250 ms to drain")
+        if let cancellationMaximum,
+           cancellationMaximum > timingPolicy.cancellationMaximumSeconds {
+            let limit = Int(timingPolicy.cancellationMaximumSeconds * 1_000)
+            failures.append("obsolete work took longer than \(limit) ms to drain")
         }
         if telemetry.paths.contains(where: { $0.handoffReadySuccessCount == nil }) {
             failures.append("ready-handoff outcome metrics are unavailable")
@@ -185,6 +191,7 @@ struct FeedDemoQualificationReport: Codable, Equatable, Sendable {
             warmFirstFrameP95LimitMilliseconds: timingPolicy.warmFirstFrameP95Seconds * 1_000,
             cancellationCount: telemetry.cancellationCount,
             cancellationMaximumMilliseconds: cancellationMaximum.map { $0 * 1_000 },
+            cancellationMaximumLimitMilliseconds: timingPolicy.cancellationMaximumSeconds * 1_000,
             handoffAttemptCount: handoffAttemptCount,
             handoffSuccessCount: handoffSuccessCount,
             handoffSuccessRate: handoffSuccessRate,
@@ -254,6 +261,8 @@ struct FeedDemoVerticalQualificationReport: Codable, Equatable, Sendable {
 
     let finalOwnershipAligned: Bool
     let finalPlaybackStarted: Bool
+    let timingProfile: FeedDemoQualificationTimingPolicy.Profile?
+    let cancellationMaximumLimitMilliseconds: Double?
     let firstFrameLatency: Distribution
     let cancellationLatency: Distribution
     let stallDuration: Distribution
@@ -304,7 +313,8 @@ struct FeedDemoVerticalQualificationReport: Codable, Equatable, Sendable {
         networkConditionTransitionCount: Int,
         memoryPressureActionCount: Int,
         backgroundTransitionCount: Int,
-        foregroundTransitionCount: Int
+        foregroundTransitionCount: Int,
+        timingPolicy: FeedDemoQualificationTimingPolicy = .releaseReference
     ) -> Self {
         let firstFrame = summary(telemetry.paths.map(\.firstFrameLatency))
         let cancellation = summary(telemetry.paths.map(\.cancellationLatency))
@@ -336,7 +346,8 @@ struct FeedDemoVerticalQualificationReport: Codable, Equatable, Sendable {
         if !engine.failures.isEmpty { failures.append("engine_failure") }
         if firstFrame.count == 0 { failures.append("missing_first_frame_metric") }
         if cancellation.count == 0 { failures.append("missing_cancellation_metric") }
-        if let maximum = cancellation.maximumMilliseconds, maximum > 250 {
+        if let maximum = cancellation.maximumMilliseconds,
+           maximum > timingPolicy.cancellationMaximumSeconds * 1_000 {
             failures.append("cancellation_deadline_exceeded")
         }
         if handoffAttemptCount == 0 || handoffSuccessCount == 0 {
@@ -383,6 +394,8 @@ struct FeedDemoVerticalQualificationReport: Codable, Equatable, Sendable {
             scenarioIDs: scenarioIDs,
             finalOwnershipAligned: ownershipAligned,
             finalPlaybackStarted: finalPlayback?.hasStartedPlayback == true,
+            timingProfile: timingPolicy.profile,
+            cancellationMaximumLimitMilliseconds: timingPolicy.cancellationMaximumSeconds * 1_000,
             firstFrameLatency: firstFrame,
             cancellationLatency: cancellation,
             stallDuration: stall,

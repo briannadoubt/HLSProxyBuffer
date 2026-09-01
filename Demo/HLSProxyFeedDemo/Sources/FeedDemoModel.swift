@@ -271,7 +271,8 @@ final class FeedDemoModel {
             networkConditionTransitionCount: qualificationNetworkConditionTransitionCount,
             memoryPressureActionCount: qualificationMemoryPressureActionCount,
             backgroundTransitionCount: qualificationBackgroundTransitionCount,
-            foregroundTransitionCount: qualificationForegroundTransitionCount
+            foregroundTransitionCount: qualificationForegroundTransitionCount,
+            timingPolicy: qualificationTimingPolicy
         )
         verticalQualificationReport = vertical
         audiovisualQualificationReport = FeedDemoAudiovisualReport.make(
