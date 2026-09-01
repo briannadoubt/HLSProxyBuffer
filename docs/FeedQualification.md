@@ -56,13 +56,12 @@ the unchanged hard ceiling instead of rounding every 251-500 ms sample up to
 starts, so its p95 remains a percentile under an isolated scheduler interruption
 instead of collapsing to the maximum of a ten-sample run.
 
-Prepared feed leases start with `playImmediately(atRate:)` after their successful
-preroll. This skips AVPlayer's cold-start stall heuristic during a warm handoff;
-the decoded-frame gate still requires an actual pixel buffer and advancing frame
-timestamps, so entering the `.playing` state alone cannot pass real-media
-qualification. Foreground recovery deliberately uses AVPlayer's normal `play()`
-resume semantics because a background-interrupted player is no longer a freshly
-prerolled handoff.
+Successful preroll remains the feed-readiness gate, but AVPlayer owns the final
+transition into playback through normal `play()` semantics. Forcing
+`playImmediately(atRate:)` proved unsafe because pipeline readiness can change
+between preroll and focus handoff. The decoded-frame gate still requires an
+actual pixel buffer and advancing frame timestamps, so entering the `.playing`
+state alone cannot pass real-media qualification.
 
 Timing evidence carries an explicit profile and limit. Controlled local or
 dedicated-hardware release qualification uses the `release_reference` profile

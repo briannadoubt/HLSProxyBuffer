@@ -47,9 +47,9 @@ integration surfaces.
 - Stabilized player teardown, stale-completion rejection, transient preroll
   recovery, background/foreground transitions, silent retirement, and focused
   audio ownership across rapid feed navigation.
-- Started successfully prerolled feed leases without reapplying AVPlayer's
-  cold-start stall heuristic, while retaining decoded-frame qualification for
-  real warm handoffs; foreground recovery uses AVPlayer's normal resume path.
+- Kept successful preroll as the feed-readiness gate while leaving the final
+  playback transition to AVPlayer's normal stall-minimizing path; real warm
+  handoffs and foreground recovery retain decoded-frame qualification.
 - Added explicit 500 ms release-reference and 1000 ms shared-runner warm-start
   timing profiles, plus 250 ms and 500 ms observed cancellation-liveness ceilings
   respectively. Qualification artifacts record the active profile while decoded
