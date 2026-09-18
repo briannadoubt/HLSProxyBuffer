@@ -7,6 +7,8 @@ there is no separate runtime version constant to keep in sync.
 
 ## Unreleased
 
+- Encode segment identity fingerprints directly as lowercase hexadecimal, preserving existing cache keys while avoiding per-byte Foundation formatting.
+
 - Skip already-applied identical player configurations and serialize changed updates after initialization.
 
 - Preserve plain unencrypted VOD media-playlist input for native playback, avoiding synthetic master bandwidth metadata while retaining master/rendition/live routing where needed.

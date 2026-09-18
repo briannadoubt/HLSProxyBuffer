@@ -95,10 +95,16 @@ public enum SegmentIdentity {
     private static func fingerprint(url: URL, range: ClosedRange<Int>?) -> String {
         let rangeValue = range.map { "\($0.lowerBound)-\($0.upperBound)" } ?? "full"
         let value = "\(url.absoluteString)|\(rangeValue)"
-        return SHA256.hash(data: Data(value.utf8))
-            .prefix(10)
-            .map { String(format: "%02x", $0) }
-            .joined()
+        // Keep the existing 80-bit lowercase fingerprint without invoking
+        // Foundation's variadic formatter once per digest byte.
+        let digits = Array("0123456789abcdef".utf8)
+        var encoded: [UInt8] = []
+        encoded.reserveCapacity(20)
+        for byte in SHA256.hash(data: Data(value.utf8)).prefix(10) {
+            encoded.append(digits[Int(byte >> 4)])
+            encoded.append(digits[Int(byte & 0x0f)])
+        }
+        return String(decoding: encoded, as: UTF8.self)
     }
 
     private static func resourceExtension(for url: URL) -> String {
