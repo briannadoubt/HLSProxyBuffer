@@ -141,6 +141,10 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
     private var lowSegmentRequests = 0
     private let includeAlternateRenditions: Bool
     private let includeSupplementalResources: Bool
+    private let closedCaptionGroup: String?
+    private let declaresClosedCaptionGroup: Bool
+    private let alternateEndAfterRequests: Int
+    private var alternateRequests: [String: Int] = [:]
     private let audioPlaylistPath = "/audio-en.m3u8"
     private let subtitlePlaylistPath = "/subs-en.m3u8"
     private var audioSegments: [String: Data] = [:]
@@ -154,12 +158,18 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
         segmentDuration: TimeInterval = 2,
         segmentSize: Int = 512,
         includeAlternateRenditions: Bool = false,
-        includeSupplementalResources: Bool = false
+        alternateEndAfterRequests: Int = 1,
+        includeSupplementalResources: Bool = false,
+        closedCaptionGroup: String? = nil,
+        declaresClosedCaptionGroup: Bool = false
     ) {
+        self.closedCaptionGroup = closedCaptionGroup
+        self.declaresClosedCaptionGroup = declaresClosedCaptionGroup
         self.segmentCount = segmentCount
         self.failureAfterSequence = failureAfterSequence
         self.segmentDuration = segmentDuration
         self.segmentSize = segmentSize
+        self.alternateEndAfterRequests = alternateEndAfterRequests
         self.includeAlternateRenditions = includeAlternateRenditions
         self.includeSupplementalResources = includeSupplementalResources
         if includeAlternateRenditions {
@@ -204,6 +214,18 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
         listener = nil
     }
 
+    func alternateRequestCounts() -> [String: Int] {
+        queue.sync { alternateRequests }
+    }
+
+    private func alternateManifest(_ manifest: String, path: String) -> String {
+        alternateRequests[path, default: 0] += 1
+        if alternateRequests[path, default: 0] < alternateEndAfterRequests {
+            return manifest.replacingOccurrences(of: "#EXT-X-ENDLIST", with: "")
+        }
+        return manifest
+    }
+
     func didServeLowVariant() -> Bool {
         queue.sync { lowSegmentRequests > 0 }
     }
@@ -245,7 +267,7 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
         case "/low.m3u8":
             return HTTPResponse.text(variantManifest(prefix: "low"), contentType: "application/x-mpegURL").encoded()
         case "/iframe.m3u8" where includeSupplementalResources:
-            return HTTPResponse.text(iframeManifest, contentType: "application/x-mpegURL").encoded()
+            return HTTPResponse.text(alternateManifest(iframeManifest, path: "/iframe.m3u8"), contentType: "application/x-mpegURL").encoded()
         case "/metadata.json" where includeSupplementalResources:
             return HTTPResponse(
                 status: .ok,
@@ -263,11 +285,11 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
         }
 
         if includeAlternateRenditions && path == audioPlaylistPath {
-            return HTTPResponse.text(audioPlaylist, contentType: "application/x-mpegURL").encoded()
+            return HTTPResponse.text(alternateManifest(audioPlaylist, path: audioPlaylistPath), contentType: "application/x-mpegURL").encoded()
         }
 
         if includeAlternateRenditions && path == subtitlePlaylistPath {
-            return HTTPResponse.text(subtitlePlaylist, contentType: "application/x-mpegURL").encoded()
+            return HTTPResponse.text(alternateManifest(subtitlePlaylist, path: subtitlePlaylistPath), contentType: "application/x-mpegURL").encoded()
         }
 
         if path.hasPrefix("/high-seq-") {
@@ -330,6 +352,14 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
         if includeAlternateRenditions {
             streamAttributesHigh += ",AUDIO=\"audio-main\",SUBTITLES=\"subs-main\""
             streamAttributesLow += ",AUDIO=\"audio-main\",SUBTITLES=\"subs-main\""
+        }
+        if let closedCaptionGroup {
+            let value = declaresClosedCaptionGroup ? "\"\(closedCaptionGroup)\"" : closedCaptionGroup
+            if declaresClosedCaptionGroup {
+                lines.append("#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID=\"\(closedCaptionGroup)\",NAME=\"English\",INSTREAM-ID=\"CC1\"")
+            }
+            streamAttributesHigh += ",CLOSED-CAPTIONS=\(value)"
+            streamAttributesLow += ",CLOSED-CAPTIONS=\(value)"
         }
         lines.append("#EXT-X-STREAM-INF:\(streamAttributesHigh)")
         lines.append("/high.m3u8")

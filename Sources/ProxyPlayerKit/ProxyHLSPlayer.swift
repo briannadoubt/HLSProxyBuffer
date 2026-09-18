@@ -162,8 +162,11 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private let segmentCatalog = SegmentCatalog()
     @ObservationIgnored private let segmentFetcher: HLSSegmentFetcher
     @ObservationIgnored private var manifestSession: URLSession
+    @ObservationIgnored private var ownsOriginSession: Bool
     @ObservationIgnored private var appliedNetworkPolicy: HLSOriginNetworkPolicy
     @ObservationIgnored private var currentPlaylist: MediaPlaylist?
+    @ObservationIgnored private var publishedImmutablePrimaryPlaylist: MediaPlaylist?
+    @ObservationIgnored private var playsPrimaryMediaPlaylist = false
     @ObservationIgnored private var currentLiveWindow: HLSLiveWindow?
     @ObservationIgnored private var currentRewriteConfiguration: HLSRewriteConfiguration?
     @ObservationIgnored private var didPreparePlayerForCurrentLoad = false
@@ -172,6 +175,8 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var isFeedAudioManaged = false
     @ObservationIgnored private var feedAudioGuard: HLSFeedAudioEligibilityGuard?
     @ObservationIgnored private lazy var server = ProxyServer(router: router)
+    @ObservationIgnored private let serverPool: ProxyServerPool?
+    @ObservationIgnored private var serverLease: ProxyServerLease?
     @ObservationIgnored private let diagnostics: ProxyPlayerDiagnostics
     @ObservationIgnored private let telemetry: HLSStreamingTelemetry
     @ObservationIgnored private let throughputEstimator: ThroughputEstimator
@@ -183,6 +188,7 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var resolvedRenditions: [String: ResolvedRenditionInfo] = [:]
     @ObservationIgnored private var orderedRenditionInfos: [ResolvedRenditionInfo] = []
     @ObservationIgnored private var renditionPlaylists: [String: MediaPlaylist] = [:]
+    @ObservationIgnored private var endedReportPlaylists: Set<String> = []
     @ObservationIgnored private var resolvedRenditionReports: [ResolvedRenditionReport] = []
     @ObservationIgnored private var resolvedSupplementalPlaylists: [ResolvedRenditionReport] = []
     @ObservationIgnored private var resolvedVODVariants: [ResolvedVODVariant] = []
@@ -197,6 +203,8 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var shouldPlayWhenReady = false
     @ObservationIgnored private var mediaSelectionTask: Task<Void, Never>?
     @ObservationIgnored private var initializationTask: Task<Void, Never>?
+    @ObservationIgnored private var configurationUpdateTask: Task<Void, Never>?
+    @ObservationIgnored private var configurationUpdateGeneration: UInt64 = 0
     @ObservationIgnored private var telemetryObservationTask: Task<Void, Never>?
     @ObservationIgnored private var activeLoadTask: Task<Void, Error>?
     @ObservationIgnored private var cleanupTask: Task<Void, Never>?
@@ -207,16 +215,24 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var playbackTimeline: [(sequence: Int, endTime: TimeInterval)] = []
     @ObservationIgnored private var lastPlaybackSequence: Int?
 
+    /// A supplied origin session is caller-owned and may be shared by a feed pool.
+    /// Configure it with the initial network policy. Changing that policy detaches
+    /// this player to a new owned session without invalidating the shared session.
     public init(
         configuration: ProxyPlayerConfiguration = .init(),
         logger: Logger = ProxyPlayerLogger(),
         diagnostics: ProxyPlayerDiagnostics = .init(),
         telemetry: HLSStreamingTelemetry = .init(),
-        sharedCache: HLSSegmentCache? = nil
+        sharedCache: HLSSegmentCache? = nil,
+        originSession: URLSession? = nil,
+        serverPool: ProxyServerPool? = nil
     ) {
         self.configuration = configuration
+        self.serverPool = serverPool
         self.appliedNetworkPolicy = configuration.networkPolicy
-        self.manifestSession = configuration.networkPolicy.makeURLSession()
+        self.ownsOriginSession = originSession == nil
+        let originSession = originSession ?? configuration.networkPolicy.makeURLSession()
+        self.manifestSession = originSession
         let cacheDirectoryIdentifier = UUID().uuidString
         self.cacheDirectoryIdentifier = cacheDirectoryIdentifier
         self.logger = logger
@@ -226,6 +242,7 @@ public final class ProxyHLSPlayer {
         self.throughputEstimator = ThroughputEstimator(configuration: .init(window: configuration.abrPolicy.estimatorWindow))
         self.adaptiveController = AdaptiveVariantController(policy: Self.abrPolicy(from: configuration), logger: logger)
         self.segmentFetcher = HLSSegmentFetcher(
+            session: originSession,
             validationPolicy: configuration.segmentValidation,
             networkPolicy: configuration.networkPolicy,
             retryPolicy: configuration.segmentRetryPolicy
@@ -301,7 +318,7 @@ public final class ProxyHLSPlayer {
 
     deinit {
         telemetryObservationTask?.cancel()
-        manifestSession.invalidateAndCancel()
+        if ownsOriginSession { manifestSession.invalidateAndCancel() }
     }
 
     /// Ordered player-state changes with bounded buffering for non-SwiftUI consumers.
@@ -530,10 +547,15 @@ public final class ProxyHLSPlayer {
         cleanupTask?.cancel()
         shouldPlayWhenReady = false
         player?.pause()
+        player?.cancelPendingPrerolls()
         player?.currentItem?.cancelPendingSeeks()
+        player?.currentItem?.asset.cancelLoading()
         removePlaybackTimeObserver()
         feedAudioGuard?.stop()
         feedAudioGuard = nil
+        // External owners can retain the native player after stop. Detach its
+        // item before closing routes instead of relying on a timed grace period.
+        player?.replaceCurrentItem(with: nil)
         player = nil
         mediaSelectionTask?.cancel()
         mediaSelectionTask = nil
@@ -551,7 +573,10 @@ public final class ProxyHLSPlayer {
         renditionRefreshTasks.removeAll()
         let scheduler = scheduler
         let playlistRefresher = playlistRefresher
-        let server = server
+        let privateServer = serverPool == nil ? server : nil
+        let retiredLease = serverLease
+        serverLease = nil
+        retiredLease?.close()
         cleanupTask = Task { @MainActor [weak self] in
             if let loadTask { _ = await loadTask.result }
             await scheduler.onBufferStateChange(nil)
@@ -559,10 +584,10 @@ public final class ProxyHLSPlayer {
             await scheduler.stop()
             await playlistRefresher.stop()
             await self?.clearResolvedRenditions()
-            // AVFoundation can finish media-selection requests after the item is
-            // released. Keep loopback alive briefly so those reads drain cleanly.
-            try? await Task.sleep(nanoseconds: 50_000_000)
-            server.stop()
+            // Native loading was cancelled and the item detached synchronously.
+            // Closing the server cancels any remaining client route requests.
+            await retiredLease?.closeAndWait()
+            privateServer?.stop()
         }
         latestKeyStatuses = []
         clipStitchingError = nil
@@ -619,9 +644,27 @@ public final class ProxyHLSPlayer {
         ))
     }
 
+    /// Applies configuration changes in order. Repeating the current configuration
+    /// after initialization is a no-op; callers still await any earlier update.
     public func updateConfiguration(_ configuration: ProxyPlayerConfiguration) async {
-        self.configuration = configuration
-        await applyConfiguration()
+        if let initializationTask {
+            await initializationTask.value
+            self.initializationTask = nil
+        }
+        if configurationUpdateTask == nil, self.configuration == configuration { return }
+        let previous = configurationUpdateTask
+        configurationUpdateGeneration &+= 1
+        let generation = configurationUpdateGeneration
+        let task = Task { @MainActor [weak self] in
+            await previous?.value
+            guard let self, self.configuration != configuration else { return }
+            let previousConfiguration = self.configuration
+            self.configuration = configuration
+            await self.applyConfiguration(previous: previousConfiguration)
+        }
+        configurationUpdateTask = task
+        await task.value
+        if configurationUpdateGeneration == generation { configurationUpdateTask = nil }
     }
 
     private func performLoad(
@@ -631,9 +674,7 @@ public final class ProxyHLSPlayer {
     ) async throws {
         try ensureActiveSession(generation)
         didPublishInitialPlaylists = false
-        if server.port == nil {
-            try server.start()
-        }
+        try await startServer(generation: generation)
 
         didPreparePlayerForCurrentLoad = false
         await clearResolvedRenditions()
@@ -660,6 +701,15 @@ public final class ProxyHLSPlayer {
         } ?? playlistResult.variants
         await adaptiveController.updateVariants(adaptiveVariants)
         let playlist = playlistResult.playlist
+        // Preserve a plain VOD source's media-playlist shape. A synthetic master
+        // adds a request and invents bandwidth metadata that the origin did not
+        // supply. Keep master routing when any master/rendition/encryption
+        // semantics need it, and for live or stitched timelines.
+        playsPrimaryMediaPlaylist = playlistResult.masterURL == nil
+            && playlist.isEndlist && playlist.playlistType == "VOD"
+            && playlistResult.variants.isEmpty && playlistResult.renditions.isEmpty
+            && playlistResult.masterSessionKeys.isEmpty && playlistResult.masterPassthroughTags.isEmpty
+            && playlist.sessionKeys.isEmpty && playlist.segments.allSatisfy { $0.encryption == nil }
         masterProtocolVersion = playlistResult.masterProtocolVersion
         masterIndependentSegments = playlistResult.masterIndependentSegments
         masterPassthroughTags = playlistResult.masterPassthroughTags
@@ -738,6 +788,7 @@ public final class ProxyHLSPlayer {
         try ensureActiveSession(generation)
         didPublishInitialPlaylists = true
         await updatePlaybackState(with: await scheduler.bufferState(), generation: generation)
+        await evaluateABR(bufferState: nil)
         await startPlaylistRefresh(at: playlistResult.url, generation: generation)
         startRenditionRefresh(generation: generation, config: rewriteConfiguration)
     }
@@ -747,10 +798,9 @@ public final class ProxyHLSPlayer {
         generation: UInt64
     ) async throws {
         try ensureActiveSession(generation)
+        playsPrimaryMediaPlaylist = false
         didPublishInitialPlaylists = false
-        if server.port == nil {
-            try server.start()
-        }
+        try await startServer(generation: generation)
         let baseURL = try await waitForBaseURL()
 
         var parsedClips: [HLSClip] = []
@@ -846,12 +896,27 @@ public final class ProxyHLSPlayer {
         }
     }
 
+    private func nativeVODBitrateCeiling(for variant: VariantPlaylist?) -> Double {
+        guard let bandwidth = variant?.attributes.bandwidth, bandwidth > 0 else { return 0 }
+        // Once origin capacity admits every published rendition, the ladder
+        // itself is the upper bound. Avoid putting the top rendition exactly
+        // on a nominal peak cap that AVFoundation may interpret conservatively.
+        let allPublishedVariantsFit = resolvedVODVariants.allSatisfy {
+            guard let candidate = $0.variant.attributes.bandwidth else { return false }
+            return candidate <= bandwidth
+        }
+        return allPublishedVariantsFit ? 0 : Double(bandwidth)
+    }
+
     private func preparePlayer(with url: URL) {
         removePlaybackTimeObserver()
         rebuildPlaybackTimeline()
         let item = AVPlayerItem(url: url)
+        if let duration = configuration.bufferPolicy.initialNativeBufferDuration {
+            item.preferredForwardBufferDuration = duration
+        }
         if !resolvedVODVariants.isEmpty {
-            item.preferredPeakBitRate = Double(activeVariant?.attributes.bandwidth ?? 0)
+            item.preferredPeakBitRate = nativeVODBitrateCeiling(for: activeVariant)
         }
         if let existing = player {
             existing.replaceCurrentItem(with: item)
@@ -942,6 +1007,14 @@ public final class ProxyHLSPlayer {
     private func consumePlayedSegments(through seconds: TimeInterval) async {
         publishLivePlayback(playbackTime: seconds)
         let played = playbackTimeline.last(where: { $0.endTime <= seconds })?.sequence
+        if let previous = lastPlaybackSequence,
+           played.map({ $0 < previous }) ?? true,
+           let destination = playbackTimeline.first(where: { $0.endTime > seconds })?.sequence {
+            // Native AVPlayer controls can seek/loop without going through our API.
+            lastPlaybackSequence = played
+            await scheduler.reposition(to: destination)
+            return
+        }
         guard let played, played != lastPlaybackSequence else { return }
         lastPlaybackSequence = played
         await scheduler.consume(sequence: played)
@@ -1170,6 +1243,7 @@ public final class ProxyHLSPlayer {
     }
 
     private func clearResolvedRenditions() async {
+        publishedImmutablePrimaryPlaylist = nil
         for info in resolvedVODVariants {
             await segmentCatalog.removeEntries(for: info.namespace)
             await playlistStore.remove(info.playlistIdentifier)
@@ -1189,6 +1263,7 @@ public final class ProxyHLSPlayer {
             await segmentCatalog.removeEntries(for: playlist.namespace)
             await playlistStore.remove(playlist.playlistIdentifier)
         }
+        endedReportPlaylists.removeAll()
         resolvedRenditionReports.removeAll()
         resolvedSupplementalPlaylists.removeAll()
         orderedRenditionInfos.removeAll()
@@ -1495,6 +1570,11 @@ public final class ProxyHLSPlayer {
                 namespace: info.namespace
             )
             await playlistStore.update(rewritten, for: info.playlistIdentifier)
+            if playlist.isEndlist {
+                endedReportPlaylists.insert(info.playlistIdentifier)
+            } else {
+                endedReportPlaylists.remove(info.playlistIdentifier)
+            }
             return true
         } catch {
             logger.log("Failed to resolve rendition report: \(error)", category: .player)
@@ -1539,6 +1619,7 @@ public final class ProxyHLSPlayer {
         for task in renditionRefreshTasks.values { task.cancel() }
         renditionRefreshTasks.removeAll()
         for info in orderedRenditionInfos where info.remoteURI != nil {
+            guard renditionPlaylists[info.rendition.id]?.isEndlist != true else { continue }
             let interval = max(
                 0.5,
                 min(renditionPlaylists[info.rendition.id]?.targetDuration ?? configuration.bufferPolicy.refreshInterval,
@@ -1552,11 +1633,14 @@ public final class ProxyHLSPlayer {
                         return
                     }
                     guard let self, generation == self.sessionGeneration else { return }
+                    guard self.renditionPlaylists[info.rendition.id]?.isEndlist != true else { return }
                     _ = await self.fetchRenditionPlaylist(info: info, config: config)
+                    if self.renditionPlaylists[info.rendition.id]?.isEndlist == true { return }
                 }
             }
         }
         for report in resolvedRenditionReports + resolvedSupplementalPlaylists {
+            guard !endedReportPlaylists.contains(report.playlistIdentifier) else { continue }
             renditionRefreshTasks[report.playlistIdentifier] = Task { @MainActor [weak self] in
                 while !Task.isCancelled {
                     do {
@@ -1565,7 +1649,9 @@ public final class ProxyHLSPlayer {
                         return
                     }
                     guard let self, generation == self.sessionGeneration else { return }
+                    guard !self.endedReportPlaylists.contains(report.playlistIdentifier) else { return }
                     _ = await self.fetchRenditionReport(report, config: config)
+                    if self.endedReportPlaylists.contains(report.playlistIdentifier) { return }
                 }
             }
         }
@@ -1736,7 +1822,16 @@ public final class ProxyHLSPlayer {
             attributes.append("SUBTITLES=\"\(subtitleGroup)\"")
         }
         if let captions = data?.closedCaptionGroupId {
-            attributes.append("CLOSED-CAPTIONS=\"\(captions)\"")
+            // NONE is an enumerated value, unless it names an actual caption
+            // group. Quoting the sentinel makes AVPlayer require a missing group.
+            let namesCaptionGroup = orderedRenditionInfos.contains {
+                $0.rendition.type == .closedCaptions && $0.rendition.groupId == captions
+            }
+            if captions == "NONE", !namesCaptionGroup {
+                attributes.append("CLOSED-CAPTIONS=NONE")
+            } else {
+                attributes.append("CLOSED-CAPTIONS=\"\(captions)\"")
+            }
         }
         for (key, value) in data?.additionalAttributes.sorted(by: { $0.key < $1.key }) ?? [] {
             switch key {
@@ -1894,12 +1989,24 @@ public final class ProxyHLSPlayer {
             let config = currentRewriteConfiguration
         else { return }
 
+        // A finalized full-segment VOD has identical output for every buffer
+        // state. Keep its published bytes instead of hashing/rebuilding the
+        // entire manifest on each prefetch completion and playback boundary.
+        // LL-HLS parts and mutable timelines still follow the normal rewrite.
+        let immutable = playlist.isEndlist && playlist.playlistType == "VOD"
+            && playlist.trailingParts.isEmpty && playlist.segments.allSatisfy { $0.parts.isEmpty }
+        if immutable, publishedImmutablePrimaryPlaylist == playlist { return }
+        let generation = sessionGeneration
+
         let playlistText = await manifestProcessor.rewrite(
             mediaPlaylist: playlist,
             config: config,
             bufferState: bufferState
         )
+        guard generation == sessionGeneration else { return }
         await playlistStore.update(playlistText, for: PlaylistStore.Identifier.primaryVariant)
+        guard generation == sessionGeneration else { return }
+        publishedImmutablePrimaryPlaylist = immutable ? playlist : nil
     }
 
     private func handleBufferStateChange(_ bufferState: BufferState, generation: UInt64) async {
@@ -2015,12 +2122,21 @@ public final class ProxyHLSPlayer {
         )
     }
 
-    private func applyConfiguration() async {
+    private func applyConfiguration(previous: ProxyPlayerConfiguration? = nil) async {
+        // Feed focus commonly changes only depth. Preserve existing telemetry,
+        // cache, retry, session, and ABR state instead of reapplying their settings.
+        if let previous, configuration.changesOnlyPrefetchDepth(from: previous) {
+            await applySchedulerConfiguration()
+            return
+        }
         if appliedNetworkPolicy != configuration.networkPolicy {
             let previousSession = manifestSession
+            let ownedPreviousSession = ownsOriginSession
             manifestSession = configuration.networkPolicy.makeURLSession()
+            ownsOriginSession = true
             appliedNetworkPolicy = configuration.networkPolicy
-            previousSession.finishTasksAndInvalidate()
+            await segmentFetcher.updateSession(manifestSession, networkPolicy: configuration.networkPolicy)
+            if ownedPreviousSession { previousSession.finishTasksAndInvalidate() }
         }
         await segmentFetcher.updateNetworkPolicy(configuration.networkPolicy)
         await segmentFetcher.updateRetryPolicy(configuration.segmentRetryPolicy)
@@ -2036,13 +2152,7 @@ public final class ProxyHLSPlayer {
             maximumEntryCount: configuration.cachePolicy.maximumEntryCount
         )
         await segmentFetcher.updateValidationPolicy(configuration.segmentValidation)
-        let partBufferCount = configuration.lowLatencyPolicy.isEnabled ? configuration.lowLatencyPolicy.targetPartBufferCount : 0
-        await scheduler.updateConfiguration(.init(
-            targetBufferSeconds: configuration.bufferPolicy.targetBufferSeconds,
-            maxSegments: configuration.bufferPolicy.maxPrefetchSegments,
-            targetPartCount: partBufferCount,
-            maximumRetryCount: 0
-        ))
+        await applySchedulerConfiguration()
         await playlistRefresher.updateConfiguration(.init(
             refreshInterval: configuration.bufferPolicy.refreshInterval,
             maxBackoffInterval: configuration.bufferPolicy.maxRefreshBackoff
@@ -2060,6 +2170,16 @@ public final class ProxyHLSPlayer {
         await scheduler.onTelemetry(makeTelemetryHandler())
         await throughputEstimator.updateConfiguration(.init(window: configuration.abrPolicy.estimatorWindow))
         await adaptiveController.updatePolicy(Self.abrPolicy(from: configuration))
+    }
+
+    private func applySchedulerConfiguration() async {
+        let partBufferCount = configuration.lowLatencyPolicy.isEnabled ? configuration.lowLatencyPolicy.targetPartBufferCount : 0
+        await scheduler.updateConfiguration(.init(
+            targetBufferSeconds: configuration.bufferPolicy.targetBufferSeconds,
+            maxSegments: configuration.bufferPolicy.maxPrefetchSegments,
+            targetPartCount: partBufferCount,
+            maximumRetryCount: 0
+        ))
     }
 
     private func keyURLResolver(for baseURL: URL) -> HLSRewriteConfiguration.KeyURLResolver? {
@@ -2123,13 +2243,14 @@ public final class ProxyHLSPlayer {
                 "scheduled=\(schedulerTelemetry.scheduledSequences) ready=\(schedulerTelemetry.readyCount) parts=\(schedulerTelemetry.readyPartCount) failures=\(schedulerTelemetry.failureCount)",
                 category: .scheduler
             )
+            let cacheMetrics = await cache.metrics()
             await metrics.updateSchedulerTelemetry(
                 scheduledCount: schedulerTelemetry.scheduledSequences.count,
                 readyCount: schedulerTelemetry.readyCount,
                 failureCount: schedulerTelemetry.failureCount,
-                readyPartCount: schedulerTelemetry.readyPartCount
+                readyPartCount: schedulerTelemetry.readyPartCount,
+                cacheMetrics: cacheMetrics
             )
-            await metrics.updateCacheMetrics(cache.metrics())
             guard schedulerTelemetry.failureCount > 0 else { return }
             await controller.registerFailure()
             guard let player = await MainActor.run(resultType: ProxyHLSPlayer?.self, body: { self }) else { return }
@@ -2148,19 +2269,32 @@ public final class ProxyHLSPlayer {
         }
     }
 
-    private func waitForBaseURL() async throws -> URL {
-        for _ in 0..<50 {
-            if let url = server.baseURL, server.port != 0 {
-                return url
+    private func startServer(generation: UInt64) async throws {
+        if let serverPool {
+            guard serverLease == nil else { return }
+            let lease = try await serverPool.reserve(router: router)
+            do {
+                try ensureActiveSession(generation)
+            } catch {
+                await lease.closeAndWait()
+                throw error
             }
-            try await Task.sleep(nanoseconds: 20_000_000)
+            serverLease = lease
+        } else if server.port == nil {
+            try server.start()
         }
-        throw URLError(.cannotFindHost)
+    }
+
+    private func waitForBaseURL() async throws -> URL {
+        if let serverLease { return serverLease.baseURL }
+        guard serverPool == nil else { throw CancellationError() }
+        return try await server.waitUntilReady(timeout: .seconds(1))
     }
 
     private func evaluateABR(bufferState providedState: BufferState?) async {
         guard
             configuration.abrPolicy.isEnabled,
+            didPublishInitialPlaylists,
             let rewriteConfiguration = currentRewriteConfiguration,
             case .automatic = rewriteConfiguration.qualityPolicy,
             variants.count > 1,
@@ -2182,7 +2316,8 @@ public final class ProxyHLSPlayer {
             currentVariant: currentVariant,
             qualityPolicy: rewriteConfiguration.qualityPolicy,
             throughputSample: throughputSample,
-            bufferState: state
+            bufferState: state,
+            adaptationMode: resolvedVODVariants.isEmpty ? .rewrittenPlaylist : .nativeVariants
         )
 
         if decision.action == .switchVariant,
@@ -2220,7 +2355,7 @@ public final class ProxyHLSPlayer {
             let alignedPlaylist = align(playlist: playlist, to: referenceState)
             activeVariant = variant
             if published != nil {
-                player?.currentItem?.preferredPeakBitRate = Double(variant.attributes.bandwidth ?? 0)
+                player?.currentItem?.preferredPeakBitRate = nativeVODBitrateCeiling(for: variant)
             }
             updateRenditionSelections(for: variant)
             currentPlaylist = alignedPlaylist
@@ -2300,7 +2435,10 @@ public final class ProxyHLSPlayer {
         guard generation == sessionGeneration else { return }
 
         if !didPreparePlayerForCurrentLoad {
-            preparePlayer(with: rewriteConfiguration.playlistURL)
+            let playbackURL = playsPrimaryMediaPlaylist
+                ? rewriteConfiguration.proxyBaseURL.appendingPathComponent(PlaylistPaths.variant)
+                : rewriteConfiguration.playlistURL
+            preparePlayer(with: playbackURL)
             didPreparePlayerForCurrentLoad = true
         }
 

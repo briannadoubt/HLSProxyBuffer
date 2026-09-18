@@ -5,6 +5,23 @@ package is still below 1.0, minor releases may include source-breaking API
 improvements. Swift Package Manager resolves the package version from Git tags;
 there is no separate runtime version constant to keep in sync.
 
+## Unreleased
+
+- Encode segment identity fingerprints directly as lowercase hexadecimal, preserving existing cache keys while avoiding per-byte Foundation formatting.
+
+- Skip already-applied identical player configurations and serialize changed updates after initialization.
+
+- Preserve plain unencrypted VOD media-playlist input for native playback, avoiding synthetic master bandwidth metadata while retaining master/rendition/live routing where needed.
+
+- Reuse published full-segment finalized VOD playlists across buffer-state changes; invalidate on load changes and keep mutable/partial playlists dynamic.
+
+- Keep policy/playlist refreshes from prefetching already-consumed primary media.
+- Add `SegmentPrefetchScheduler.reposition(to:)` to rebuild a forward window after
+  seeks while retaining cached bytes and rechecking cache residency.
+- Observe native backward seeks/loops in `ProxyHLSPlayer` and reposition prefetch
+  automatically, including rewind into the first segment.
+- Add an opt-in loopback response benchmark (`make benchmark BENCHMARK_ARGS=--loopback`).
+
 ## 0.2.0 - 2026-08-31
 
 `0.2.0` is the first production-oriented, non-prerelease HLSProxyBuffer release.

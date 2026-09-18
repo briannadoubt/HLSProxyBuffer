@@ -265,7 +265,7 @@ public actor HLSSegmentFetcher: SegmentSource {
 
     private var session: URLSession
     private var networkPolicy: HLSOriginNetworkPolicy
-    private let managesSession: Bool
+    private var managesSession: Bool
     private var validationPolicy: ValidationPolicy
     private var retryPolicy: RetryPolicy
     private let retryClock: RetryClock
@@ -325,6 +325,20 @@ public actor HLSSegmentFetcher: SegmentSource {
         let previousSession = session
         session = policy.makeURLSession()
         previousSession.finishTasksAndInvalidate()
+    }
+
+    /// Replaces the externally owned origin session and its request policy.
+    /// The caller keeps the session alive and owns its invalidation. Existing
+    /// requests continue on their original session; future requests use this one.
+    public func updateSession(_ session: URLSession, networkPolicy: HLSOriginNetworkPolicy) {
+        let previousSession = self.session
+        let ownedPreviousSession = managesSession
+        self.session = session
+        self.networkPolicy = networkPolicy
+        managesSession = false
+        if ownedPreviousSession, previousSession !== session {
+            previousSession.finishTasksAndInvalidate()
+        }
     }
 
     public func updateRetryPolicy(_ policy: RetryPolicy) {

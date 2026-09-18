@@ -56,7 +56,7 @@ public actor PlaylistRefreshController {
     }
 
     private var configuration: Configuration
-    private var session: URLSession
+    private var session: URLSession?
     private var networkPolicy: HLSOriginNetworkPolicy
     private let managesSession: Bool
     private let logger: Logger
@@ -91,7 +91,9 @@ public actor PlaylistRefreshController {
         manifestLoader: ManifestLoader? = nil
     ) {
         self.configuration = configuration
-        self.session = session ?? networkPolicy.makeURLSession()
+        // Finalized VOD never starts a refresh. Defer creating an owned session
+        // until an actual origin refresh needs one; injected sessions stay shared.
+        self.session = session
         self.networkPolicy = networkPolicy
         self.managesSession = session == nil
         self.logger = logger
@@ -99,7 +101,7 @@ public actor PlaylistRefreshController {
     }
 
     deinit {
-        if managesSession { session.invalidateAndCancel() }
+        if managesSession { session?.invalidateAndCancel() }
     }
 
     public func updateConfiguration(_ configuration: Configuration) {
@@ -111,8 +113,8 @@ public actor PlaylistRefreshController {
         networkPolicy = policy
         guard managesSession else { return }
         let previousSession = session
-        session = policy.makeURLSession()
-        previousSession.finishTasksAndInvalidate()
+        session = nil
+        previousSession?.finishTasksAndInvalidate()
     }
 
     public func updateLowLatencyConfiguration(_ configuration: LowLatencyConfiguration?) {
@@ -211,6 +213,8 @@ public actor PlaylistRefreshController {
         if let manifestLoader {
             text = try await manifestLoader(url, allowInsecure, requestTimeout)
         } else {
+            let session = session ?? networkPolicy.makeURLSession()
+            self.session = session
             let fetcher = HLSManifestFetcher(
                 url: url,
                 session: session,

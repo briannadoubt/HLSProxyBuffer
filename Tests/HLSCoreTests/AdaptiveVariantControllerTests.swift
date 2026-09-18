@@ -169,4 +169,65 @@ final class AdaptiveVariantControllerTests: XCTestCase {
         XCTAssertEqual(decision.action, .hold)
         XCTAssertEqual(decision.reason, .boundaryReached)
     }
+    func testNativeVariantsChooseAffordableCeilingBeforeFirstCompletedSegment() async {
+        let low = makeVariant(name: "low", bandwidth: 500_000)
+        let medium = makeVariant(name: "medium", bandwidth: 1_000_000)
+        let high = makeVariant(name: "high", bandwidth: 2_000_000)
+        for (throughput, expected) in [(4_000_000.0, high), (1_500_000.0, medium)] {
+            let controller = AdaptiveVariantController()
+            await controller.updateVariants([low, medium, high])
+            let decision = await controller.evaluate(
+                currentVariant: low, qualityPolicy: .automatic,
+                throughputSample: makeSample(throughput),
+                bufferState: makeBufferState(playedSequence: nil),
+                adaptationMode: .nativeVariants
+            )
+            XCTAssertEqual(decision.action, .switchVariant)
+            XCTAssertEqual(decision.targetVariant, expected)
+        }
+    }
+
+    func testNativeVariantsDoNotUpgradeWithoutOriginCapacity() async {
+        let low = makeVariant(name: "low", bandwidth: 500_000)
+        let high = makeVariant(name: "high", bandwidth: 2_000_000)
+        for sample in [nil, makeSample(600_000)] {
+            let controller = AdaptiveVariantController()
+            await controller.updateVariants([low, high])
+            let decision = await controller.evaluate(
+                currentVariant: low, qualityPolicy: .automatic,
+                throughputSample: sample,
+                bufferState: makeBufferState(playedSequence: nil),
+                adaptationMode: .nativeVariants
+            )
+            XCTAssertEqual(decision.action, .hold)
+            XCTAssertEqual(decision.targetVariant, low)
+        }
+    }
+
+    func testNativeVariantsDoNotConfusePrefetchDepletionWithPlaybackDepletion() async {
+        let low = makeVariant(name: "low", bandwidth: 500_000)
+        let high = makeVariant(name: "high", bandwidth: 2_000_000)
+        let controller = AdaptiveVariantController()
+        await controller.updateVariants([low, high])
+        _ = await controller.evaluate(
+            currentVariant: high, qualityPolicy: .automatic,
+            throughputSample: makeSample(10_000_000),
+            bufferState: makeBufferState(seconds: 10), adaptationMode: .nativeVariants
+        )
+        let decision = await controller.evaluate(
+            currentVariant: high, qualityPolicy: .automatic,
+            throughputSample: makeSample(10_000_000),
+            bufferState: makeBufferState(seconds: 0), adaptationMode: .nativeVariants
+        )
+        XCTAssertEqual(decision.action, .hold)
+        XCTAssertEqual(decision.targetVariant, high)
+        let constrained = await controller.evaluate(
+            currentVariant: high, qualityPolicy: .automatic,
+            throughputSample: makeSample(400_000),
+            bufferState: makeBufferState(seconds: 0), adaptationMode: .nativeVariants
+        )
+        XCTAssertEqual(constrained.action, .switchVariant)
+        XCTAssertEqual(constrained.targetVariant, low)
+    }
+
 }

@@ -367,6 +367,57 @@ final class HLSSegmentFetcherTests: XCTestCase {
         XCTAssertEqual(SegmentFetcherURLProtocol.lastRequest()?.timeoutInterval, 9)
     }
 
+    func testReplacingSharedSessionPreservesCallerOwnershipAndUpdatesRequestPolicy() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SegmentFetcherURLProtocol.self]
+        let original = URLSession(configuration: configuration)
+        let replacement = URLSession(configuration: configuration)
+        defer {
+            original.invalidateAndCancel()
+            replacement.invalidateAndCancel()
+        }
+        let url = try XCTUnwrap(URL(string: "https://cdn.example.com/session.ts"))
+        var fetcher: HLSSegmentFetcher? = HLSSegmentFetcher(
+            session: original, retryPolicy: .init(maxAttempts: 1)
+        )
+        await fetcher?.updateSession(replacement, networkPolicy: .init(requestTimeout: 9))
+
+        // Replacing the session must not invalidate the previous caller-owned session.
+        SegmentFetcherURLProtocol.enqueue(data: Data([1]))
+        let (originalData, _) = try await original.data(from: url)
+        XCTAssertEqual(originalData, Data([1]))
+        original.invalidateAndCancel()
+
+        // The fetcher must now use the replacement, even after the old session ends.
+        SegmentFetcherURLProtocol.enqueue(data: Data([2]))
+        let replacementData = try await fetcher?.fetchSegment(from: url)
+        XCTAssertEqual(replacementData, Data([2]))
+        XCTAssertEqual(SegmentFetcherURLProtocol.lastRequest()?.timeoutInterval, 9)
+        fetcher = nil
+
+        SegmentFetcherURLProtocol.enqueue(data: Data([3]))
+        let (retainedData, _) = try await replacement.data(from: url)
+        XCTAssertEqual(retainedData, Data([3]))
+    }
+
+    func testOwnedFetcherCanAdoptCallerSessionWithoutInvalidatingItOnRelease() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SegmentFetcherURLProtocol.self]
+        let shared = URLSession(configuration: configuration)
+        defer { shared.invalidateAndCancel() }
+        var fetcher: HLSSegmentFetcher? = HLSSegmentFetcher(retryPolicy: .init(maxAttempts: 1))
+        await fetcher?.updateSession(shared, networkPolicy: .init(requestTimeout: 7))
+        let url = try XCTUnwrap(URL(string: "https://cdn.example.com/adopted.ts"))
+        SegmentFetcherURLProtocol.enqueue(data: Data([4]))
+        let data = try await fetcher?.fetchSegment(from: url)
+        XCTAssertEqual(data, Data([4]))
+        XCTAssertEqual(SegmentFetcherURLProtocol.lastRequest()?.timeoutInterval, 7)
+        fetcher = nil
+        SegmentFetcherURLProtocol.enqueue(data: Data([5]))
+        let (remainingData, _) = try await shared.data(from: url)
+        XCTAssertEqual(remainingData, Data([5]))
+    }
+
     func testConditionalResourceFetchReturnsNotModifiedWithoutBodyBytes() async throws {
         SegmentFetcherURLProtocol.enqueue(
             data: Data(),

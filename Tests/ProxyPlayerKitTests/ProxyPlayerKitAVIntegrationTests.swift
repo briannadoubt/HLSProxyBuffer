@@ -16,6 +16,62 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         }
     }
 
+    func testPrefetchDepthOnlyChangesPreserveItemAndMediaRoutes() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        defer { origin.stop() }
+        let player = ProxyHLSPlayer(configuration: .init(
+            bufferPolicy: .init(targetBufferSeconds: 6, maxPrefetchSegments: 1, hideUntilBuffered: false),
+            allowInsecureManifests: true
+        ))
+        await player.load(from: origin.fixturePlaylistURL(named: "short-a"))
+        let item = try XCTUnwrap(player.player?.currentItem)
+        let segmentURL = try await firstSegmentURL(for: player)
+        let (expected, _) = try await URLSession.shared.data(from: segmentURL)
+        XCTAssertFalse(expected.isEmpty)
+        for depth in [2, 1, 3, 1] {
+            var configuration = player.configuration
+            configuration.bufferPolicy.maxPrefetchSegments = depth
+            await player.updateConfiguration(configuration)
+            XCTAssertEqual(player.configuration, configuration)
+            XCTAssertTrue(player.player?.currentItem === item)
+            let currentURL = try await firstSegmentURL(for: player)
+            XCTAssertEqual(currentURL, segmentURL)
+            let (actual, _) = try await URLSession.shared.data(from: currentURL)
+            XCTAssertEqual(actual, expected)
+        }
+        await player.stopAndWait()
+        XCTAssertNil(player.player)
+    }
+
+    func testInitialNativeBufferHintAppliesToNewItemsWithoutOverwritingVisibilityHints() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        defer { origin.stop() }
+        for duration: Double? in [nil, 0, 2] {
+            var configuration = ProxyPlayerConfiguration(
+                bufferPolicy: .init(targetBufferSeconds: 1, maxPrefetchSegments: 1,
+                                    hideUntilBuffered: false, initialNativeBufferDuration: duration),
+                allowInsecureManifests: true
+            )
+            let player = ProxyHLSPlayer(configuration: configuration)
+            await player.load(from: origin.fixturePlaylistURL(named: "short-a"))
+            let item = try XCTUnwrap(player.player?.currentItem)
+            XCTAssertEqual(item.preferredForwardBufferDuration, duration ?? 0)
+            item.preferredForwardBufferDuration = 5
+            configuration.bufferPolicy.maxPrefetchSegments = 2
+            await player.updateConfiguration(configuration)
+            XCTAssertTrue(player.player?.currentItem === item)
+            XCTAssertEqual(item.preferredForwardBufferDuration, 5,
+                           "Unrelated policy updates must preserve caller-owned visibility hints")
+            await player.load(from: origin.fixturePlaylistURL(named: "short-b"))
+            let replacement = try XCTUnwrap(player.player?.currentItem)
+            XCTAssertFalse(replacement === item)
+            XCTAssertEqual(replacement.preferredForwardBufferDuration, duration ?? 0)
+            await player.stopAndWait()
+        }
+    }
+
     func testAVPlayerHitsProxyPlaylistAndSegments() async throws {
         let origin = try MockOriginServer()
         try await origin.start()
@@ -67,6 +123,162 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         let (segmentData, _) = try await URLSession.shared.data(from: segmentURL)
         XCTAssertEqual(segmentData.count, 1_024)
 
+        await player.stopAndWait()
+    }
+
+    func testSharedListenerRoutesSurviveSiblingStopAndRejectRetiredSegments() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        defer { origin.stop() }
+        let configuration = ProxyPlayerConfiguration(
+            bufferPolicy: .init(targetBufferSeconds: 1, maxPrefetchSegments: 1, hideUntilBuffered: false),
+            allowInsecureManifests: true
+        )
+        let pool = ProxyServerPool(maximumSessions: 2)
+        let first = ProxyHLSPlayer(configuration: configuration, serverPool: pool)
+        let second = ProxyHLSPlayer(configuration: configuration, serverPool: pool)
+        await first.load(from: origin.fixturePlaylistURL(named: "short-a"))
+        await second.load(from: origin.fixturePlaylistURL(named: "short-b"))
+        let firstSegment = try await firstSegmentURL(for: first)
+        let secondSegment = try await firstSegmentURL(for: second)
+        XCTAssertEqual(firstSegment.port, secondSegment.port)
+        XCTAssertNotEqual(firstSegment.pathComponents[1], secondSegment.pathComponents[1])
+        let (firstBody, firstResponse) = try await URLSession.shared.data(from: firstSegment)
+        XCTAssertEqual((firstResponse as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertFalse(firstBody.isEmpty)
+        await first.stopAndWait()
+        // Segment responses are intentionally cacheable. Check the retired server
+        // route rather than URLSession's previously cached representation.
+        var retiredRequest = URLRequest(url: firstSegment)
+        retiredRequest.cachePolicy = .reloadIgnoringLocalCacheData
+        let (_, retiredResponse) = try await URLSession.shared.data(for: retiredRequest)
+        XCTAssertEqual((retiredResponse as? HTTPURLResponse)?.statusCode, 404)
+        let (secondBody, secondResponse) = try await URLSession.shared.data(from: secondSegment)
+        XCTAssertEqual((secondResponse as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertFalse(secondBody.isEmpty)
+        await first.load(from: origin.fixturePlaylistURL(named: "short-a"))
+        let replacement = try await firstSegmentURL(for: first)
+        XCTAssertEqual(replacement.port, secondSegment.port)
+        XCTAssertNotEqual(replacement.pathComponents[1], firstSegment.pathComponents[1])
+        await first.stopAndWait()
+        await second.stopAndWait()
+    }
+
+    func testBorrowedOriginSessionSurvivesPlayerReleaseAndSiblingPolicyChanges() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        defer { origin.stop() }
+        let configuration = ProxyPlayerConfiguration(
+            bufferPolicy: .init(targetBufferSeconds: 1, maxPrefetchSegments: 1, hideUntilBuffered: false),
+            allowInsecureManifests: true
+        )
+        let shared = configuration.networkPolicy.makeURLSession()
+        defer { shared.invalidateAndCancel() }
+        let sibling = ProxyHLSPlayer(configuration: configuration, originSession: shared)
+        for changesPolicy in [false, true] {
+            var borrower: ProxyHLSPlayer? = ProxyHLSPlayer(configuration: configuration, originSession: shared)
+            weak var released = borrower
+            await borrower?.load(from: origin.fixturePlaylistURL(named: "short-a"))
+            XCTAssertNotNil(borrower?.player?.currentItem)
+            if changesPolicy {
+                var updated = configuration
+                updated.networkPolicy = .init(requestTimeout: 7, maximumConnectionsPerHost: 2)
+                await borrower?.updateConfiguration(updated)
+                await borrower?.load(from: origin.fixturePlaylistURL(named: "short-b"))
+                XCTAssertNotNil(borrower?.player?.currentItem)
+            }
+            await borrower?.stopAndWait()
+            borrower = nil
+            for _ in 0..<100 where released != nil {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            XCTAssertNil(released, "Stopped borrowing player must release its session references")
+
+            // Both a direct session user and another player must remain functional.
+            let (manifest, response) = try await shared.data(from: origin.fixturePlaylistURL(named: "short-a"))
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+            XCTAssertTrue(String(decoding: manifest, as: UTF8.self).hasPrefix("#EXTM3U"))
+            await sibling.load(from: origin.fixturePlaylistURL(named: "short-b"))
+            let segment = try await firstSegmentURL(for: sibling)
+            let (body, _) = try await URLSession.shared.data(from: segment)
+            XCTAssertFalse(body.isEmpty)
+            await sibling.stopAndWait()
+        }
+    }
+
+    func testStopDetachesRetainedNativePlayerAcrossRepeatedReloads() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        defer { origin.stop() }
+        let player = ProxyHLSPlayer(configuration: .init(
+            bufferPolicy: .init(targetBufferSeconds: 1, maxPrefetchSegments: 1, hideUntilBuffered: false),
+            allowInsecureManifests: true
+        ))
+        for name in ["short-a", "short-b", "short-a"] {
+            await player.load(from: origin.fixturePlaylistURL(named: name))
+            let native = try XCTUnwrap(player.player)
+            let item = try XCTUnwrap(native.currentItem)
+            player.play()
+            // Start the same asynchronous media-selection work that can outlive
+            // a released item. Stopping may cancel it or race with completion.
+            let asset = item.asset
+            let selection = Task.detached {
+                _ = try await asset.loadMediaSelectionGroup(for: .audible)
+            }
+            await player.stopAndWait()
+            XCTAssertNil(native.currentItem)
+            XCTAssertEqual(native.rate, 0)
+            XCTAssertNil(player.player)
+            XCTAssertNil(player.playlistURL())
+            XCTAssertEqual(player.status, .idle)
+            _ = await selection.result
+        }
+    }
+
+    func testFinalizedVODRemainsAvailableAfterPolicyChangesAndReload() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        defer { origin.stop() }
+        let player = ProxyHLSPlayer(configuration: .init(
+            bufferPolicy: .init(targetBufferSeconds: 1, maxPrefetchSegments: 1, hideUntilBuffered: false),
+            allowInsecureManifests: true
+        ))
+        // Identical updates must await initialization without preventing the first load.
+        await player.updateConfiguration(player.configuration)
+        await player.load(from: origin.fixturePlaylistURL(named: "short-a"))
+        let firstItem = try XCTUnwrap(player.player?.currentItem)
+        let firstAsset = try XCTUnwrap(player.player?.currentItem?.asset as? AVURLAsset)
+        XCTAssertEqual(firstAsset.url.path, "/variants/main.m3u8")
+        let (mediaData, _) = try await URLSession.shared.data(from: firstAsset.url)
+        let mediaText = String(decoding: mediaData, as: UTF8.self)
+        XCTAssertTrue(mediaText.contains("#EXT-X-PLAYLIST-TYPE:VOD"))
+        XCTAssertFalse(mediaText.contains("#EXT-X-STREAM-INF"))
+        let firstURL = try await firstSegmentURL(for: player)
+        let (firstData, _) = try await URLSession.shared.data(from: firstURL)
+        XCTAssertFalse(firstData.isEmpty)
+        var configuration = player.configuration
+        configuration.bufferPolicy.maxPrefetchSegments = 3
+        configuration.networkPolicy = .init(requestTimeout: 7, maximumConnectionsPerHost: 2)
+        await player.updateConfiguration(configuration)
+        await player.updateConfiguration(configuration)
+        XCTAssertTrue(player.player?.currentItem === firstItem)
+        XCTAssertEqual(player.configuration, configuration)
+        let retainedURL = try await firstSegmentURL(for: player)
+        XCTAssertEqual(retainedURL, firstURL)
+        let (retainedData, _) = try await URLSession.shared.data(from: retainedURL)
+        XCTAssertEqual(retainedData, firstData)
+
+        // The publication shortcut must never reuse the previous load's manifest.
+        await player.load(from: origin.fixturePlaylistURL(named: "short-b"))
+        let nextURL = try await firstSegmentURL(for: player)
+        XCTAssertNotEqual(nextURL, firstURL)
+        let (nextData, _) = try await URLSession.shared.data(from: nextURL)
+        XCTAssertFalse(nextData.isEmpty)
+        XCTAssertNotEqual(nextData, firstData)
+        // A subsequent live load must return to the normal master route.
+        await player.load(from: origin.fixturePlaylistURL(named: "live"))
+        let liveAsset = try XCTUnwrap(player.player?.currentItem?.asset as? AVURLAsset)
+        XCTAssertEqual(liveAsset.url, player.playlistURL())
         await player.stopAndWait()
     }
 
@@ -342,7 +554,70 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         await player.stopAndWait()
     }
 
+    func testEndedAlternatePlaylistsAreNotRefetched() async throws {
+        try await assertAlternateRefreshStops(endAfter: 1)
+    }
+
+    func testLiveAlternatePlaylistsRefreshUntilEndlist() async throws {
+        try await assertAlternateRefreshStops(endAfter: 3)
+    }
+
+    func testEndedPlaylistStateDoesNotSuppressRefreshAfterReload() async throws {
+        let player = ProxyHLSPlayer(configuration: .init(
+            bufferPolicy: .init(targetBufferSeconds: 2, maxPrefetchSegments: 2,
+                                hideUntilBuffered: false, refreshInterval: 0.5),
+            allowInsecureManifests: true
+        ))
+        for endAfter in [1, 3] {
+            let origin = AdaptiveMockOriginServer(
+                includeAlternateRenditions: true, alternateEndAfterRequests: endAfter,
+                includeSupplementalResources: true
+            )
+            try await origin.start()
+            await player.load(from: origin.manifestURL, quality: .automatic)
+            try await Task.sleep(for: .seconds(Double(endAfter) * 0.5 + 1.5))
+            let counts = origin.alternateRequestCounts()
+            for path in ["/audio-en.m3u8", "/subs-en.m3u8", "/iframe.m3u8"] {
+                XCTAssertEqual(counts[path], endAfter, path)
+            }
+            await player.stopAndWait()
+            origin.stop()
+        }
+    }
+
+    private func assertAlternateRefreshStops(endAfter: Int) async throws {
+        let origin = AdaptiveMockOriginServer(
+            includeAlternateRenditions: true, alternateEndAfterRequests: endAfter,
+            includeSupplementalResources: true
+        )
+        try await origin.start()
+        defer { origin.stop() }
+        let player = ProxyHLSPlayer(configuration: .init(
+            bufferPolicy: .init(targetBufferSeconds: 2, maxPrefetchSegments: 2,
+                                hideUntilBuffered: false, refreshInterval: 0.5),
+            allowInsecureManifests: true
+        ))
+        await player.load(from: origin.manifestURL, quality: .automatic)
+        // Observe multiple refresh periods after each rendition should have ended.
+        try await Task.sleep(for: .seconds(Double(endAfter) * 0.5 + 1.5))
+        let counts = origin.alternateRequestCounts()
+        XCTAssertEqual(counts["/audio-en.m3u8"], endAfter)
+        XCTAssertEqual(counts["/subs-en.m3u8"], endAfter)
+        XCTAssertEqual(counts["/iframe.m3u8"], endAfter)
+        XCTAssertEqual(player.audioRenditions.count, 1)
+        XCTAssertEqual(player.subtitleRenditions.count, 1)
+        await player.stopAndWait()
+    }
+
     func testExposesAlternateRenditionsAndSelection() async throws {
+        try await assertAlternateRenditionsAndSelection(serverPool: nil)
+    }
+
+    func testExposesAlternateRenditionsAndSelectionWithSharedListener() async throws {
+        try await assertAlternateRenditionsAndSelection(serverPool: ProxyServerPool())
+    }
+
+    private func assertAlternateRenditionsAndSelection(serverPool: ProxyServerPool?) async throws {
         let origin = AdaptiveMockOriginServer(includeAlternateRenditions: true)
         try await origin.start()
         try await waitForOriginReachability(origin.manifestURL)
@@ -359,7 +634,7 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
             bufferPolicy: .init(targetBufferSeconds: 2, maxPrefetchSegments: 2, hideUntilBuffered: false),
             allowInsecureManifests: true
         )
-        let player = ProxyHLSPlayer(configuration: configuration, diagnostics: diagnostics)
+        let player = ProxyHLSPlayer(configuration: configuration, diagnostics: diagnostics, serverPool: serverPool)
 
         await player.load(from: origin.manifestURL, quality: .automatic)
 
@@ -398,11 +673,19 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
     }
 
     func testSupplementalMasterResourcesStayOnLoopback() async throws {
+        try await assertSupplementalMasterResourcesStayOnLoopback(serverPool: nil)
+    }
+
+    func testSupplementalMasterResourcesStayOnLoopbackWithSharedListener() async throws {
+        try await assertSupplementalMasterResourcesStayOnLoopback(serverPool: ProxyServerPool())
+    }
+
+    private func assertSupplementalMasterResourcesStayOnLoopback(serverPool: ProxyServerPool?) async throws {
         let origin = AdaptiveMockOriginServer(includeSupplementalResources: true)
         try await origin.start()
         try await waitForOriginReachability(origin.manifestURL)
         defer { origin.stop() }
-        let player = ProxyHLSPlayer(configuration: .init(allowInsecureManifests: true))
+        let player = ProxyHLSPlayer(configuration: .init(allowInsecureManifests: true), serverPool: serverPool)
 
         await player.load(from: origin.manifestURL)
         let masterURL = try XCTUnwrap(player.playlistURL())
@@ -440,6 +723,14 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
     }
 
     func testRewritesKeysInProxyMode() async throws {
+        try await assertRewritesKeysInProxyMode(serverPool: nil)
+    }
+
+    func testRewritesKeysInProxyModeWithSharedListener() async throws {
+        try await assertRewritesKeysInProxyMode(serverPool: ProxyServerPool())
+    }
+
+    private func assertRewritesKeysInProxyMode(serverPool: ProxyServerPool?) async throws {
         let keyURL = URL(string: "skd://asset/12345")!
         let origin = try MockOriginServer(keyURI: keyURL)
         try await origin.start()
@@ -460,7 +751,7 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
             allowInsecureManifests: true,
             drmPolicy: .proxy
         )
-        let player = ProxyHLSPlayer(configuration: configuration, diagnostics: diagnostics)
+        let player = ProxyHLSPlayer(configuration: configuration, diagnostics: diagnostics, serverPool: serverPool)
 
         await player.registerAuxiliaryAsset(
             data: keyData,

@@ -2,6 +2,82 @@ import XCTest
 @testable import HLSCore
 
 final class SegmentPrefetchSchedulerTests: XCTestCase {
+    func testPolicyRefreshDoesNotPrefetchConsumedSegmentsAgain() async throws {
+        let scheduler = SegmentPrefetchScheduler(configuration: .init(targetBufferSeconds: 4, maxSegments: 1))
+        let cache = HLSSegmentCache(capacityBytes: 1024)
+        let segments = try (1...3).map { sequence in
+            HLSSegment(url: try XCTUnwrap(URL(string: "https://cdn.test/\(sequence).ts")), duration: 4, sequence: sequence)
+        }
+        await scheduler.start(playlist: MediaPlaylist(targetDuration: 4, segments: segments),
+                              fetcher: MockSegmentSource(), cache: cache)
+        try await waitForReady(1, scheduler: scheduler)
+        await scheduler.consume(sequence: 1)
+        try await waitForReady(2, scheduler: scheduler)
+        await scheduler.enqueueUpcomingPlaylists([])
+        await scheduler.consume(sequence: 2)
+        try await waitForReady(3, scheduler: scheduler)
+        let state = await scheduler.bufferState()
+        XCTAssertEqual(state.readySequences, [3])
+        await scheduler.stop()
+    }
+
+    func testRewindRefetchesEvictedMediaAndContinuesForward() async throws {
+        let scheduler = SegmentPrefetchScheduler(configuration: .init(targetBufferSeconds: 4, maxSegments: 1))
+        let cache = HLSSegmentCache(capacityBytes: 1024)
+        let fetcher = MockSegmentSource()
+        let segments = try (1...3).map { sequence in
+            HLSSegment(url: try XCTUnwrap(URL(string: "https://cdn.test/\(sequence).ts")), duration: 4, sequence: sequence)
+        }
+        await scheduler.start(playlist: MediaPlaylist(targetDuration: 4, segments: segments), fetcher: fetcher, cache: cache)
+        try await waitForReady(1, scheduler: scheduler)
+        await scheduler.consume(sequence: 1)
+        try await waitForReady(2, scheduler: scheduler)
+        await scheduler.consume(sequence: 2)
+        try await waitForReady(3, scheduler: scheduler)
+        await cache.clear()
+        let repositioned = await scheduler.reposition(to: 1)
+        XCTAssertTrue(repositioned)
+        try await waitForReady(1, scheduler: scheduler)
+        let state = await scheduler.bufferState()
+        XCTAssertNil(state.playedThroughSequence)
+        XCTAssertEqual(state.readySequences, [1])
+        let firstFetches = await fetcher.count(for: 1)
+        XCTAssertEqual(firstFetches, 2, "Rewind must refetch bytes removed by cache pressure")
+        await scheduler.consume(sequence: 1)
+        try await waitForReady(2, scheduler: scheduler)
+        let secondFetches = await fetcher.count(for: 2)
+        XCTAssertEqual(secondFetches, 2)
+        let rejected = await scheduler.reposition(to: 999)
+        XCTAssertFalse(rejected)
+        let unchanged = await scheduler.bufferState()
+        XCTAssertEqual(unchanged.playedThroughSequence, 1)
+        await scheduler.stop()
+    }
+
+    func testConsumedPrimarySequenceDoesNotSuppressUpcomingPlaylist() async throws {
+        let scheduler = SegmentPrefetchScheduler(configuration: .init(targetBufferSeconds: 4, maxSegments: 1))
+        let cache = HLSSegmentCache(capacityBytes: 1024)
+        let primary = HLSSegment(url: try XCTUnwrap(URL(string: "https://cdn.test/current.ts")), duration: 4, sequence: 10)
+        let next = HLSSegment(url: try XCTUnwrap(URL(string: "https://cdn.test/next.ts")), duration: 4, sequence: 1)
+        await scheduler.enqueueUpcomingPlaylists([MediaPlaylist(targetDuration: 4, segments: [next])])
+        await scheduler.start(playlist: MediaPlaylist(targetDuration: 4, segments: [primary]), fetcher: MockSegmentSource(), cache: cache)
+        try await waitForReady(10, scheduler: scheduler)
+        await scheduler.consume(sequence: 10)
+        try await waitForReady(1, scheduler: scheduler)
+        let bytes = await cache.get(SegmentIdentity.key(for: next))
+        XCTAssertNotNil(bytes)
+        await scheduler.stop()
+    }
+
+    private func waitForReady(_ sequence: Int, scheduler: SegmentPrefetchScheduler) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while ContinuousClock.now < deadline {
+            if await scheduler.bufferState().readySequences.contains(sequence) { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("Expected sequence \(sequence) in forward buffer")
+    }
+
     func testUpcomingPlaylistsArePrefetched() async throws {
         let scheduler = SegmentPrefetchScheduler(configuration: .init(targetBufferSeconds: 12, maxSegments: 4))
         let cache = HLSSegmentCache(capacityBytes: 1_024)
@@ -283,8 +359,11 @@ private actor SchedulerCallbackGate {
 }
 
 private actor MockSegmentSource: SegmentSource {
+    private var counts: [Int: Int] = [:]
+    func count(for sequence: Int) -> Int { counts[sequence, default: 0] }
     func fetchSegment(_ segment: HLSSegment) async throws -> Data {
-        Data("\(segment.sequence)".utf8)
+        counts[segment.sequence, default: 0] += 1
+        return Data("\(segment.sequence)".utf8)
     }
 }
 

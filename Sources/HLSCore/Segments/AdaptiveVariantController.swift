@@ -1,6 +1,13 @@
 import Foundation
 
 public actor AdaptiveVariantController {
+    /// Native variants have stable playlists; AVPlayer chooses safe switch boundaries.
+    /// Rewritten playlists retain the existing boundary and one-step adaptation rules.
+    public enum AdaptationMode: Sendable {
+        case rewrittenPlaylist
+        case nativeVariants
+    }
+
     public struct Policy: Sendable, Equatable {
         public var minimumBitrateRatio: Double
         public var maximumBitrateRatio: Double
@@ -101,6 +108,7 @@ public actor AdaptiveVariantController {
         qualityPolicy: HLSRewriteConfiguration.QualityPolicy,
         throughputSample: ThroughputEstimator.Sample?,
         bufferState: BufferState,
+        adaptationMode: AdaptationMode = .rewrittenPlaylist,
         now: Date = Date()
     ) -> Decision {
         if case .locked = qualityPolicy {
@@ -123,7 +131,7 @@ public actor AdaptiveVariantController {
             return recordDecision(Decision(action: .hold, targetVariant: currentVariant, reason: .insufficientMetrics, timestamp: now))
         }
 
-        guard bufferState.playedThroughSequence != nil else {
+        guard adaptationMode == .nativeVariants || bufferState.playedThroughSequence != nil else {
             return recordDecision(Decision(action: .hold, targetVariant: currentVariant, reason: .boundaryReached, timestamp: now))
         }
 
@@ -133,8 +141,16 @@ public actor AdaptiveVariantController {
         }
 
         let lowerVariant = lowestVariant(below: currentIndex, in: sorted)
-        let higherVariant = highestVariant(above: currentIndex, in: sorted)
         let throughput = throughputSample.bitsPerSecond
+        let higherVariant: VariantPlaylist?
+        if adaptationMode == .nativeVariants {
+            // Bound the ceiling using origin transfer samples, never loopback speed.
+            higherVariant = sorted.dropFirst(currentIndex + 1).last {
+                shouldUpgrade(targetBitrate: bitrate(for: $0), throughput: throughput)
+            }
+        } else {
+            higherVariant = highestVariant(above: currentIndex, in: sorted)
+        }
 
         if bufferState.prefetchDepthSeconds > 0.1 || !bufferState.readySequences.isEmpty {
             hasEstablishedBufferWindow = true
@@ -145,7 +161,10 @@ public actor AdaptiveVariantController {
             return makeSwitchDecision(target: target, reason: .consecutiveFailures, now: now)
         }
 
-        if hasEstablishedBufferWindow,
+        // The scheduler window is not AVPlayer's native VOD playback buffer.
+        // Seeking or changing renditions can empty it while playback is healthy.
+        if adaptationMode == .rewrittenPlaylist,
+           hasEstablishedBufferWindow,
            bufferState.prefetchDepthSeconds <= 0.1,
            let target = lowerVariant {
             return makeSwitchDecision(target: target, reason: .bufferDepleted, now: now)

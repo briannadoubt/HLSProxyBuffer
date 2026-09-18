@@ -874,16 +874,20 @@ public final class PlaybackAnalyticsTimeline {
         )
     }
 
+    // The allowed values are immutable across attempts and events. Validate them
+    // once rather than rebuilding the catalog on every telemetry emission.
+    private static let dimensionCatalog = try? PlaybackAnalytics.DimensionCatalog(allowedValues: [
+        "cache_reuse": ["cold", "warm"],
+        "feed_intent": ["focused", "predicted"],
+        "media_kind": ["vod", "live", "stitched"],
+        "network_leg": ["none", "player_proxy", "proxy_origin"],
+        "cache_tier": ["none", "memory", "disk", "origin"],
+    ])
+
     private static func dimensions(
         from attribution: Attribution
     ) -> PlaybackAnalytics.Dimensions {
-        guard let catalog = try? PlaybackAnalytics.DimensionCatalog(allowedValues: [
-            "cache_reuse": ["cold", "warm"],
-            "feed_intent": ["focused", "predicted"],
-            "media_kind": ["vod", "live", "stitched"],
-            "network_leg": ["none", "player_proxy", "proxy_origin"],
-            "cache_tier": ["none", "memory", "disk", "origin"],
-        ]),
+        guard let catalog = dimensionCatalog,
         let dimensions = try? catalog.dimensions(from: [
             "cache_reuse": attribution.reuse.rawValue,
             "feed_intent": attribution.intent.rawValue,
