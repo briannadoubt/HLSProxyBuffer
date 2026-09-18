@@ -70,6 +70,48 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         await player.stopAndWait()
     }
 
+    func testBorrowedOriginSessionSurvivesPlayerReleaseAndSiblingPolicyChanges() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        defer { origin.stop() }
+        let configuration = ProxyPlayerConfiguration(
+            bufferPolicy: .init(targetBufferSeconds: 1, maxPrefetchSegments: 1, hideUntilBuffered: false),
+            allowInsecureManifests: true
+        )
+        let shared = configuration.networkPolicy.makeURLSession()
+        defer { shared.invalidateAndCancel() }
+        let sibling = ProxyHLSPlayer(configuration: configuration, originSession: shared)
+        for changesPolicy in [false, true] {
+            var borrower: ProxyHLSPlayer? = ProxyHLSPlayer(configuration: configuration, originSession: shared)
+            weak var released = borrower
+            await borrower?.load(from: origin.fixturePlaylistURL(named: "short-a"))
+            XCTAssertNotNil(borrower?.player?.currentItem)
+            if changesPolicy {
+                var updated = configuration
+                updated.networkPolicy = .init(requestTimeout: 7, maximumConnectionsPerHost: 2)
+                await borrower?.updateConfiguration(updated)
+                await borrower?.load(from: origin.fixturePlaylistURL(named: "short-b"))
+                XCTAssertNotNil(borrower?.player?.currentItem)
+            }
+            await borrower?.stopAndWait()
+            borrower = nil
+            for _ in 0..<100 where released != nil {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            XCTAssertNil(released, "Stopped borrowing player must release its session references")
+
+            // Both a direct session user and another player must remain functional.
+            let (manifest, response) = try await shared.data(from: origin.fixturePlaylistURL(named: "short-a"))
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+            XCTAssertTrue(String(decoding: manifest, as: UTF8.self).hasPrefix("#EXTM3U"))
+            await sibling.load(from: origin.fixturePlaylistURL(named: "short-b"))
+            let segment = try await firstSegmentURL(for: sibling)
+            let (body, _) = try await URLSession.shared.data(from: segment)
+            XCTAssertFalse(body.isEmpty)
+            await sibling.stopAndWait()
+        }
+    }
+
     func testStopDetachesRetainedNativePlayerAcrossRepeatedReloads() async throws {
         let origin = try FeedFixtureOrigin()
         try await origin.start()

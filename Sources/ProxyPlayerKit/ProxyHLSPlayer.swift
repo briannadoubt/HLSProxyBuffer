@@ -162,6 +162,7 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private let segmentCatalog = SegmentCatalog()
     @ObservationIgnored private let segmentFetcher: HLSSegmentFetcher
     @ObservationIgnored private var manifestSession: URLSession
+    @ObservationIgnored private var ownsOriginSession: Bool
     @ObservationIgnored private var appliedNetworkPolicy: HLSOriginNetworkPolicy
     @ObservationIgnored private var currentPlaylist: MediaPlaylist?
     @ObservationIgnored private var publishedImmutablePrimaryPlaylist: MediaPlaylist?
@@ -211,16 +212,21 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var playbackTimeline: [(sequence: Int, endTime: TimeInterval)] = []
     @ObservationIgnored private var lastPlaybackSequence: Int?
 
+    /// A supplied origin session is caller-owned and may be shared by a feed pool.
+    /// Configure it with the initial network policy. Changing that policy detaches
+    /// this player to a new owned session without invalidating the shared session.
     public init(
         configuration: ProxyPlayerConfiguration = .init(),
         logger: Logger = ProxyPlayerLogger(),
         diagnostics: ProxyPlayerDiagnostics = .init(),
         telemetry: HLSStreamingTelemetry = .init(),
-        sharedCache: HLSSegmentCache? = nil
+        sharedCache: HLSSegmentCache? = nil,
+        originSession: URLSession? = nil
     ) {
         self.configuration = configuration
         self.appliedNetworkPolicy = configuration.networkPolicy
-        let originSession = configuration.networkPolicy.makeURLSession()
+        self.ownsOriginSession = originSession == nil
+        let originSession = originSession ?? configuration.networkPolicy.makeURLSession()
         self.manifestSession = originSession
         let cacheDirectoryIdentifier = UUID().uuidString
         self.cacheDirectoryIdentifier = cacheDirectoryIdentifier
@@ -307,7 +313,7 @@ public final class ProxyHLSPlayer {
 
     deinit {
         telemetryObservationTask?.cancel()
-        manifestSession.invalidateAndCancel()
+        if ownsOriginSession { manifestSession.invalidateAndCancel() }
     }
 
     /// Ordered player-state changes with bounded buffering for non-SwiftUI consumers.
@@ -2098,10 +2104,12 @@ public final class ProxyHLSPlayer {
     private func applyConfiguration() async {
         if appliedNetworkPolicy != configuration.networkPolicy {
             let previousSession = manifestSession
+            let ownedPreviousSession = ownsOriginSession
             manifestSession = configuration.networkPolicy.makeURLSession()
+            ownsOriginSession = true
             appliedNetworkPolicy = configuration.networkPolicy
             await segmentFetcher.updateSession(manifestSession, networkPolicy: configuration.networkPolicy)
-            previousSession.finishTasksAndInvalidate()
+            if ownedPreviousSession { previousSession.finishTasksAndInvalidate() }
         }
         await segmentFetcher.updateNetworkPolicy(configuration.networkPolicy)
         await segmentFetcher.updateRetryPolicy(configuration.segmentRetryPolicy)
