@@ -165,6 +165,7 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var appliedNetworkPolicy: HLSOriginNetworkPolicy
     @ObservationIgnored private var currentPlaylist: MediaPlaylist?
     @ObservationIgnored private var publishedImmutablePrimaryPlaylist: MediaPlaylist?
+    @ObservationIgnored private var playsPrimaryMediaPlaylist = false
     @ObservationIgnored private var currentLiveWindow: HLSLiveWindow?
     @ObservationIgnored private var currentRewriteConfiguration: HLSRewriteConfiguration?
     @ObservationIgnored private var didPreparePlayerForCurrentLoad = false
@@ -661,6 +662,15 @@ public final class ProxyHLSPlayer {
         } ?? playlistResult.variants
         await adaptiveController.updateVariants(adaptiveVariants)
         let playlist = playlistResult.playlist
+        // Preserve a plain VOD source's media-playlist shape. A synthetic master
+        // adds a request and invents bandwidth metadata that the origin did not
+        // supply. Keep master routing when any master/rendition/encryption
+        // semantics need it, and for live or stitched timelines.
+        playsPrimaryMediaPlaylist = playlistResult.masterURL == nil
+            && playlist.isEndlist && playlist.playlistType == "VOD"
+            && playlistResult.variants.isEmpty && playlistResult.renditions.isEmpty
+            && playlistResult.masterSessionKeys.isEmpty && playlistResult.masterPassthroughTags.isEmpty
+            && playlist.sessionKeys.isEmpty && playlist.segments.allSatisfy { $0.encryption == nil }
         masterProtocolVersion = playlistResult.masterProtocolVersion
         masterIndependentSegments = playlistResult.masterIndependentSegments
         masterPassthroughTags = playlistResult.masterPassthroughTags
@@ -748,6 +758,7 @@ public final class ProxyHLSPlayer {
         generation: UInt64
     ) async throws {
         try ensureActiveSession(generation)
+        playsPrimaryMediaPlaylist = false
         didPublishInitialPlaylists = false
         if server.port == nil {
             try server.start()
@@ -2322,7 +2333,10 @@ public final class ProxyHLSPlayer {
         guard generation == sessionGeneration else { return }
 
         if !didPreparePlayerForCurrentLoad {
-            preparePlayer(with: rewriteConfiguration.playlistURL)
+            let playbackURL = playsPrimaryMediaPlaylist
+                ? rewriteConfiguration.proxyBaseURL.appendingPathComponent(PlaylistPaths.variant)
+                : rewriteConfiguration.playlistURL
+            preparePlayer(with: playbackURL)
             didPreparePlayerForCurrentLoad = true
         }
 

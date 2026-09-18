@@ -54,3 +54,13 @@ changes and replacement with the correct content on the next load.
 This removes redundant work by construction; it is not a claim that the remaining
 player readiness or CPU regressions are resolved. Device profiling and paired
 playback measurements are still required.
+
+## Preserve plain media-playlist input
+
+For unencrypted, finalized VOD media-playlist inputs with no master-level metadata
+or alternate renditions, the native player now opens the rewritten media playlist
+directly. This avoids an extra synthetic master request and a made-up bandwidth
+attribute. The public master endpoint remains available for existing clients.
+Actual master inputs, alternate renditions, encryption, live streams, and stitched
+clips continue through the master route. Reload coverage checks both direct-media
+selection and return to master routing for live content.

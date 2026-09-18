@@ -7,6 +7,8 @@ there is no separate runtime version constant to keep in sync.
 
 ## Unreleased
 
+- Preserve plain unencrypted VOD media-playlist input for native playback, avoiding synthetic master bandwidth metadata while retaining master/rendition/live routing where needed.
+
 - Reuse published full-segment finalized VOD playlists across buffer-state changes; invalidate on load changes and keep mutable/partial playlists dynamic.
 
 - Keep policy/playlist refreshes from prefetching already-consumed primary media.

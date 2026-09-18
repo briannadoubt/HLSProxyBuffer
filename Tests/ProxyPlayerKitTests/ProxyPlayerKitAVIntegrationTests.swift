@@ -79,6 +79,12 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
             allowInsecureManifests: true
         ))
         await player.load(from: origin.fixturePlaylistURL(named: "short-a"))
+        let firstAsset = try XCTUnwrap(player.player?.currentItem?.asset as? AVURLAsset)
+        XCTAssertEqual(firstAsset.url.path, "/variants/main.m3u8")
+        let (mediaData, _) = try await URLSession.shared.data(from: firstAsset.url)
+        let mediaText = String(decoding: mediaData, as: UTF8.self)
+        XCTAssertTrue(mediaText.contains("#EXT-X-PLAYLIST-TYPE:VOD"))
+        XCTAssertFalse(mediaText.contains("#EXT-X-STREAM-INF"))
         let firstURL = try await firstSegmentURL(for: player)
         let (firstData, _) = try await URLSession.shared.data(from: firstURL)
         XCTAssertFalse(firstData.isEmpty)
@@ -97,6 +103,10 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         let (nextData, _) = try await URLSession.shared.data(from: nextURL)
         XCTAssertFalse(nextData.isEmpty)
         XCTAssertNotEqual(nextData, firstData)
+        // A subsequent live load must return to the normal master route.
+        await player.load(from: origin.fixturePlaylistURL(named: "live"))
+        let liveAsset = try XCTUnwrap(player.player?.currentItem?.asset as? AVURLAsset)
+        XCTAssertEqual(liveAsset.url, player.playlistURL())
         await player.stopAndWait()
     }
 
