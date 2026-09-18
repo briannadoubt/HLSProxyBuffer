@@ -220,7 +220,8 @@ public final class ProxyHLSPlayer {
     ) {
         self.configuration = configuration
         self.appliedNetworkPolicy = configuration.networkPolicy
-        self.manifestSession = configuration.networkPolicy.makeURLSession()
+        let originSession = configuration.networkPolicy.makeURLSession()
+        self.manifestSession = originSession
         let cacheDirectoryIdentifier = UUID().uuidString
         self.cacheDirectoryIdentifier = cacheDirectoryIdentifier
         self.logger = logger
@@ -230,6 +231,7 @@ public final class ProxyHLSPlayer {
         self.throughputEstimator = ThroughputEstimator(configuration: .init(window: configuration.abrPolicy.estimatorWindow))
         self.adaptiveController = AdaptiveVariantController(policy: Self.abrPolicy(from: configuration), logger: logger)
         self.segmentFetcher = HLSSegmentFetcher(
+            session: originSession,
             validationPolicy: configuration.segmentValidation,
             networkPolicy: configuration.networkPolicy,
             retryPolicy: configuration.segmentRetryPolicy
@@ -2098,6 +2100,7 @@ public final class ProxyHLSPlayer {
             let previousSession = manifestSession
             manifestSession = configuration.networkPolicy.makeURLSession()
             appliedNetworkPolicy = configuration.networkPolicy
+            await segmentFetcher.updateSession(manifestSession, networkPolicy: configuration.networkPolicy)
             previousSession.finishTasksAndInvalidate()
         }
         await segmentFetcher.updateNetworkPolicy(configuration.networkPolicy)

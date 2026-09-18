@@ -122,6 +122,7 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         XCTAssertFalse(firstData.isEmpty)
         var configuration = player.configuration
         configuration.bufferPolicy.maxPrefetchSegments = 3
+        configuration.networkPolicy = .init(requestTimeout: 7, maximumConnectionsPerHost: 2)
         await player.updateConfiguration(configuration)
         await player.updateConfiguration(configuration)
         XCTAssertTrue(player.player?.currentItem === firstItem)
