@@ -64,6 +64,40 @@ final class ProxyServerPoolTests: XCTestCase {
         await second.closeAndWait()
     }
 
+    func testClientCancellationCancelsHandlerWithoutRetiringNamespace() async throws {
+        let entered = expectation(description: "client request entered route")
+        let cancelled = expectation(description: "client cancellation reached route")
+        let route = router(body: "still available")
+        route.register(path: "/slow") { _ in
+            entered.fulfill()
+            do {
+                try await Task.sleep(for: .seconds(30))
+                return HTTPResponse(status: .internalServerError)
+            } catch {
+                cancelled.fulfill()
+                return HTTPResponse(status: .serviceUnavailable)
+            }
+        }
+        let pool = ProxyServerPool()
+        let lease = try await pool.reserve(router: route)
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let request = Task { try await session.data(from: lease.baseURL.appendingPathComponent("slow")) }
+        await fulfillment(of: [entered], timeout: 2)
+        request.cancel()
+        do {
+            _ = try await request.value
+            XCTFail("Cancelled HTTP client must not receive a successful response")
+        } catch {
+            XCTAssertTrue(error is CancellationError || (error as? URLError)?.code == .cancelled)
+        }
+        await fulfillment(of: [cancelled], timeout: 2)
+        let (body, response) = try await session.data(from: lease.baseURL.appendingPathComponent("media"))
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(String(decoding: body, as: UTF8.self), "still available")
+        await lease.closeAndWait()
+    }
+
     func testConcurrentReservationsUseOneListenerAndCancelledAdmissionLeaksNoSlot() async throws {
         let pool = ProxyServerPool(maximumSessions: 4)
         let routes = (0..<4).map { router(body: "stream-\($0)") }
