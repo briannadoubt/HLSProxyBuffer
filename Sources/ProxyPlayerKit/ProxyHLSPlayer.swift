@@ -2230,13 +2230,14 @@ public final class ProxyHLSPlayer {
                 "scheduled=\(schedulerTelemetry.scheduledSequences) ready=\(schedulerTelemetry.readyCount) parts=\(schedulerTelemetry.readyPartCount) failures=\(schedulerTelemetry.failureCount)",
                 category: .scheduler
             )
+            let cacheMetrics = await cache.metrics()
             await metrics.updateSchedulerTelemetry(
                 scheduledCount: schedulerTelemetry.scheduledSequences.count,
                 readyCount: schedulerTelemetry.readyCount,
                 failureCount: schedulerTelemetry.failureCount,
-                readyPartCount: schedulerTelemetry.readyPartCount
+                readyPartCount: schedulerTelemetry.readyPartCount,
+                cacheMetrics: cacheMetrics
             )
-            await metrics.updateCacheMetrics(cache.metrics())
             guard schedulerTelemetry.failureCount > 0 else { return }
             await controller.registerFailure()
             guard let player = await MainActor.run(resultType: ProxyHLSPlayer?.self, body: { self }) else { return }

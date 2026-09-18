@@ -237,17 +237,20 @@ public actor HLSStreamingTelemetry {
         publish()
     }
 
+    /// Optionally publish matching cache counters in the same coherent snapshot.
     public func updateSchedulerTelemetry(
         scheduledCount: Int,
         readyCount: Int,
         failureCount: Int,
-        readyPartCount: Int
+        readyPartCount: Int,
+        cacheMetrics: HLSSegmentCache.Metrics? = nil
     ) {
+        let cacheChanged = cacheMetrics.map { applyCacheMetrics($0) } ?? false
         let scheduled = max(0, scheduledCount)
         let ready = max(0, readyCount)
         let failures = max(0, failureCount)
         let readyParts = max(0, readyPartCount)
-        guard schedulerScheduledCount != scheduled
+        guard cacheChanged || schedulerScheduledCount != scheduled
                 || schedulerReadyCount != ready
                 || schedulerFailureCount != failures
                 || schedulerReadyPartCount != readyParts
@@ -262,18 +265,20 @@ public actor HLSStreamingTelemetry {
     }
 
     public func updateCacheMetrics(_ metrics: HLSSegmentCache.Metrics) {
+        if applyCacheMetrics(metrics) { publish() }
+    }
+
+    private func applyCacheMetrics(_ metrics: HLSSegmentCache.Metrics) -> Bool {
         guard cacheHitCount != metrics.hitCount
                 || cacheMissCount != metrics.missCount
                 || memoryCacheHitCount != metrics.memoryHitCount
                 || diskCacheHitCount != metrics.diskHitCount
-        else {
-            return
-        }
+        else { return false }
         cacheHitCount = metrics.hitCount
         cacheMissCount = metrics.missCount
         memoryCacheHitCount = metrics.memoryHitCount
         diskCacheHitCount = metrics.diskHitCount
-        publish()
+        return true
     }
 
     public func updateLiveEdgeDistance(_ distance: TimeInterval?) {

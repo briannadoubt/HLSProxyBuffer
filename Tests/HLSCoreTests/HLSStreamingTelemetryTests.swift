@@ -2,6 +2,47 @@ import XCTest
 @testable import HLSCore
 
 final class HLSStreamingTelemetryTests: XCTestCase {
+    func testSchedulerPublicationIncludesMatchingCacheCounters() async {
+        let telemetry = HLSStreamingTelemetry()
+        var iterator = await telemetry.updates().makeAsyncIterator()
+        _ = await iterator.next()
+        await telemetry.updateSchedulerTelemetry(
+            scheduledCount: 3, readyCount: 2, failureCount: 1, readyPartCount: 4,
+            cacheMetrics: .init(hitCount: 7, missCount: 3, memoryHitCount: 5,
+                                diskHitCount: 2, totalBytes: 100, diskBytes: 20)
+        )
+        let published = await iterator.next()
+        XCTAssertEqual(published?.schedulerScheduledCount, 3)
+        XCTAssertEqual(published?.schedulerReadyCount, 2)
+        XCTAssertEqual(published?.schedulerFailureCount, 1)
+        XCTAssertEqual(published?.schedulerReadyPartCount, 4)
+        XCTAssertEqual(published?.cacheHitCount, 7)
+        XCTAssertEqual(published?.cacheMissCount, 3)
+        XCTAssertEqual(published?.memoryCacheHitCount, 5)
+        XCTAssertEqual(published?.diskCacheHitCount, 2)
+
+        // A cache-only change must publish even when scheduler gauges are unchanged.
+        await telemetry.updateSchedulerTelemetry(
+            scheduledCount: 3, readyCount: 2, failureCount: 1, readyPartCount: 4,
+            cacheMetrics: .init(hitCount: 8, missCount: 4, memoryHitCount: 6,
+                                diskHitCount: 2, totalBytes: 100, diskBytes: 20)
+        )
+        let cacheOnly = await iterator.next()
+        XCTAssertEqual(cacheOnly?.cacheHitCount, 8)
+        XCTAssertEqual(cacheOnly?.cacheMissCount, 4)
+        XCTAssertEqual(cacheOnly?.schedulerReadyCount, 2)
+
+        // Legacy scheduler-only updates preserve previously accumulated cache counters.
+        await telemetry.updateSchedulerTelemetry(scheduledCount: -1, readyCount: 0, failureCount: 0, readyPartCount: 0)
+        let schedulerOnly = await iterator.next()
+        XCTAssertEqual(schedulerOnly?.schedulerScheduledCount, 0)
+        XCTAssertEqual(schedulerOnly?.cacheHitCount, 8)
+        await telemetry.reset()
+        let reset = await iterator.next()
+        XCTAssertEqual(reset?.cacheHitCount, 0)
+        XCTAssertEqual(reset?.schedulerReadyCount, 0)
+    }
+
     func testAggregatesLatencyErrorsAndRetryOutcomesWithoutSamples() async {
         let telemetry = HLSStreamingTelemetry(configuration: .init(
             latencyUpperBounds: [0.1, 0.5],
