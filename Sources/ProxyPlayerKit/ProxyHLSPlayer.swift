@@ -1612,6 +1612,7 @@ public final class ProxyHLSPlayer {
         for task in renditionRefreshTasks.values { task.cancel() }
         renditionRefreshTasks.removeAll()
         for info in orderedRenditionInfos where info.remoteURI != nil {
+            guard renditionPlaylists[info.rendition.id]?.isEndlist != true else { continue }
             let interval = max(
                 0.5,
                 min(renditionPlaylists[info.rendition.id]?.targetDuration ?? configuration.bufferPolicy.refreshInterval,
@@ -1625,7 +1626,9 @@ public final class ProxyHLSPlayer {
                         return
                     }
                     guard let self, generation == self.sessionGeneration else { return }
+                    guard self.renditionPlaylists[info.rendition.id]?.isEndlist != true else { return }
                     _ = await self.fetchRenditionPlaylist(info: info, config: config)
+                    if self.renditionPlaylists[info.rendition.id]?.isEndlist == true { return }
                 }
             }
         }

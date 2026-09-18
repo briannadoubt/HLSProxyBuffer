@@ -143,6 +143,8 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
     private let includeSupplementalResources: Bool
     private let closedCaptionGroup: String?
     private let declaresClosedCaptionGroup: Bool
+    private let alternateEndAfterRequests: Int
+    private var alternateRequests: [String: Int] = [:]
     private let audioPlaylistPath = "/audio-en.m3u8"
     private let subtitlePlaylistPath = "/subs-en.m3u8"
     private var audioSegments: [String: Data] = [:]
@@ -156,6 +158,7 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
         segmentDuration: TimeInterval = 2,
         segmentSize: Int = 512,
         includeAlternateRenditions: Bool = false,
+        alternateEndAfterRequests: Int = 1,
         includeSupplementalResources: Bool = false,
         closedCaptionGroup: String? = nil,
         declaresClosedCaptionGroup: Bool = false
@@ -166,6 +169,7 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
         self.failureAfterSequence = failureAfterSequence
         self.segmentDuration = segmentDuration
         self.segmentSize = segmentSize
+        self.alternateEndAfterRequests = alternateEndAfterRequests
         self.includeAlternateRenditions = includeAlternateRenditions
         self.includeSupplementalResources = includeSupplementalResources
         if includeAlternateRenditions {
@@ -208,6 +212,18 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
     func stop() {
         listener?.cancel()
         listener = nil
+    }
+
+    func alternateRequestCounts() -> [String: Int] {
+        queue.sync { alternateRequests }
+    }
+
+    private func alternateManifest(_ manifest: String, path: String) -> String {
+        alternateRequests[path, default: 0] += 1
+        if alternateRequests[path, default: 0] < alternateEndAfterRequests {
+            return manifest.replacingOccurrences(of: "#EXT-X-ENDLIST", with: "")
+        }
+        return manifest
     }
 
     func didServeLowVariant() -> Bool {
@@ -269,11 +285,11 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
         }
 
         if includeAlternateRenditions && path == audioPlaylistPath {
-            return HTTPResponse.text(audioPlaylist, contentType: "application/x-mpegURL").encoded()
+            return HTTPResponse.text(alternateManifest(audioPlaylist, path: audioPlaylistPath), contentType: "application/x-mpegURL").encoded()
         }
 
         if includeAlternateRenditions && path == subtitlePlaylistPath {
-            return HTTPResponse.text(subtitlePlaylist, contentType: "application/x-mpegURL").encoded()
+            return HTTPResponse.text(alternateManifest(subtitlePlaylist, path: subtitlePlaylistPath), contentType: "application/x-mpegURL").encoded()
         }
 
         if path.hasPrefix("/high-seq-") {
