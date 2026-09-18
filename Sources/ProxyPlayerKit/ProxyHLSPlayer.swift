@@ -1776,7 +1776,16 @@ public final class ProxyHLSPlayer {
             attributes.append("SUBTITLES=\"\(subtitleGroup)\"")
         }
         if let captions = data?.closedCaptionGroupId {
-            attributes.append("CLOSED-CAPTIONS=\"\(captions)\"")
+            // NONE is an enumerated value, unless it names an actual caption
+            // group. Quoting the sentinel makes AVPlayer require a missing group.
+            let namesCaptionGroup = orderedRenditionInfos.contains {
+                $0.rendition.type == .closedCaptions && $0.rendition.groupId == captions
+            }
+            if captions == "NONE", !namesCaptionGroup {
+                attributes.append("CLOSED-CAPTIONS=NONE")
+            } else {
+                attributes.append("CLOSED-CAPTIONS=\"\(captions)\"")
+            }
         }
         for (key, value) in data?.additionalAttributes.sorted(by: { $0.key < $1.key }) ?? [] {
             switch key {

@@ -103,6 +103,31 @@ final class ProxyPlayerKitObservationTests: XCTestCase {
         await player.stopAndWait()
     }
 
+    func testMasterPreservesCaptionSentinelAndNamedGroups() async throws {
+        for (group, declared) in [("NONE", false), ("cc-main", true), ("NONE", true)] {
+            let origin = AdaptiveMockOriginServer(
+                closedCaptionGroup: group, declaresClosedCaptionGroup: declared
+            )
+            try await origin.start()
+            defer { origin.stop() }
+            let player = ProxyHLSPlayer(configuration: .init(allowInsecureManifests: true))
+            await player.load(from: origin.manifestURL)
+            let url = try XCTUnwrap(player.playlistURL())
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let master = String(decoding: data, as: UTF8.self)
+            let expected = declared ? "CLOSED-CAPTIONS=\"\(group)\"" : "CLOSED-CAPTIONS=NONE"
+            let variants = master.split(separator: "\n").filter { $0.hasPrefix("#EXT-X-STREAM-INF:") }
+            XCTAssertFalse(variants.isEmpty)
+            XCTAssertTrue(variants.allSatisfy { $0.hasSuffix(expected) }, master)
+            if declared {
+                XCTAssertTrue(master.contains("TYPE=CLOSED-CAPTIONS,GROUP-ID=\"\(group)\""), master)
+            } else {
+                XCTAssertFalse(master.contains("CLOSED-CAPTIONS=\"NONE\""), master)
+            }
+            await player.stopAndWait()
+        }
+    }
+
     func testAsyncStateStreamDeliversOrderedLifecycleAndStopWaitsForCleanup() async throws {
         let origin = try MockOriginServer(segmentCount: 2)
         try await origin.start()

@@ -141,6 +141,8 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
     private var lowSegmentRequests = 0
     private let includeAlternateRenditions: Bool
     private let includeSupplementalResources: Bool
+    private let closedCaptionGroup: String?
+    private let declaresClosedCaptionGroup: Bool
     private let audioPlaylistPath = "/audio-en.m3u8"
     private let subtitlePlaylistPath = "/subs-en.m3u8"
     private var audioSegments: [String: Data] = [:]
@@ -154,8 +156,12 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
         segmentDuration: TimeInterval = 2,
         segmentSize: Int = 512,
         includeAlternateRenditions: Bool = false,
-        includeSupplementalResources: Bool = false
+        includeSupplementalResources: Bool = false,
+        closedCaptionGroup: String? = nil,
+        declaresClosedCaptionGroup: Bool = false
     ) {
+        self.closedCaptionGroup = closedCaptionGroup
+        self.declaresClosedCaptionGroup = declaresClosedCaptionGroup
         self.segmentCount = segmentCount
         self.failureAfterSequence = failureAfterSequence
         self.segmentDuration = segmentDuration
@@ -330,6 +336,14 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
         if includeAlternateRenditions {
             streamAttributesHigh += ",AUDIO=\"audio-main\",SUBTITLES=\"subs-main\""
             streamAttributesLow += ",AUDIO=\"audio-main\",SUBTITLES=\"subs-main\""
+        }
+        if let closedCaptionGroup {
+            let value = declaresClosedCaptionGroup ? "\"\(closedCaptionGroup)\"" : closedCaptionGroup
+            if declaresClosedCaptionGroup {
+                lines.append("#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID=\"\(closedCaptionGroup)\",NAME=\"English\",INSTREAM-ID=\"CC1\"")
+            }
+            streamAttributesHigh += ",CLOSED-CAPTIONS=\(value)"
+            streamAttributesLow += ",CLOSED-CAPTIONS=\(value)"
         }
         lines.append("#EXT-X-STREAM-INF:\(streamAttributesHigh)")
         lines.append("/high.m3u8")
