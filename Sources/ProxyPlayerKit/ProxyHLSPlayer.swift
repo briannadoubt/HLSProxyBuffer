@@ -910,6 +910,9 @@ public final class ProxyHLSPlayer {
         removePlaybackTimeObserver()
         rebuildPlaybackTimeline()
         let item = AVPlayerItem(url: url)
+        if let duration = configuration.bufferPolicy.initialNativeBufferDuration {
+            item.preferredForwardBufferDuration = duration
+        }
         if !resolvedVODVariants.isEmpty {
             item.preferredPeakBitRate = nativeVODBitrateCeiling(for: activeVariant)
         }

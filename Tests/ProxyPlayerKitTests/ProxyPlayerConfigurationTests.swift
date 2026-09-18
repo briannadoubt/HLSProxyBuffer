@@ -3,6 +3,20 @@ import XCTest
 @testable import HLSCore
 
 final class ProxyPlayerConfigurationTests: XCTestCase {
+    func testInitialNativeBufferDurationAcceptsSystemDefaultAndFiniteNonnegativeHints() throws {
+        var configuration = ProxyPlayerConfiguration()
+        XCTAssertNil(configuration.bufferPolicy.initialNativeBufferDuration)
+        for duration in [0.0, 2.0, 30.0] {
+            configuration.bufferPolicy.initialNativeBufferDuration = duration
+            XCTAssertNoThrow(try configuration.validate())
+        }
+        for duration in [-1.0, .nan, .infinity, -.infinity] {
+            configuration.bufferPolicy.initialNativeBufferDuration = duration
+            XCTAssertEqual(configuration.validationIssues, [.initialNativeBufferDurationIsInvalid])
+            XCTAssertThrowsError(try configuration.validate())
+        }
+    }
+
     func testEveryPresetPassesPublicValidation() throws {
         for preset in ProxyPlayerConfiguration.Preset.allCases {
             let configuration = ProxyPlayerConfiguration.preset(preset)

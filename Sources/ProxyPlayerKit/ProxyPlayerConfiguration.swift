@@ -12,6 +12,7 @@ public struct ProxyPlayerConfiguration: Sendable, Equatable {
 
     public enum ValidationIssue: String, CaseIterable, Sendable {
         case targetBufferMustBePositive
+        case initialNativeBufferDurationIsInvalid
         case prefetchSegmentCountMustBePositive
         case refreshIntervalMustBePositive
         case refreshBackoffMustCoverInterval
@@ -49,6 +50,9 @@ public struct ProxyPlayerConfiguration: Sendable, Equatable {
     }
 
     public struct BufferPolicy: Sendable, Equatable {
+        /// Applied to each new native item before attachment. Nil preserves
+        /// AVFoundation's default; later caller-owned visibility hints are untouched.
+        public var initialNativeBufferDuration: TimeInterval?
         public var targetBufferSeconds: TimeInterval
         public var maxPrefetchSegments: Int
         public var hideUntilBuffered: Bool
@@ -60,8 +64,10 @@ public struct ProxyPlayerConfiguration: Sendable, Equatable {
             maxPrefetchSegments: Int = 6,
             hideUntilBuffered: Bool = false,
             refreshInterval: TimeInterval = 2,
-            maxRefreshBackoff: TimeInterval = 8
+            maxRefreshBackoff: TimeInterval = 8,
+            initialNativeBufferDuration: TimeInterval? = nil
         ) {
+            self.initialNativeBufferDuration = initialNativeBufferDuration
             self.targetBufferSeconds = targetBufferSeconds
             self.maxPrefetchSegments = maxPrefetchSegments
             self.hideUntilBuffered = hideUntilBuffered
@@ -390,6 +396,9 @@ public struct ProxyPlayerConfiguration: Sendable, Equatable {
             when: !bufferPolicy.targetBufferSeconds.isFinite
                 || bufferPolicy.targetBufferSeconds <= 0
         )
+        if let duration = bufferPolicy.initialNativeBufferDuration {
+            record(.initialNativeBufferDurationIsInvalid, when: !duration.isFinite || duration < 0)
+        }
         record(.prefetchSegmentCountMustBePositive, when: bufferPolicy.maxPrefetchSegments < 1)
         record(
             .refreshIntervalMustBePositive,

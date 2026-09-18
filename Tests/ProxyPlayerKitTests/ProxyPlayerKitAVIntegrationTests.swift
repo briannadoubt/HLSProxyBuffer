@@ -16,6 +16,34 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         }
     }
 
+    func testInitialNativeBufferHintAppliesToNewItemsWithoutOverwritingVisibilityHints() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        defer { origin.stop() }
+        for duration: Double? in [nil, 0, 2] {
+            var configuration = ProxyPlayerConfiguration(
+                bufferPolicy: .init(targetBufferSeconds: 1, maxPrefetchSegments: 1,
+                                    hideUntilBuffered: false, initialNativeBufferDuration: duration),
+                allowInsecureManifests: true
+            )
+            let player = ProxyHLSPlayer(configuration: configuration)
+            await player.load(from: origin.fixturePlaylistURL(named: "short-a"))
+            let item = try XCTUnwrap(player.player?.currentItem)
+            XCTAssertEqual(item.preferredForwardBufferDuration, duration ?? 0)
+            item.preferredForwardBufferDuration = 5
+            configuration.bufferPolicy.maxPrefetchSegments = 2
+            await player.updateConfiguration(configuration)
+            XCTAssertTrue(player.player?.currentItem === item)
+            XCTAssertEqual(item.preferredForwardBufferDuration, 5,
+                           "Unrelated policy updates must preserve caller-owned visibility hints")
+            await player.load(from: origin.fixturePlaylistURL(named: "short-b"))
+            let replacement = try XCTUnwrap(player.player?.currentItem)
+            XCTAssertFalse(replacement === item)
+            XCTAssertEqual(replacement.preferredForwardBufferDuration, duration ?? 0)
+            await player.stopAndWait()
+        }
+    }
+
     func testAVPlayerHitsProxyPlaylistAndSegments() async throws {
         let origin = try MockOriginServer()
         try await origin.start()
