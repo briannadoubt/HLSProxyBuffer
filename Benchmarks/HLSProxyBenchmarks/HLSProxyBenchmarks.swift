@@ -32,7 +32,11 @@ private enum HLSProxyBenchmarks {
     private static let segmentCount = 128
     private static let iterations = 1_000_000
 
-    static func main() async {
+    static func main() async throws {
+        if CommandLine.arguments.contains("--loopback") {
+            try await runLoopbackBenchmark()
+            return
+        }
         runFeedPlannerBenchmark()
 
         let segments = (0..<segmentCount).map { sequence in
@@ -89,6 +93,35 @@ private enum HLSProxyBenchmarks {
                 "\(result.name): \(String(format: "%.2f", result.operationsPerSecond)) ops/s "
                     + "(\(String(format: "%.2f", milliseconds)) ms, \(result.iterations) operations)"
             )
+        }
+    }
+
+    private static func runLoopbackBenchmark() async throws {
+        for size in [128, 256 * 1024] {
+            let payload = Data(repeating: 0x5a, count: size)
+            let router = ProxyRouter()
+            router.register(path: "/payload") { _ in
+                HTTPResponse(status: .ok, headers: ["Cache-Control": "no-store"], body: payload)
+            }
+            let server = ProxyServer(router: router)
+            let base = try await server.startAndWait()
+            defer { server.stop() }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.urlCache = nil
+            configuration.httpMaximumConnectionsPerHost = 1
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel() }
+            var samples: [Double] = []
+            for index in -4..<20 {
+                let start = clock.now
+                let (data, response) = try await session.data(from: base.appendingPathComponent("payload"))
+                guard data == payload, (response as? HTTPURLResponse)?.statusCode == 200 else {
+                    throw URLError(.badServerResponse)
+                }
+                if index >= 0 { samples.append(start.duration(to: clock.now).seconds * 1_000) }
+            }
+            let json = try JSONSerialization.data(withJSONObject: ["bytes": size, "latencyMS": samples], options: [.sortedKeys])
+            print("LOOPBACK_BENCHMARK \(String(decoding: json, as: UTF8.self))")
         }
     }
 

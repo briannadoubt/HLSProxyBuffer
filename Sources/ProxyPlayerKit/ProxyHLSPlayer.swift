@@ -942,6 +942,14 @@ public final class ProxyHLSPlayer {
     private func consumePlayedSegments(through seconds: TimeInterval) async {
         publishLivePlayback(playbackTime: seconds)
         let played = playbackTimeline.last(where: { $0.endTime <= seconds })?.sequence
+        if let previous = lastPlaybackSequence,
+           played.map({ $0 < previous }) ?? true,
+           let destination = playbackTimeline.first(where: { $0.endTime > seconds })?.sequence {
+            // Native AVPlayer controls can seek/loop without going through our API.
+            lastPlaybackSequence = played
+            await scheduler.reposition(to: destination)
+            return
+        }
         guard let played, played != lastPlaybackSequence else { return }
         lastPlaybackSequence = played
         await scheduler.consume(sequence: played)

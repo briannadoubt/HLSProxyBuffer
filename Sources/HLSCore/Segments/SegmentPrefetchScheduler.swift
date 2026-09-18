@@ -80,6 +80,7 @@ public actor SegmentPrefetchScheduler {
     private var upcomingPlaylists: [MediaPlaylist] = []
     private var activePlaylist: MediaPlaylist?
     private var combinedItems: [PrefetchItem] = []
+    private var primaryItemCount = 0
     private var nextPrefetchIndex = 0
     private var activeFetcher: (any SegmentSource)?
     private var activeCache: HLSSegmentCache?
@@ -157,6 +158,7 @@ public actor SegmentPrefetchScheduler {
         prefetchTask = nil
         activePlaylist = nil
         combinedItems.removeAll()
+        primaryItemCount = 0
         nextPrefetchIndex = 0
         activeFetcher = nil
         activeCache = nil
@@ -186,6 +188,29 @@ public actor SegmentPrefetchScheduler {
         reconcilePrefetchIndex()
         publishState()
         schedulePrefetchIfNeeded()
+    }
+
+    /// Rebuilds the forward window after a seek, including backward seeks and
+    /// looping. Cached bytes are retained, but readiness is revalidated against
+    /// the cache so eviction cannot leave a falsely full forward window.
+    /// Returns false without changing state if the sequence is not in the active playlist.
+    @discardableResult
+    public func reposition(to sequence: Int) -> Bool {
+        guard let playlist = activePlaylist,
+              let index = playlist.segments.firstIndex(where: { $0.sequence == sequence }) else { return false }
+        generation &+= 1
+        prefetchTask?.cancel()
+        prefetchTask = nil
+        readySequences.removeAll()
+        readyDurations.removeAll()
+        readyPartsBySequence.removeAll()
+        readyPartDurations.removeAll()
+        lastConsumedSequence = playlist.segments.prefix(index).last?.sequence
+        consecutiveFailureCycles = 0
+        reconcilePrefetchIndex()
+        publishState()
+        schedulePrefetchIfNeeded()
+        return true
     }
 
     public func bufferState() -> BufferState { bufferStateSnapshot() }
@@ -403,9 +428,10 @@ public actor SegmentPrefetchScheduler {
             : configuration.maxConcurrentFetches
         let limit = min(configuration.maxConcurrentFetches, segmentAllowance)
         while items.count < limit, nextPrefetchIndex < combinedItems.count {
-            let item = combinedItems[nextPrefetchIndex]
+            let index = nextPrefetchIndex
+            let item = combinedItems[index]
             nextPrefetchIndex += 1
-            if !isReady(item) { items.append(item) }
+            if !isConsumed(at: index), !isReady(item) { items.append(item) }
         }
         return items
     }
@@ -443,6 +469,8 @@ public actor SegmentPrefetchScheduler {
     }
 
     private func handlePrefetchHit(for item: PrefetchItem) {
+        // Playback can advance while a fetch is suspended.
+        if let index = combinedItems.firstIndex(where: { $0.key == item.key }), isConsumed(at: index) { return }
         switch item {
         case .segment(let segment): updateReady(segment)
         case .part(let part): updateReady(part)
@@ -472,11 +500,19 @@ public actor SegmentPrefetchScheduler {
             }
             return complete + playlist.trailingParts.map(PrefetchItem.part)
         }
-        return flatten(playlist) + upcomingPlaylists.flatMap(flatten)
+        let primary = flatten(playlist)
+        primaryItemCount = primary.count
+        return primary + upcomingPlaylists.flatMap(flatten)
     }
 
     private func reconcilePrefetchIndex() {
-        nextPrefetchIndex = combinedItems.firstIndex(where: { !isReady($0) }) ?? combinedItems.endIndex
+        nextPrefetchIndex = combinedItems.indices.first(where: { !isConsumed(at: $0) && !isReady(combinedItems[$0]) })
+            ?? combinedItems.endIndex
+    }
+
+    private func isConsumed(at index: Int) -> Bool {
+        guard index < primaryItemCount, let lastConsumedSequence else { return false }
+        return combinedItems[index].sequence <= lastConsumedSequence
     }
 
     private func clearParts(for sequence: Int) -> Bool {
