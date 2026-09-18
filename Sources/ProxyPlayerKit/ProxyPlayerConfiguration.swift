@@ -2,6 +2,15 @@ import Foundation
 import HLSCore
 
 public struct ProxyPlayerConfiguration: Sendable, Equatable {
+    /// Narrow fast path: all other settings, including future stored properties,
+    /// must compare equal before bypassing their configuration application.
+    func changesOnlyPrefetchDepth(from previous: Self) -> Bool {
+        guard bufferPolicy.maxPrefetchSegments != previous.bufferPolicy.maxPrefetchSegments else { return false }
+        var normalized = self
+        normalized.bufferPolicy.maxPrefetchSegments = previous.bufferPolicy.maxPrefetchSegments
+        return normalized == previous
+    }
+
     /// Opinionated starting points. Tune the returned value using production telemetry.
     public enum Preset: String, CaseIterable, Sendable {
         case lowBandwidth

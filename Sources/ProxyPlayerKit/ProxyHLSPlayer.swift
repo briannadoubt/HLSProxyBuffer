@@ -657,8 +657,9 @@ public final class ProxyHLSPlayer {
         let task = Task { @MainActor [weak self] in
             await previous?.value
             guard let self, self.configuration != configuration else { return }
+            let previousConfiguration = self.configuration
             self.configuration = configuration
-            await self.applyConfiguration()
+            await self.applyConfiguration(previous: previousConfiguration)
         }
         configurationUpdateTask = task
         await task.value
@@ -2108,7 +2109,13 @@ public final class ProxyHLSPlayer {
         )
     }
 
-    private func applyConfiguration() async {
+    private func applyConfiguration(previous: ProxyPlayerConfiguration? = nil) async {
+        // Feed focus commonly changes only depth. Preserve existing telemetry,
+        // cache, retry, session, and ABR state instead of reapplying their settings.
+        if let previous, configuration.changesOnlyPrefetchDepth(from: previous) {
+            await applySchedulerConfiguration()
+            return
+        }
         if appliedNetworkPolicy != configuration.networkPolicy {
             let previousSession = manifestSession
             let ownedPreviousSession = ownsOriginSession
@@ -2132,13 +2139,7 @@ public final class ProxyHLSPlayer {
             maximumEntryCount: configuration.cachePolicy.maximumEntryCount
         )
         await segmentFetcher.updateValidationPolicy(configuration.segmentValidation)
-        let partBufferCount = configuration.lowLatencyPolicy.isEnabled ? configuration.lowLatencyPolicy.targetPartBufferCount : 0
-        await scheduler.updateConfiguration(.init(
-            targetBufferSeconds: configuration.bufferPolicy.targetBufferSeconds,
-            maxSegments: configuration.bufferPolicy.maxPrefetchSegments,
-            targetPartCount: partBufferCount,
-            maximumRetryCount: 0
-        ))
+        await applySchedulerConfiguration()
         await playlistRefresher.updateConfiguration(.init(
             refreshInterval: configuration.bufferPolicy.refreshInterval,
             maxBackoffInterval: configuration.bufferPolicy.maxRefreshBackoff
@@ -2156,6 +2157,16 @@ public final class ProxyHLSPlayer {
         await scheduler.onTelemetry(makeTelemetryHandler())
         await throughputEstimator.updateConfiguration(.init(window: configuration.abrPolicy.estimatorWindow))
         await adaptiveController.updatePolicy(Self.abrPolicy(from: configuration))
+    }
+
+    private func applySchedulerConfiguration() async {
+        let partBufferCount = configuration.lowLatencyPolicy.isEnabled ? configuration.lowLatencyPolicy.targetPartBufferCount : 0
+        await scheduler.updateConfiguration(.init(
+            targetBufferSeconds: configuration.bufferPolicy.targetBufferSeconds,
+            maxSegments: configuration.bufferPolicy.maxPrefetchSegments,
+            targetPartCount: partBufferCount,
+            maximumRetryCount: 0
+        ))
     }
 
     private func keyURLResolver(for baseURL: URL) -> HLSRewriteConfiguration.KeyURLResolver? {

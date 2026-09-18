@@ -3,6 +3,28 @@ import XCTest
 @testable import HLSCore
 
 final class ProxyPlayerConfigurationTests: XCTestCase {
+    func testPrefetchDepthFastPathExcludesOtherConfigurationChanges() {
+        let original = ProxyPlayerConfiguration.preset(.videoOnDemand)
+        XCTAssertFalse(original.changesOnlyPrefetchDepth(from: original))
+        var depth = original
+        depth.bufferPolicy.maxPrefetchSegments += 1
+        XCTAssertTrue(depth.changesOnlyPrefetchDepth(from: original))
+        let changes: [(inout ProxyPlayerConfiguration) -> Void] = [
+            { $0.bufferPolicy.targetBufferSeconds += 1 },
+            { $0.bufferPolicy.initialNativeBufferDuration = 2 },
+            { $0.bufferPolicy.refreshInterval += 1 },
+            { $0.cachePolicy.memoryCapacityBytes += 1 },
+            { $0.networkPolicy = .init(requestTimeout: 7, maximumConnectionsPerHost: 2) },
+            { $0.abrPolicy.estimatorWindow += 1 },
+            { $0.allowInsecureManifests.toggle() }
+        ]
+        for change in changes {
+            var mixed = depth
+            change(&mixed)
+            XCTAssertFalse(mixed.changesOnlyPrefetchDepth(from: original))
+        }
+    }
+
     func testInitialNativeBufferDurationAcceptsSystemDefaultAndFiniteNonnegativeHints() throws {
         var configuration = ProxyPlayerConfiguration()
         XCTAssertNil(configuration.bufferPolicy.initialNativeBufferDuration)

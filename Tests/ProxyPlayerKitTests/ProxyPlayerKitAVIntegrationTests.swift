@@ -16,6 +16,34 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         }
     }
 
+    func testPrefetchDepthOnlyChangesPreserveItemAndMediaRoutes() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        defer { origin.stop() }
+        let player = ProxyHLSPlayer(configuration: .init(
+            bufferPolicy: .init(targetBufferSeconds: 6, maxPrefetchSegments: 1, hideUntilBuffered: false),
+            allowInsecureManifests: true
+        ))
+        await player.load(from: origin.fixturePlaylistURL(named: "short-a"))
+        let item = try XCTUnwrap(player.player?.currentItem)
+        let segmentURL = try await firstSegmentURL(for: player)
+        let (expected, _) = try await URLSession.shared.data(from: segmentURL)
+        XCTAssertFalse(expected.isEmpty)
+        for depth in [2, 1, 3, 1] {
+            var configuration = player.configuration
+            configuration.bufferPolicy.maxPrefetchSegments = depth
+            await player.updateConfiguration(configuration)
+            XCTAssertEqual(player.configuration, configuration)
+            XCTAssertTrue(player.player?.currentItem === item)
+            let currentURL = try await firstSegmentURL(for: player)
+            XCTAssertEqual(currentURL, segmentURL)
+            let (actual, _) = try await URLSession.shared.data(from: currentURL)
+            XCTAssertEqual(actual, expected)
+        }
+        await player.stopAndWait()
+        XCTAssertNil(player.player)
+    }
+
     func testInitialNativeBufferHintAppliesToNewItemsWithoutOverwritingVisibilityHints() async throws {
         let origin = try FeedFixtureOrigin()
         try await origin.start()
