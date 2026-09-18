@@ -175,6 +175,8 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var isFeedAudioManaged = false
     @ObservationIgnored private var feedAudioGuard: HLSFeedAudioEligibilityGuard?
     @ObservationIgnored private lazy var server = ProxyServer(router: router)
+    @ObservationIgnored private let serverPool: ProxyServerPool?
+    @ObservationIgnored private var serverLease: ProxyServerLease?
     @ObservationIgnored private let diagnostics: ProxyPlayerDiagnostics
     @ObservationIgnored private let telemetry: HLSStreamingTelemetry
     @ObservationIgnored private let throughputEstimator: ThroughputEstimator
@@ -221,9 +223,11 @@ public final class ProxyHLSPlayer {
         diagnostics: ProxyPlayerDiagnostics = .init(),
         telemetry: HLSStreamingTelemetry = .init(),
         sharedCache: HLSSegmentCache? = nil,
-        originSession: URLSession? = nil
+        originSession: URLSession? = nil,
+        serverPool: ProxyServerPool? = nil
     ) {
         self.configuration = configuration
+        self.serverPool = serverPool
         self.appliedNetworkPolicy = configuration.networkPolicy
         self.ownsOriginSession = originSession == nil
         let originSession = originSession ?? configuration.networkPolicy.makeURLSession()
@@ -568,7 +572,10 @@ public final class ProxyHLSPlayer {
         renditionRefreshTasks.removeAll()
         let scheduler = scheduler
         let playlistRefresher = playlistRefresher
-        let server = server
+        let privateServer = serverPool == nil ? server : nil
+        let retiredLease = serverLease
+        serverLease = nil
+        retiredLease?.close()
         cleanupTask = Task { @MainActor [weak self] in
             if let loadTask { _ = await loadTask.result }
             await scheduler.onBufferStateChange(nil)
@@ -578,7 +585,8 @@ public final class ProxyHLSPlayer {
             await self?.clearResolvedRenditions()
             // Native loading was cancelled and the item detached synchronously.
             // Closing the server cancels any remaining client route requests.
-            server.stop()
+            await retiredLease?.closeAndWait()
+            privateServer?.stop()
         }
         latestKeyStatuses = []
         clipStitchingError = nil
@@ -664,9 +672,7 @@ public final class ProxyHLSPlayer {
     ) async throws {
         try ensureActiveSession(generation)
         didPublishInitialPlaylists = false
-        if server.port == nil {
-            try server.start()
-        }
+        try await startServer(generation: generation)
 
         didPreparePlayerForCurrentLoad = false
         await clearResolvedRenditions()
@@ -792,9 +798,7 @@ public final class ProxyHLSPlayer {
         try ensureActiveSession(generation)
         playsPrimaryMediaPlaylist = false
         didPublishInitialPlaylists = false
-        if server.port == nil {
-            try server.start()
-        }
+        try await startServer(generation: generation)
         let baseURL = try await waitForBaseURL()
 
         var parsedClips: [HLSClip] = []
@@ -2237,8 +2241,26 @@ public final class ProxyHLSPlayer {
         }
     }
 
+    private func startServer(generation: UInt64) async throws {
+        if let serverPool {
+            guard serverLease == nil else { return }
+            let lease = try await serverPool.reserve(router: router)
+            do {
+                try ensureActiveSession(generation)
+            } catch {
+                await lease.closeAndWait()
+                throw error
+            }
+            serverLease = lease
+        } else if server.port == nil {
+            try server.start()
+        }
+    }
+
     private func waitForBaseURL() async throws -> URL {
-        try await server.waitUntilReady(timeout: .seconds(1))
+        if let serverLease { return serverLease.baseURL }
+        guard serverPool == nil else { throw CancellationError() }
+        return try await server.waitUntilReady(timeout: .seconds(1))
     }
 
     private func evaluateABR(bufferState providedState: BufferState?) async {
