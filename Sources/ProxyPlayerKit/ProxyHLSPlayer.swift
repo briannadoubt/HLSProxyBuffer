@@ -534,10 +534,15 @@ public final class ProxyHLSPlayer {
         cleanupTask?.cancel()
         shouldPlayWhenReady = false
         player?.pause()
+        player?.cancelPendingPrerolls()
         player?.currentItem?.cancelPendingSeeks()
+        player?.currentItem?.asset.cancelLoading()
         removePlaybackTimeObserver()
         feedAudioGuard?.stop()
         feedAudioGuard = nil
+        // External owners can retain the native player after stop. Detach its
+        // item before closing routes instead of relying on a timed grace period.
+        player?.replaceCurrentItem(with: nil)
         player = nil
         mediaSelectionTask?.cancel()
         mediaSelectionTask = nil
@@ -563,9 +568,8 @@ public final class ProxyHLSPlayer {
             await scheduler.stop()
             await playlistRefresher.stop()
             await self?.clearResolvedRenditions()
-            // AVFoundation can finish media-selection requests after the item is
-            // released. Keep loopback alive briefly so those reads drain cleanly.
-            try? await Task.sleep(nanoseconds: 50_000_000)
+            // Native loading was cancelled and the item detached synchronously.
+            // Closing the server cancels any remaining client route requests.
             server.stop()
         }
         latestKeyStatuses = []

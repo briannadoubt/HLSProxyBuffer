@@ -70,6 +70,35 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         await player.stopAndWait()
     }
 
+    func testStopDetachesRetainedNativePlayerAcrossRepeatedReloads() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        defer { origin.stop() }
+        let player = ProxyHLSPlayer(configuration: .init(
+            bufferPolicy: .init(targetBufferSeconds: 1, maxPrefetchSegments: 1, hideUntilBuffered: false),
+            allowInsecureManifests: true
+        ))
+        for name in ["short-a", "short-b", "short-a"] {
+            await player.load(from: origin.fixturePlaylistURL(named: name))
+            let native = try XCTUnwrap(player.player)
+            let item = try XCTUnwrap(native.currentItem)
+            player.play()
+            // Start the same asynchronous media-selection work that can outlive
+            // a released item. Stopping may cancel it or race with completion.
+            let asset = item.asset
+            let selection = Task.detached {
+                _ = try await asset.loadMediaSelectionGroup(for: .audible)
+            }
+            await player.stopAndWait()
+            XCTAssertNil(native.currentItem)
+            XCTAssertEqual(native.rate, 0)
+            XCTAssertNil(player.player)
+            XCTAssertNil(player.playlistURL())
+            XCTAssertEqual(player.status, .idle)
+            _ = await selection.result
+        }
+    }
+
     func testFinalizedVODRemainsAvailableAfterPolicyChangesAndReload() async throws {
         let origin = try FeedFixtureOrigin()
         try await origin.start()
