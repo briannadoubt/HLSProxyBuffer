@@ -164,6 +164,7 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var manifestSession: URLSession
     @ObservationIgnored private var appliedNetworkPolicy: HLSOriginNetworkPolicy
     @ObservationIgnored private var currentPlaylist: MediaPlaylist?
+    @ObservationIgnored private var publishedImmutablePrimaryPlaylist: MediaPlaylist?
     @ObservationIgnored private var currentLiveWindow: HLSLiveWindow?
     @ObservationIgnored private var currentRewriteConfiguration: HLSRewriteConfiguration?
     @ObservationIgnored private var didPreparePlayerForCurrentLoad = false
@@ -1178,6 +1179,7 @@ public final class ProxyHLSPlayer {
     }
 
     private func clearResolvedRenditions() async {
+        publishedImmutablePrimaryPlaylist = nil
         for info in resolvedVODVariants {
             await segmentCatalog.removeEntries(for: info.namespace)
             await playlistStore.remove(info.playlistIdentifier)
@@ -1902,12 +1904,24 @@ public final class ProxyHLSPlayer {
             let config = currentRewriteConfiguration
         else { return }
 
+        // A finalized full-segment VOD has identical output for every buffer
+        // state. Keep its published bytes instead of hashing/rebuilding the
+        // entire manifest on each prefetch completion and playback boundary.
+        // LL-HLS parts and mutable timelines still follow the normal rewrite.
+        let immutable = playlist.isEndlist && playlist.playlistType == "VOD"
+            && playlist.trailingParts.isEmpty && playlist.segments.allSatisfy { $0.parts.isEmpty }
+        if immutable, publishedImmutablePrimaryPlaylist == playlist { return }
+        let generation = sessionGeneration
+
         let playlistText = await manifestProcessor.rewrite(
             mediaPlaylist: playlist,
             config: config,
             bufferState: bufferState
         )
+        guard generation == sessionGeneration else { return }
         await playlistStore.update(playlistText, for: PlaylistStore.Identifier.primaryVariant)
+        guard generation == sessionGeneration else { return }
+        publishedImmutablePrimaryPlaylist = immutable ? playlist : nil
     }
 
     private func handleBufferStateChange(_ bufferState: BufferState, generation: UInt64) async {

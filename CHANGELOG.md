@@ -7,6 +7,8 @@ there is no separate runtime version constant to keep in sync.
 
 ## Unreleased
 
+- Reuse published full-segment finalized VOD playlists across buffer-state changes; invalidate on load changes and keep mutable/partial playlists dynamic.
+
 - Keep policy/playlist refreshes from prefetching already-consumed primary media.
 - Add `SegmentPrefetchScheduler.reposition(to:)` to rebuild a forward window after
   seeks while retaining cached bytes and rechecking cache residency.

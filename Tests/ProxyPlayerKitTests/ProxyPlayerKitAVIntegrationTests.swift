@@ -70,6 +70,36 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         await player.stopAndWait()
     }
 
+    func testFinalizedVODRemainsAvailableAfterPolicyChangesAndReload() async throws {
+        let origin = try FeedFixtureOrigin()
+        try await origin.start()
+        defer { origin.stop() }
+        let player = ProxyHLSPlayer(configuration: .init(
+            bufferPolicy: .init(targetBufferSeconds: 1, maxPrefetchSegments: 1, hideUntilBuffered: false),
+            allowInsecureManifests: true
+        ))
+        await player.load(from: origin.fixturePlaylistURL(named: "short-a"))
+        let firstURL = try await firstSegmentURL(for: player)
+        let (firstData, _) = try await URLSession.shared.data(from: firstURL)
+        XCTAssertFalse(firstData.isEmpty)
+        var configuration = player.configuration
+        configuration.bufferPolicy.maxPrefetchSegments = 3
+        await player.updateConfiguration(configuration)
+        let retainedURL = try await firstSegmentURL(for: player)
+        XCTAssertEqual(retainedURL, firstURL)
+        let (retainedData, _) = try await URLSession.shared.data(from: retainedURL)
+        XCTAssertEqual(retainedData, firstData)
+
+        // The publication shortcut must never reuse the previous load's manifest.
+        await player.load(from: origin.fixturePlaylistURL(named: "short-b"))
+        let nextURL = try await firstSegmentURL(for: player)
+        XCTAssertNotEqual(nextURL, firstURL)
+        let (nextData, _) = try await URLSession.shared.data(from: nextURL)
+        XCTAssertFalse(nextData.isEmpty)
+        XCTAssertNotEqual(nextData, firstData)
+        await player.stopAndWait()
+    }
+
     func testOnePlayerHandsOffBetweenVODAndLiveAndClearsDVRState() async throws {
         let vodOrigin = try MockOriginServer(segmentCount: 3, segmentDuration: 1)
         let liveOrigin = try MockOriginServer(

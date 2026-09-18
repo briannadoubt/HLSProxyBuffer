@@ -39,3 +39,18 @@ or an assertion of an end-user speedup. Default TCP behavior is unchanged.
 
 Performance conclusions require replaying the same rendered workload before and
 after this fix; scheduler correctness tests alone do not establish a latency win.
+
+## Finalized VOD publication reuse
+
+A full-segment playlist explicitly marked VOD and ENDLIST has identical rewritten
+bytes across prefetch and playback states. The player now retains the last
+published playlist model and skips reconstructing/hashing that manifest when only
+buffer state changes. The retained publication is invalidated at load/rendition
+cleanup. Mutable timelines and playlists containing parts continue to rewrite.
+A generation check prevents an old rewrite from updating publication bookkeeping
+for a newer load. Integration coverage verifies segment availability after policy
+changes and replacement with the correct content on the next load.
+
+This removes redundant work by construction; it is not a claim that the remaining
+player readiness or CPU regressions are resolved. Device profiling and paired
+playback measurements are still required.
