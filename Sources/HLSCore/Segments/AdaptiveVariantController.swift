@@ -161,7 +161,10 @@ public actor AdaptiveVariantController {
             return makeSwitchDecision(target: target, reason: .consecutiveFailures, now: now)
         }
 
-        if hasEstablishedBufferWindow,
+        // The scheduler window is not AVPlayer's native VOD playback buffer.
+        // Seeking or changing renditions can empty it while playback is healthy.
+        if adaptationMode == .rewrittenPlaylist,
+           hasEstablishedBufferWindow,
            bufferState.prefetchDepthSeconds <= 0.1,
            let target = lowerVariant {
             return makeSwitchDecision(target: target, reason: .bufferDepleted, now: now)

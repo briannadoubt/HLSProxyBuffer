@@ -204,4 +204,30 @@ final class AdaptiveVariantControllerTests: XCTestCase {
         }
     }
 
+    func testNativeVariantsDoNotConfusePrefetchDepletionWithPlaybackDepletion() async {
+        let low = makeVariant(name: "low", bandwidth: 500_000)
+        let high = makeVariant(name: "high", bandwidth: 2_000_000)
+        let controller = AdaptiveVariantController()
+        await controller.updateVariants([low, high])
+        _ = await controller.evaluate(
+            currentVariant: high, qualityPolicy: .automatic,
+            throughputSample: makeSample(10_000_000),
+            bufferState: makeBufferState(seconds: 10), adaptationMode: .nativeVariants
+        )
+        let decision = await controller.evaluate(
+            currentVariant: high, qualityPolicy: .automatic,
+            throughputSample: makeSample(10_000_000),
+            bufferState: makeBufferState(seconds: 0), adaptationMode: .nativeVariants
+        )
+        XCTAssertEqual(decision.action, .hold)
+        XCTAssertEqual(decision.targetVariant, high)
+        let constrained = await controller.evaluate(
+            currentVariant: high, qualityPolicy: .automatic,
+            throughputSample: makeSample(400_000),
+            bufferState: makeBufferState(seconds: 0), adaptationMode: .nativeVariants
+        )
+        XCTAssertEqual(constrained.action, .switchVariant)
+        XCTAssertEqual(constrained.targetVariant, low)
+    }
+
 }

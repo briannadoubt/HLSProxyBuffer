@@ -878,12 +878,24 @@ public final class ProxyHLSPlayer {
         }
     }
 
+    private func nativeVODBitrateCeiling(for variant: VariantPlaylist?) -> Double {
+        guard let bandwidth = variant?.attributes.bandwidth, bandwidth > 0 else { return 0 }
+        // Once origin capacity admits every published rendition, the ladder
+        // itself is the upper bound. Avoid putting the top rendition exactly
+        // on a nominal peak cap that AVFoundation may interpret conservatively.
+        let allPublishedVariantsFit = resolvedVODVariants.allSatisfy {
+            guard let candidate = $0.variant.attributes.bandwidth else { return false }
+            return candidate <= bandwidth
+        }
+        return allPublishedVariantsFit ? 0 : Double(bandwidth)
+    }
+
     private func preparePlayer(with url: URL) {
         removePlaybackTimeObserver()
         rebuildPlaybackTimeline()
         let item = AVPlayerItem(url: url)
         if !resolvedVODVariants.isEmpty {
-            item.preferredPeakBitRate = Double(activeVariant?.attributes.bandwidth ?? 0)
+            item.preferredPeakBitRate = nativeVODBitrateCeiling(for: activeVariant)
         }
         if let existing = player {
             existing.replaceCurrentItem(with: item)
@@ -2284,7 +2296,7 @@ public final class ProxyHLSPlayer {
             let alignedPlaylist = align(playlist: playlist, to: referenceState)
             activeVariant = variant
             if published != nil {
-                player?.currentItem?.preferredPeakBitRate = Double(variant.attributes.bandwidth ?? 0)
+                player?.currentItem?.preferredPeakBitRate = nativeVODBitrateCeiling(for: variant)
             }
             updateRenditionSelections(for: variant)
             currentPlaylist = alignedPlaylist
