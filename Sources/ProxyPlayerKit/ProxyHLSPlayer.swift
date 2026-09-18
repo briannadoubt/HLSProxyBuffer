@@ -199,6 +199,8 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var shouldPlayWhenReady = false
     @ObservationIgnored private var mediaSelectionTask: Task<Void, Never>?
     @ObservationIgnored private var initializationTask: Task<Void, Never>?
+    @ObservationIgnored private var configurationUpdateTask: Task<Void, Never>?
+    @ObservationIgnored private var configurationUpdateGeneration: UInt64 = 0
     @ObservationIgnored private var telemetryObservationTask: Task<Void, Never>?
     @ObservationIgnored private var activeLoadTask: Task<Void, Error>?
     @ObservationIgnored private var cleanupTask: Task<Void, Never>?
@@ -621,9 +623,26 @@ public final class ProxyHLSPlayer {
         ))
     }
 
+    /// Applies configuration changes in order. Repeating the current configuration
+    /// after initialization is a no-op; callers still await any earlier update.
     public func updateConfiguration(_ configuration: ProxyPlayerConfiguration) async {
-        self.configuration = configuration
-        await applyConfiguration()
+        if let initializationTask {
+            await initializationTask.value
+            self.initializationTask = nil
+        }
+        if configurationUpdateTask == nil, self.configuration == configuration { return }
+        let previous = configurationUpdateTask
+        configurationUpdateGeneration &+= 1
+        let generation = configurationUpdateGeneration
+        let task = Task { @MainActor [weak self] in
+            await previous?.value
+            guard let self, self.configuration != configuration else { return }
+            self.configuration = configuration
+            await self.applyConfiguration()
+        }
+        configurationUpdateTask = task
+        await task.value
+        if configurationUpdateGeneration == generation { configurationUpdateTask = nil }
     }
 
     private func performLoad(

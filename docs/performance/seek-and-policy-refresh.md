@@ -64,3 +64,10 @@ attribute. The public master endpoint remains available for existing clients.
 Actual master inputs, alternate renditions, encryption, live streams, and stitched
 clips continue through the master route. Reload coverage checks both direct-media
 selection and return to master routing for live content.
+
+Configuration updates now await initialization and serialize changed configurations.
+Repeated identical configurations become no-ops after earlier updates complete,
+avoiding unnecessary actor hops, scheduler refreshes, and cache-policy updates on
+retained-player transitions. This preserves update completion ordering and does
+not force AVPlayer playback or disable native stall avoidance. Device latency
+benefit remains subject to measurement.

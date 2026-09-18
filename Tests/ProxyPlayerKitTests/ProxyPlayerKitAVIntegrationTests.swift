@@ -78,7 +78,10 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
             bufferPolicy: .init(targetBufferSeconds: 1, maxPrefetchSegments: 1, hideUntilBuffered: false),
             allowInsecureManifests: true
         ))
+        // Identical updates must await initialization without preventing the first load.
+        await player.updateConfiguration(player.configuration)
         await player.load(from: origin.fixturePlaylistURL(named: "short-a"))
+        let firstItem = try XCTUnwrap(player.player?.currentItem)
         let firstAsset = try XCTUnwrap(player.player?.currentItem?.asset as? AVURLAsset)
         XCTAssertEqual(firstAsset.url.path, "/variants/main.m3u8")
         let (mediaData, _) = try await URLSession.shared.data(from: firstAsset.url)
@@ -91,6 +94,9 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         var configuration = player.configuration
         configuration.bufferPolicy.maxPrefetchSegments = 3
         await player.updateConfiguration(configuration)
+        await player.updateConfiguration(configuration)
+        XCTAssertTrue(player.player?.currentItem === firstItem)
+        XCTAssertEqual(player.configuration, configuration)
         let retainedURL = try await firstSegmentURL(for: player)
         XCTAssertEqual(retainedURL, firstURL)
         let (retainedData, _) = try await URLSession.shared.data(from: retainedURL)
