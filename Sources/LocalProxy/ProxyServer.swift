@@ -37,7 +37,8 @@ public final class ProxyServer: Sendable {
     private struct ListenerState {
         var listener: NWListener?
         var port: UInt16?
-        var error: NWError?
+        var error: (any Error)?
+        var readyWaiters: [UUID: CheckedContinuation<URL, any Error>] = [:]
     }
     private struct Client {
         let connection: NWConnection
@@ -71,16 +72,34 @@ public final class ProxyServer: Sendable {
         router.freeze()
         newListener.stateUpdateHandler = { [weak self, weak newListener] update in
             guard let self, let newListener else { return }
-            listener.withLock { state in
-                guard state.listener === newListener else { return }
+            let completion = listener.withLock { state -> ([CheckedContinuation<URL, any Error>], Result<URL, any Error>)? in
+                guard state.listener === newListener else { return nil }
                 switch update {
-                case .ready: state.port = newListener.port?.rawValue
+                case .ready:
+                    state.port = newListener.port?.rawValue
+                    state.error = nil
                 case .failed(let error), .waiting(let error):
                     state.port = nil
                     state.error = error
-                case .cancelled: state.port = nil
-                default: break
+                case .cancelled:
+                    state.port = nil
+                    state.error = CancellationError()
+                default: return nil
                 }
+                let result: Result<URL, any Error>
+                if let error = state.error {
+                    result = .failure(error)
+                } else if let port = state.port, let url = URL(string: "http://127.0.0.1:\(port)") {
+                    result = .success(url)
+                } else {
+                    return nil
+                }
+                let waiters = Array(state.readyWaiters.values)
+                state.readyWaiters.removeAll()
+                return (waiters, result)
+            }
+            if let (waiters, result) = completion {
+                for waiter in waiters { waiter.resume(with: result) }
             }
         }
         newListener.newConnectionHandler = { [weak self] connection in
@@ -96,32 +115,72 @@ public final class ProxyServer: Sendable {
     /// A caller can explicitly fall back to another origin without mistaking a
     /// configured but unbound port for a running server.
     public func startAndWait(timeout: Duration = .seconds(2)) async throws -> URL {
+        try Task.checkCancellation()
         try start()
         do {
-            let clock = ContinuousClock()
-            let deadline = clock.now.advanced(by: timeout)
-            while clock.now < deadline {
-                try Task.checkCancellation()
-#if canImport(Network)
-                if let error = listener.withLock({ $0.error }) { throw error }
-#endif
-                if let baseURL { return baseURL }
-                try await clock.sleep(for: .milliseconds(10))
-            }
-            throw ProxyServerError.startupTimedOut
+            return try await waitUntilReady(timeout: timeout)
         } catch {
             stop()
             throw error
         }
     }
 
+    /// Waits for a previously started listener without polling. Cancelling a
+    /// waiter leaves the listener and other callers intact; stop cancels them all.
+    public func waitUntilReady(timeout: Duration = .seconds(2)) async throws -> URL {
+        try Task.checkCancellation()
+        guard timeout > .zero else { throw ProxyServerError.startupTimedOut }
+#if canImport(Network)
+        if let baseURL { return baseURL }
+        return try await withThrowingTaskGroup(of: URL.self) { group in
+            defer { group.cancelAll() }
+            group.addTask { try await self.awaitBoundURL() }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw ProxyServerError.startupTimedOut
+            }
+            guard let url = try await group.next() else { throw CancellationError() }
+            return url
+        }
+#else
+        throw ProxyServerError.networkingUnavailable
+#endif
+    }
+
+#if canImport(Network)
+    private func awaitBoundURL() async throws -> URL {
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let immediate = listener.withLock { state -> Result<URL, any Error>? in
+                    // Cancellation can arrive before the continuation is registered.
+                    guard !Task.isCancelled, state.listener != nil else {
+                        return .failure(CancellationError())
+                    }
+                    if let error = state.error { return .failure(error) }
+                    if let port = state.port, let url = URL(string: "http://127.0.0.1:\(port)") {
+                        return .success(url)
+                    }
+                    state.readyWaiters[id] = continuation
+                    return nil
+                }
+                if let immediate { continuation.resume(with: immediate) }
+            }
+        } onCancel: {
+            let waiter = self.listener.withLock { $0.readyWaiters.removeValue(forKey: id) }
+            waiter?.resume(throwing: CancellationError())
+        }
+    }
+#endif
+
     public func stop() {
 #if canImport(Network)
         let current = listener.withLock { state in
             defer { state = ListenerState() }
-            return state.listener
+            return (state.listener, Array(state.readyWaiters.values))
         }
-        current?.cancel()
+        for waiter in current.1 { waiter.resume(throwing: CancellationError()) }
+        current.0?.cancel()
         let active = clients.withLock { value in
             defer { value.removeAll() }
             return Array(value.values)

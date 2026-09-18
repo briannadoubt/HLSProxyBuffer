@@ -2227,13 +2227,7 @@ public final class ProxyHLSPlayer {
     }
 
     private func waitForBaseURL() async throws -> URL {
-        for _ in 0..<50 {
-            if let url = server.baseURL, server.port != 0 {
-                return url
-            }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-        throw URLError(.cannotFindHost)
+        try await server.waitUntilReady(timeout: .seconds(1))
     }
 
     private func evaluateABR(bufferState providedState: BufferState?) async {
