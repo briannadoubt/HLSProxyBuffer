@@ -15,5 +15,9 @@ and verifies both remain exposed for selection.
 
 This removes unnecessary requests for these workloads. It does not establish
 CPU or energy gains, and does not resolve the separate synthetic feed CPU gap.
-Supplemental/rendition-report playlists use a separate refresh path and require
-independent end-state tracking and regression coverage.
+Supplemental/rendition-report playlists now track ENDLIST separately and stop
+their refresh tasks as well. The I-frame fixture independently reproduced four
+requests instead of one before that fix. Initially-ended and live-to-ended tests
+cover audio, subtitles and I-frame playlists. A repeated-load test verifies an
+ended session does not suppress live refresh in the next session. Report-path
+state clears during rendition teardown.

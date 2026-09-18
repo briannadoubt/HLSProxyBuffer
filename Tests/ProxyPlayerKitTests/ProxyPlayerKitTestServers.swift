@@ -267,7 +267,7 @@ final class AdaptiveMockOriginServer: @unchecked Sendable {
         case "/low.m3u8":
             return HTTPResponse.text(variantManifest(prefix: "low"), contentType: "application/x-mpegURL").encoded()
         case "/iframe.m3u8" where includeSupplementalResources:
-            return HTTPResponse.text(iframeManifest, contentType: "application/x-mpegURL").encoded()
+            return HTTPResponse.text(alternateManifest(iframeManifest, path: "/iframe.m3u8"), contentType: "application/x-mpegURL").encoded()
         case "/metadata.json" where includeSupplementalResources:
             return HTTPResponse(
                 status: .ok,

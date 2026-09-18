@@ -188,6 +188,7 @@ public final class ProxyHLSPlayer {
     @ObservationIgnored private var resolvedRenditions: [String: ResolvedRenditionInfo] = [:]
     @ObservationIgnored private var orderedRenditionInfos: [ResolvedRenditionInfo] = []
     @ObservationIgnored private var renditionPlaylists: [String: MediaPlaylist] = [:]
+    @ObservationIgnored private var endedReportPlaylists: Set<String> = []
     @ObservationIgnored private var resolvedRenditionReports: [ResolvedRenditionReport] = []
     @ObservationIgnored private var resolvedSupplementalPlaylists: [ResolvedRenditionReport] = []
     @ObservationIgnored private var resolvedVODVariants: [ResolvedVODVariant] = []
@@ -1262,6 +1263,7 @@ public final class ProxyHLSPlayer {
             await segmentCatalog.removeEntries(for: playlist.namespace)
             await playlistStore.remove(playlist.playlistIdentifier)
         }
+        endedReportPlaylists.removeAll()
         resolvedRenditionReports.removeAll()
         resolvedSupplementalPlaylists.removeAll()
         orderedRenditionInfos.removeAll()
@@ -1568,6 +1570,11 @@ public final class ProxyHLSPlayer {
                 namespace: info.namespace
             )
             await playlistStore.update(rewritten, for: info.playlistIdentifier)
+            if playlist.isEndlist {
+                endedReportPlaylists.insert(info.playlistIdentifier)
+            } else {
+                endedReportPlaylists.remove(info.playlistIdentifier)
+            }
             return true
         } catch {
             logger.log("Failed to resolve rendition report: \(error)", category: .player)
@@ -1633,6 +1640,7 @@ public final class ProxyHLSPlayer {
             }
         }
         for report in resolvedRenditionReports + resolvedSupplementalPlaylists {
+            guard !endedReportPlaylists.contains(report.playlistIdentifier) else { continue }
             renditionRefreshTasks[report.playlistIdentifier] = Task { @MainActor [weak self] in
                 while !Task.isCancelled {
                     do {
@@ -1641,7 +1649,9 @@ public final class ProxyHLSPlayer {
                         return
                     }
                     guard let self, generation == self.sessionGeneration else { return }
+                    guard !self.endedReportPlaylists.contains(report.playlistIdentifier) else { return }
                     _ = await self.fetchRenditionReport(report, config: config)
+                    if self.endedReportPlaylists.contains(report.playlistIdentifier) { return }
                 }
             }
         }

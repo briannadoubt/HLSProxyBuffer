@@ -562,9 +562,33 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         try await assertAlternateRefreshStops(endAfter: 3)
     }
 
+    func testEndedPlaylistStateDoesNotSuppressRefreshAfterReload() async throws {
+        let player = ProxyHLSPlayer(configuration: .init(
+            bufferPolicy: .init(targetBufferSeconds: 2, maxPrefetchSegments: 2,
+                                hideUntilBuffered: false, refreshInterval: 0.5),
+            allowInsecureManifests: true
+        ))
+        for endAfter in [1, 3] {
+            let origin = AdaptiveMockOriginServer(
+                includeAlternateRenditions: true, alternateEndAfterRequests: endAfter,
+                includeSupplementalResources: true
+            )
+            try await origin.start()
+            await player.load(from: origin.manifestURL, quality: .automatic)
+            try await Task.sleep(for: .seconds(Double(endAfter) * 0.5 + 1.5))
+            let counts = origin.alternateRequestCounts()
+            for path in ["/audio-en.m3u8", "/subs-en.m3u8", "/iframe.m3u8"] {
+                XCTAssertEqual(counts[path], endAfter, path)
+            }
+            await player.stopAndWait()
+            origin.stop()
+        }
+    }
+
     private func assertAlternateRefreshStops(endAfter: Int) async throws {
         let origin = AdaptiveMockOriginServer(
-            includeAlternateRenditions: true, alternateEndAfterRequests: endAfter
+            includeAlternateRenditions: true, alternateEndAfterRequests: endAfter,
+            includeSupplementalResources: true
         )
         try await origin.start()
         defer { origin.stop() }
@@ -579,6 +603,7 @@ final class ProxyPlayerKitAVIntegrationTests: XCTestCase {
         let counts = origin.alternateRequestCounts()
         XCTAssertEqual(counts["/audio-en.m3u8"], endAfter)
         XCTAssertEqual(counts["/subs-en.m3u8"], endAfter)
+        XCTAssertEqual(counts["/iframe.m3u8"], endAfter)
         XCTAssertEqual(player.audioRenditions.count, 1)
         XCTAssertEqual(player.subtitleRenditions.count, 1)
         await player.stopAndWait()
