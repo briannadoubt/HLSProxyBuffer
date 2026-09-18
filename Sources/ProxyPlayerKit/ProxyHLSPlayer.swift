@@ -768,6 +768,7 @@ public final class ProxyHLSPlayer {
         try ensureActiveSession(generation)
         didPublishInitialPlaylists = true
         await updatePlaybackState(with: await scheduler.bufferState(), generation: generation)
+        await evaluateABR(bufferState: nil)
         await startPlaylistRefresh(at: playlistResult.url, generation: generation)
         startRenditionRefresh(generation: generation, config: rewriteConfiguration)
     }
@@ -2222,6 +2223,7 @@ public final class ProxyHLSPlayer {
     private func evaluateABR(bufferState providedState: BufferState?) async {
         guard
             configuration.abrPolicy.isEnabled,
+            didPublishInitialPlaylists,
             let rewriteConfiguration = currentRewriteConfiguration,
             case .automatic = rewriteConfiguration.qualityPolicy,
             variants.count > 1,
@@ -2243,7 +2245,8 @@ public final class ProxyHLSPlayer {
             currentVariant: currentVariant,
             qualityPolicy: rewriteConfiguration.qualityPolicy,
             throughputSample: throughputSample,
-            bufferState: state
+            bufferState: state,
+            adaptationMode: resolvedVODVariants.isEmpty ? .rewrittenPlaylist : .nativeVariants
         )
 
         if decision.action == .switchVariant,
