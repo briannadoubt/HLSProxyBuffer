@@ -103,6 +103,30 @@ final class ProxyPlayerKitObservationTests: XCTestCase {
         await player.stopAndWait()
     }
 
+    func testRefreshCreatesOwnedSessionOnDemandAndRestartsAfterPolicyChange() async throws {
+        let origin = try MockOriginServer(isLive: true)
+        try await origin.start()
+        defer { origin.stop() }
+        let controller = PlaylistRefreshController(configuration: .init(refreshInterval: 1))
+        for timeout in [7.0, 9.0] {
+            await controller.updateNetworkPolicy(.init(requestTimeout: timeout))
+            let refreshed = expectation(description: "origin refresh under updated policy")
+            await controller.start(
+                url: origin.manifestURL, allowInsecure: true,
+                retryPolicy: .init(maxAttempts: 1, retryDelay: 0),
+                onUpdate: { playlist in
+                    XCTAssertFalse(playlist.segments.isEmpty)
+                    refreshed.fulfill()
+                }
+            )
+            await fulfillment(of: [refreshed], timeout: 3)
+            await controller.stop()
+            let metrics = await controller.metrics()
+            XCTAssertNotNil(metrics.lastRefreshDate)
+            XCTAssertEqual(metrics.consecutiveFailures, 0)
+        }
+    }
+
     func testMasterPreservesCaptionSentinelAndNamedGroups() async throws {
         for (group, declared) in [("NONE", false), ("cc-main", true), ("NONE", true)] {
             let origin = AdaptiveMockOriginServer(
